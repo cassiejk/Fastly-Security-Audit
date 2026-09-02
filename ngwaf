@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="10.0"
+VERSION="11.0"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -1474,10 +1474,13 @@ cmd_attack_profile() {
 
 cmd_attack_origins() {
   local format=""
-  local cid customer workspaces_body report_body matched_body
-  local workspace_ids workspace_total workspace_returned
-  local span_days="" source_summary attack_total returned_source_total source_coverage
-  local top_five_total top_five_share other_total other_share
+  local cid customer workspaces_body workspace_total workspace_returned
+  local span_days="" workspace_count attack_ts attack_total
+  local tmp rows source_summary returned_source_total source_coverage
+  local top_five_total top_five_share returned_top_five_share other_total other_share
+  local workspace_id workspace_name body
+  local workspace_index=0
+  local top_limit=100
 
   if [[ "${!#:-}" == "--json" ]]; then
     format="--json"
@@ -1528,10 +1531,9 @@ cmd_attack_origins() {
   cid="$(current_cid)"
   customer="$(get "/customer/$cid" | jq -r '.name')"
 
-  # The reports endpoint itself is account-scoped and does not document a
-  # customer_id parameter. Resolve the selected customer's workspace IDs first
-  # and filter the report to those IDs so a globally scoped token cannot
-  # accidentally mix customers.
+  # Resolve the selected customer's workspace set FIRST. Every top-attacks
+  # request below is made directly against one of these workspace IDs, which
+  # avoids relying on the ambiguous account-level reports/attacks response.
   workspaces_body="$(
     get "/ngwaf/v1/workspaces" \
       --data-urlencode "customer_id=$cid" \
@@ -1543,74 +1545,98 @@ cmd_attack_origins() {
   if (( workspace_total > workspace_returned )); then
     die "selected customer has $workspace_total workspaces but only $workspace_returned were returned; pagination is required before attack-origins can be trusted"
   fi
+  workspace_count="$workspace_returned"
 
-  workspace_ids="$(jq '[.data[].id]' <<<"$workspaces_body")"
-
-  report_body="$(
-    get "/ngwaf/v1/reports/attacks" \
+  # requests_attack is used as an independent denominator/reconciliation check.
+  # Country rows come from each workspace's top-attacks aggregation.
+  attack_ts="$(
+    get "/ngwaf/v1/timeseries" \
+      --data-urlencode "customer_id=$cid" \
       --data-urlencode "from=$TS_FROM" \
-      --data-urlencode "to=$TS_TO"
+      --data-urlencode "to=$TS_TO" \
+      --data-urlencode "metrics=requests_attack" \
+      --data-urlencode "dimensions=time" \
+      --data-urlencode "granularity=86400"
   )"
-
-  matched_body="$(
-    jq --argjson ids "$workspace_ids" '
-      [
-        (.data // [])[]
-        | select(.id as $id | $ids | index($id))
-      ]
-    ' <<<"$report_body"
-  )"
-
-  if [[ "$(jq 'length' <<<"$matched_body")" -eq 0 ]]; then
-    die 'attacks report returned no workspaces matching the selected customer; do not use this output for customer-facing data'
-  fi
 
   attack_total="$(
-    jq '[.[].attack_count // 0] | add // 0' <<<"$matched_body"
+    jq '[.data[]? | ((.values[0].requests_attack // 0) | tonumber? // 0)] | add // 0' <<<"$attack_ts"
   )"
+
+  tmp="$(mktemp)"
+  : > "$tmp"
+
+  if [[ "$format" != "--json" ]]; then
+    printf '%s — NGWAF attack request origins\n' "$customer"
+    printf '%s → %s UTC (TO is exclusive; %s days)\n' "$TS_FROM" "$TS_TO" "$span_days"
+    printf 'Scope: selected customer (%s), %s NGWAF workspaces\n' "$cid" "$workspace_count"
+    printf 'Querying per-workspace top-attacks by country...\n\n'
+  fi
+
+  while IFS=$'\t' read -r workspace_id workspace_name; do
+    [[ -n "$workspace_id" ]] || continue
+    workspace_index=$((workspace_index + 1))
+    if [[ "$format" != "--json" ]]; then
+      printf '\r  [%s/%s] %s' "$workspace_index" "$workspace_count" "$workspace_name" >&2
+    fi
+
+    body="$(
+      get "/ngwaf/v1/workspaces/$workspace_id/top-attacks" \
+        --data-urlencode "field=country" \
+        --data-urlencode "from=$TS_FROM" \
+        --data-urlencode "to=$TS_TO" \
+        --data-urlencode "limit=$top_limit"
+    )"
+
+    # Fail closed if Fastly changes the response shape.
+    jq -e '.data | type == "array"' <<<"$body" >/dev/null || {
+      rm -f "$tmp"
+      die "unexpected top-attacks response for workspace $workspace_name ($workspace_id)"
+    }
+
+    jq -c --arg workspace_id "$workspace_id" --arg workspace_name "$workspace_name" '
+      .data[]?
+      | {
+          workspace_id: $workspace_id,
+          workspace: $workspace_name,
+          country_code: (.value // ""),
+          country: (
+            if ((.display_name // "") | length) > 0 then .display_name
+            elif (.value // "") == "private" then "Private Network"
+            elif (.value // "") == "" then "Unknown"
+            else .value
+            end
+          ),
+          requests: ((.count // 0) | tonumber? // 0)
+        }
+    ' <<<"$body" >> "$tmp"
+  done < <(jq -r '.data[] | [.id, .name] | @tsv' <<<"$workspaces_body")
+  if [[ "$format" != "--json" ]]; then
+    printf '\r%*s\r' 100 '' >&2
+  fi
+
+  rows="$(jq -s '.' "$tmp")"
+  rm -f "$tmp"
 
   source_summary="$(
     jq --argjson attack_total "$attack_total" '
-      def num:
-        if . == null then 0
-        elif type == "number" then .
-        else (tonumber? // 0)
-        end;
-
-      [
-        .[] as $w
-        | ($w.top_attack_sources // [])[]
-        | {
-            country_code: (.country_code // ""),
-            country_name: (
-              if ((.country_name // "") | length) > 0 then .country_name
-              elif (.country_code // "") == "private" then "Private Network"
-              elif (.country_code // "") == "" then "Unknown"
-              else .country_code
-              end
-            ),
-            requests: (.request_count | num)
-          }
-      ]
-      | sort_by(.country_code, .country_name)
-      | group_by([.country_code, .country_name])
+      sort_by(.country_code, .country)
+      | group_by([.country_code, .country])
       | map({
           country_code: .[0].country_code,
-          country: .[0].country_name,
-          requests: (map(.requests) | add // 0)
+          country: .[0].country,
+          requests: (map(.requests) | add // 0),
+          workspace_count: (map(.workspace_id) | unique | length)
         })
       | map(. + {
           share_of_attack_requests:
             (if $attack_total > 0 then (.requests / $attack_total) else 0 end)
         })
       | sort_by(-.requests)
-    ' <<<"$matched_body"
+    ' <<<"$rows"
   )"
 
-  returned_source_total="$(
-    jq '[.[].requests] | add // 0' <<<"$source_summary"
-  )"
-
+  returned_source_total="$(jq '[.[].requests] | add // 0' <<<"$source_summary")"
   if (( attack_total > 0 )); then
     source_coverage="$(jq -n --argjson n "$returned_source_total" --argjson d "$attack_total" '$n / $d')"
   else
@@ -1623,10 +1649,14 @@ cmd_attack_origins() {
   else
     top_five_share="0"
   fi
+  if (( returned_source_total > 0 )); then
+    returned_top_five_share="$(jq -n --argjson n "$top_five_total" --argjson d "$returned_source_total" '$n / $d')"
+  else
+    returned_top_five_share="0"
+  fi
 
   other_total=$(( attack_total - top_five_total ))
   (( other_total >= 0 )) || other_total=0
-
   if (( attack_total > 0 )); then
     other_share="$(jq -n --argjson n "$other_total" --argjson d "$attack_total" '$n / $d')"
   else
@@ -1640,13 +1670,14 @@ cmd_attack_origins() {
       --arg from "$TS_FROM" \
       --arg to "$TS_TO" \
       --argjson span_days "$span_days" \
-      --argjson selected_workspace_count "$(jq 'length' <<<"$workspace_ids")" \
-      --argjson matched_workspace_count "$(jq 'length' <<<"$matched_body")" \
+      --argjson workspace_count "$workspace_count" \
+      --argjson per_workspace_limit "$top_limit" \
       --argjson attack_requests "$attack_total" \
       --argjson returned_source_requests "$returned_source_total" \
       --argjson returned_source_coverage "$source_coverage" \
       --argjson top_five_requests "$top_five_total" \
       --argjson top_five_share "$top_five_share" \
+      --argjson top_five_share_of_returned_sources "$returned_top_five_share" \
       --argjson other_requests "$other_total" \
       --argjson other_share "$other_share" \
       --argjson countries "$source_summary" \
@@ -1657,28 +1688,26 @@ cmd_attack_origins() {
         to: $to,
         to_is_exclusive: true,
         span_days: $span_days,
-        selected_workspace_count: $selected_workspace_count,
-        matched_workspace_count: $matched_workspace_count,
-        attack_requests: $attack_requests,
-        returned_top_source_requests: $returned_source_requests,
-        returned_top_source_coverage: $returned_source_coverage,
+        workspace_count: $workspace_count,
+        source: "GET /ngwaf/v1/workspaces/{workspace_id}/top-attacks?field=country",
+        per_workspace_limit: $per_workspace_limit,
+        attack_requests_timeseries: $attack_requests,
+        returned_country_requests: $returned_source_requests,
+        returned_country_coverage_vs_requests_attack: $returned_source_coverage,
         top_five: {
           requests: $top_five_requests,
-          share_of_attack_requests: $top_five_share
+          share_of_attack_requests: $top_five_share,
+          share_of_returned_country_rows: $top_five_share_of_returned_sources
         },
         other_or_unreturned: {
           requests: $other_requests,
           share_of_attack_requests: $other_share
         },
         countries: $countries,
-        methodology: "Aggregate top_attack_sources.request_count across workspaces belonging to the selected customer; divide by summed attack_count. The report may return only top sources per workspace, so named-country counts can be understated when returned-source coverage is below 100%."
+        methodology: "Resolve workspaces from the selected customer ID, query each workspace top-attacks endpoint with field=country, aggregate country counts across those workspaces, and reconcile the returned country counts against customer-scoped requests_attack timeseries."
       }'
     return
   fi
-
-  printf '%s — NGWAF attack request origins\n' "$customer"
-  printf '%s → %s UTC (TO is exclusive; %s days)\n' "$TS_FROM" "$TS_TO" "$span_days"
-  printf 'Scope: selected customer, all matched NGWAF workspaces\n\n'
 
   jq -r '
     def human:
@@ -1690,41 +1719,34 @@ cmd_attack_origins() {
     def pct:
       (((. * 10000) | round) / 100 | tostring) + "%";
 
-    ["COUNTRY", "REQUESTS", "SHARE OF ATTACK REQUESTS"],
+    ["COUNTRY", "REQUESTS", "SHARE OF ATTACK REQUESTS", "WORKSPACES"],
     (
       .[:10][]
-      | [.country, (.requests | human), (.share_of_attack_requests | pct)]
+      | [.country, (.requests | human), (.share_of_attack_requests | pct), (.workspace_count | tostring)]
     )
     | @tsv
   ' <<<"$source_summary" | human_table
 
-  printf '\nTop five combined: %s (%s)\n' \
+  printf '\nTop five combined: %s (%s of requests_attack; %s of returned country counts)\n' \
     "$(jq -n --argjson n "$top_five_total" '
       if $n >= 1000000000 then ((($n / 1000000000) * 100 | round) / 100 | tostring) + "B"
       elif $n >= 1000000 then ((($n / 1000000) * 100 | round) / 100 | tostring) + "M"
       elif $n >= 1000 then ((($n / 1000) * 10 | round) / 10 | tostring) + "K"
       else ($n | tostring) end
     ' -r)" \
-    "$(jq -n --argjson p "$top_five_share" '((($p * 10000) | round) / 100 | tostring) + "%"' -r)"
-
-  printf 'Other / unreturned: %s (%s)\n' \
-    "$(jq -n --argjson n "$other_total" '
-      if $n >= 1000000000 then ((($n / 1000000000) * 100 | round) / 100 | tostring) + "B"
-      elif $n >= 1000000 then ((($n / 1000000) * 100 | round) / 100 | tostring) + "M"
-      elif $n >= 1000 then ((($n / 1000) * 10 | round) / 10 | tostring) + "K"
-      else ($n | tostring) end
-    ' -r)" \
-    "$(jq -n --argjson p "$other_share" '((($p * 10000) | round) / 100 | tostring) + "%"' -r)"
+    "$(jq -n --argjson p "$top_five_share" '((($p * 10000) | round) / 100 | tostring) + "%"' -r)" \
+    "$(jq -n --argjson p "$returned_top_five_share" '((($p * 10000) | round) / 100 | tostring) + "%"' -r)"
 
   printf '\nValidation:\n'
-  printf '  - Selected customer workspaces: %s; matched in attacks report: %s.\n' \
-    "$(jq 'length' <<<"$workspace_ids")" "$(jq 'length' <<<"$matched_body")"
-  printf '  - Total attack-signaled requests (report attack_count): %s.\n' "$attack_total"
-  printf '  - Returned per-workspace top-source rows account for %s of attack requests.\n' \
+  printf '  - Customer: %s (%s).\n' "$customer" "$cid"
+  printf '  - Workspaces queried directly: %s.\n' "$workspace_count"
+  printf '  - Customer-scoped requests_attack timeseries: %s.\n' "$attack_total"
+  printf '  - Country rows returned by top-attacks: %s (%s of requests_attack).\n' \
+    "$returned_source_total" \
     "$(jq -n --argjson p "$source_coverage" '((($p * 10000) | round) / 100 | tostring) + "%"' -r)"
-  printf '  - Country is request origin only; it does not establish attacker identity or intent.\n'
-  printf '  - Country is mutually exclusive per request, but the report may return only top sources for each workspace.\n'
-  printf 'WARNING: Named-country shares can be understated when returned-source coverage is below 100%%. Keep the remainder in "Other / unreturned" and validate coverage before using exact percentages in customer-facing material.\n'
+  printf '  - Country identifies request origin only; it does not establish attacker identity or intent.\n'
+  printf '  - Each workspace query is capped at the top %s country rows; use the coverage figure to detect an incomplete tail.\n' "$top_limit"
+  printf 'WARNING: Do not use exact country shares customer-facing unless returned country coverage reconciles closely with requests_attack. A materially low or >100%% coverage indicates truncation or a metric-semantics mismatch that must be investigated first.\n'
 }
 
 cmd_signal_count() {
@@ -1811,11 +1833,10 @@ Notes:
     31 days are allowed for calendar-month slide validation. It ranks production
     workspaces by requests_attack and sums attack signals across the same top five.
     TO is exclusive.
-  - attack-origins uses the NGWAF attacks report and is limited to 30 days.
-    It filters report rows to workspace IDs belonging to the selected customer,
-    aggregates returned top_attack_sources by country, and reports source-list
-    coverage so truncated per-workspace source lists are not mistaken for a full
-    country histogram.
+  - attack-origins is intentionally limited to 30 days for this workflow. It
+    resolves the selected customer workspace list first, queries each workspace
+    top-attacks endpoint with field=country, aggregates country counts, and
+    reconciles them against customer-scoped requests_attack timeseries.
   - bot-stats uses Fastly Historical Stats for one Fastly service and is
     intentionally limited to a rolling 1-30 day window for this workflow.
   - Exact Bot Management date windows are limited to 31 days so a full
