@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="16.0"
+VERSION="17.0"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -524,36 +524,131 @@ cmd_posture() {
 }
 
 cmd_bot_rules() {
-  [[ $# -eq 1 ]] || die 'usage: ngwaf bot-rules <workspace>'
+  [[ $# -ge 1 && $# -le 2 ]] || die 'usage: ngwaf bot-rules <workspace> [--json]'
 
-  local cid w body
+  local cid w format body matches
   cid="$(current_cid)"
   w="$1"
+  format="${2:-}"
+
+  [[ -z "$format" || "$format" == "--json" ]] ||
+    die 'usage: ngwaf bot-rules <workspace> [--json]'
 
   body="$(
     get_all_pages "$(workspace_path "$w")/rules" \
       --data-urlencode "customer_id=$cid"
   )"
 
-  jq -r '
-    ["ENABLED", "ACTIONS", "DESCRIPTION"],
-    (
-      .data[]
-      | select(
-          ([.conditions[]? | tostring] | join(" "))
-          | test(
-              "VERIFIED-BOT|SUSPECTED-BOT|SUSPECTED-BAD-BOT|DATACENTER";
-              "i"
+  # A bot-related rule can be identified in two independent ways:
+  #   1. It references a Bot Management / client-challenge signal.
+  #   2. It uses a Bot Management-specific action such as browserChallenge
+  #      or verifyToken, even if no bot signal appears in the rule conditions.
+  #
+  # DATACENTER is intentionally included as bot-adjacent evidence, not a bot
+  # verdict. It describes hosting/cloud source infrastructure and can be useful
+  # in bot controls, but must not be interpreted as proof that a request is a bot.
+  matches="$(
+    jq '
+      def bot_signal:
+        test(
+          "^(VERIFIED-BOT(?:\\.[A-Z0-9_-]+)*|SUSPECTED-BOT(?:\\.[A-Z0-9_-]+)*|SUSPECTED-BAD-BOT(?:\\.[A-Z0-9_-]+)*|CHALLENGE-TOKEN-(?:VALID|INVALID)|CLIENTSIDE-COOKIE-VALID)$";
+          "i"
+        );
+
+      def bot_adjacent_signal:
+        test("^DATACENTER$"; "i");
+
+      def normalized_action:
+        tostring | gsub("[^A-Za-z]"; "") | ascii_downcase;
+
+      def bot_action:
+        normalized_action == "browserchallenge" or normalized_action == "verifytoken";
+
+      def scalar_strings:
+        [.. | strings];
+
+      [
+        .data[]
+        | . as $rule
+        | ([
+            ($rule.conditions // []),
+            ($rule.rate_limit // {}),
+            ($rule.actions // [])
+          ] | scalar_strings | unique) as $strings
+        | ($strings | map(select(bot_signal))) as $bot_signals
+        | ($strings | map(select(bot_adjacent_signal))) as $adjacent_signals
+        | ([($rule.actions // [])[]?.type // empty] | map(select(bot_action))) as $bot_actions
+        | select(
+            ($bot_signals | length) > 0
+            or ($adjacent_signals | length) > 0
+            or ($bot_actions | length) > 0
+          )
+        | {
+            id: ($rule.id // ""),
+            enabled: ($rule.enabled // false),
+            actions: [($rule.actions // [])[]?.type // empty],
+            bot_signals: $bot_signals,
+            bot_adjacent_signals: $adjacent_signals,
+            bot_actions: $bot_actions,
+            description: ($rule.description // ""),
+            match_basis: (
+              [
+                (if ($bot_signals | length) > 0 then "bot-signal" else empty end),
+                (if ($bot_actions | length) > 0 then "bot-action" else empty end),
+                (if ($adjacent_signals | length) > 0 then "bot-adjacent" else empty end)
+              ]
             )
-        )
+          }
+      ]
+    ' <<<"$body"
+  )"
+
+  if [[ "$format" == "--json" ]]; then
+    jq -n \
+      --arg workspace "$w" \
+      --argjson total_rules "$(jq '.data | length' <<<"$body")" \
+      --argjson pages_fetched "$(jq '.meta.pages_fetched // 1' <<<"$body")" \
+      --argjson matched_rules "$matches" \
+      '{
+        workspace: $workspace,
+        total_rules_scanned: $total_rules,
+        pages_fetched: $pages_fetched,
+        matched_rules: ($matched_rules | length),
+        rules: $matched_rules,
+        notes: [
+          "Bot signals include VERIFIED-BOT.*, SUSPECTED-BOT.*, SUSPECTED-BAD-BOT.*, CHALLENGE-TOKEN-VALID/INVALID, and CLIENTSIDE-COOKIE-VALID.",
+          "Rules using browserChallenge or verifyToken are included even when no bot signal appears in the rule conditions.",
+          "DATACENTER is included as bot-adjacent evidence only; it is not a bot verdict."
+        ]
+      }'
+    return
+  fi
+
+  printf '%s — bot-related workspace rules\n' "$w"
+  printf 'Scanned %s rules across %s page(s); matched %s.\n\n' \
+    "$(jq '.data | length' <<<"$body")" \
+    "$(jq '.meta.pages_fetched // 1' <<<"$body")" \
+    "$(jq 'length' <<<"$matches")"
+
+  jq -r '
+    ["ENABLED", "ACTIONS", "BOT / CHALLENGE SIGNALS", "BASIS", "DESCRIPTION"],
+    (
+      .[]
       | [
           (.enabled | tostring),
-          ([.actions[]?.type] | join(",")),
-          (.description // "")
+          (.actions | join(",")),
+          ((.bot_signals + .bot_adjacent_signals) | unique | join(",")),
+          (.match_basis | join(",")),
+          .description
         ]
     )
     | @tsv
-  ' <<<"$body" | human_table
+  ' <<<"$matches" | human_table
+
+  printf '\nNotes:\n'
+  printf '  - Bot-signal families include VERIFIED-BOT.*, SUSPECTED-BOT.*, and SUSPECTED-BAD-BOT.*.\n'
+  printf '  - Client-challenge signals/actions include CHALLENGE-TOKEN-VALID/INVALID, CLIENTSIDE-COOKIE-VALID, browserChallenge, and verifyToken.\n'
+  printf '  - DATACENTER is bot-adjacent only; it identifies hosting/cloud infrastructure and is not itself a bot verdict.\n'
 }
 
 cmd_overview() {
@@ -1965,7 +2060,7 @@ Workspace configuration:
   ngwaf posture <workspace>
   ngwaf rules <workspace> [--list|--json]
   ngwaf thresholds <workspace> [--json]
-  ngwaf bot-rules <workspace>
+  ngwaf bot-rules <workspace> [--json]
 
 Recent request search (1-7 days):
   ngwaf count <workspace> '<Fastly Search query>' [days]
@@ -2019,6 +2114,9 @@ Notes:
     calendar month such as Aug 1 -> Sep 1 can be reproduced.
   - intl-bot-stats and intl-bot-types are intentionally scoped to the 11
     international production service names used by the current Costco QBR slide.
+  - bot-rules scans the complete paginated workspace rule set for bot signal
+    families, client-challenge signals/actions, and DATACENTER as bot-adjacent
+    evidence. DATACENTER is not treated as a bot verdict.
   - Bot type classifications can overlap. intl-bot-types reports them side by side
     but does not treat them as mutually exclusive or force them to sum to 100%.
   - Bot Management metrics are sampled and scaled estimates. The script reports
