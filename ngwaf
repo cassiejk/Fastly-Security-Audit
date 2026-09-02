@@ -1,0 +1,1925 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="10.0"
+API_BASE="https://api.fastly.com"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
+CID_FILE="$CONFIG_DIR/customer_id"
+CORE_METRICS="requests_total,requests_attack,requests_total_blocked"
+BOT_HIST_FIELDS="edge_requests,bot_edge_requests_analyzed_count,bot_edge_requests_detected_count,bot_edge_requests_verified_count,bot_edge_requests_headless_count,bot_edge_requests_ai_crawler_count,bot_edge_requests_ai_fetcher_count,bot_edge_requests_search_engine_crawler_count,bot_edge_requests_accessibility_count,bot_edge_requests_content_fetcher_count,bot_edge_requests_monitoring_count,bot_edge_requests_online_marketing_count,bot_edge_requests_page_preview_count,bot_edge_requests_platform_integrations_count,bot_edge_requests_research_count,bot_edge_requests_search_engine_optimization_count,bot_edge_requests_security_tools_count"
+
+die() {
+  printf 'ngwaf: %s\n' "$*" >&2
+  exit 1
+}
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"
+}
+
+require curl
+require jq
+
+case "${1:-help}" in
+  help|-h|--help|version)
+    ;;
+  *)
+    [[ -n "${FASTLY_API_TOKEN:-}" ]] ||
+      die 'FASTLY_API_TOKEN is not set'
+    ;;
+esac
+
+urlencode() {
+  jq -rn --arg v "$1" '$v | @uri'
+}
+
+get() {
+  local path="$1"
+  shift
+
+  local tmp code
+  tmp="$(mktemp)"
+
+  code="$(
+    curl -sS -G \
+      -o "$tmp" \
+      -w '%{http_code}' \
+      -H "Fastly-Key: $FASTLY_API_TOKEN" \
+      -H "Accept: application/json" \
+      "$@" \
+      "$API_BASE$path"
+  )" || {
+    rm -f "$tmp"
+    die "curl request failed"
+  }
+
+  case "$code" in
+    2*)
+      cat "$tmp"
+      ;;
+    *)
+      printf 'Fastly API returned HTTP %s\n' "$code" >&2
+      jq . "$tmp" 2>/dev/null >&2 || cat "$tmp" >&2
+      rm -f "$tmp"
+      exit 1
+      ;;
+  esac
+
+  rm -f "$tmp"
+}
+
+current_cid() {
+  if [[ -n "${FASTLY_CUSTOMER_ID:-}" ]]; then
+    printf '%s\n' "$FASTLY_CUSTOMER_ID"
+  elif [[ -s "$CID_FILE" ]]; then
+    cat "$CID_FILE"
+  else
+    die 'no customer selected; run: ngwaf use <customer_id>'
+  fi
+}
+
+workspace_path() {
+  printf '/ngwaf/v1/workspaces/%s' "$(urlencode "$1")"
+}
+
+validate_timeseries_days() {
+  local days="$1"
+  [[ "$days" =~ ^[0-9]+$ ]] || die 'days must be an integer'
+  (( days >= 1 && days <= 30 )) ||
+    die 'timeseries days must be between 1 and 30'
+}
+
+validate_request_days() {
+  local days="$1"
+  [[ "$days" =~ ^[0-9]+$ ]] || die 'days must be an integer'
+  (( days >= 1 && days <= 7 )) ||
+    die 'request-search days must be between 1 and 7'
+}
+
+# Use complete UTC days for timeseries summaries so repeated reports are comparable.
+TS_FROM=""
+TS_TO=""
+make_timeseries_window() {
+  local days="$1"
+  validate_timeseries_days "$days"
+
+  TS_TO="$(date -u '+%Y-%m-%dT00:00:00Z')"
+
+  if date -u -v-"${days}"d '+%Y-%m-%dT00:00:00Z' >/dev/null 2>&1; then
+    TS_FROM="$(date -u -v-"${days}"d '+%Y-%m-%dT00:00:00Z')"
+  else
+    TS_FROM="$(date -u -d "$days days ago" '+%Y-%m-%dT00:00:00Z')"
+  fi
+}
+
+validate_historical_days() {
+  local days="$1"
+  [[ "$days" =~ ^[0-9]+$ ]] || die 'bot historical-stats days must be an integer'
+  (( days >= 1 && days <= 30 )) ||
+    die 'bot historical-stats days must be between 1 and 30 for this workflow'
+}
+
+HIST_FROM=""
+HIST_TO=""
+
+make_historical_window_days() {
+  local days="$1"
+  validate_historical_days "$days"
+
+  HIST_TO="$(date -u '+%Y-%m-%dT00:00:00Z')"
+
+  if date -u -v-"${days}"d '+%Y-%m-%dT00:00:00Z' >/dev/null 2>&1; then
+    HIST_FROM="$(date -u -v-"${days}"d '+%Y-%m-%dT00:00:00Z')"
+  else
+    HIST_FROM="$(date -u -d "$days days ago" '+%Y-%m-%dT00:00:00Z')"
+  fi
+}
+
+set_historical_window_dates() {
+  local from_date="$1"
+  local to_date="$2"
+
+  [[ "$from_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] ||
+    die 'from date must be YYYY-MM-DD'
+  [[ "$to_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] ||
+    die 'to date must be YYYY-MM-DD'
+
+  HIST_FROM="${from_date}T00:00:00Z"
+  HIST_TO="${to_date}T00:00:00Z"
+}
+
+validate_monthly_historical_window() {
+  local from_date="$1"
+  local to_date="$2"
+  local from_epoch to_epoch span_days
+
+  if date -u -j -f "%Y-%m-%d" "$from_date" "+%s" >/dev/null 2>&1; then
+    from_epoch="$(date -u -j -f "%Y-%m-%d" "$from_date" "+%s")"
+    to_epoch="$(date -u -j -f "%Y-%m-%d" "$to_date" "+%s")"
+  else
+    from_epoch="$(date -u -d "$from_date" "+%s")"
+    to_epoch="$(date -u -d "$to_date" "+%s")"
+  fi
+
+  (( to_epoch > from_epoch )) || die 'TO date must be after FROM date'
+  span_days=$(( (to_epoch - from_epoch) / 86400 ))
+
+  # Allow a full calendar month such as Aug 1 -> Sep 1 (31 days),
+  # but intentionally reject quarter-length windows for this workflow.
+  (( span_days <= 31 )) ||
+    die 'exact Bot Management date range must be 31 days or less for this workflow'
+}
+
+human_table() {
+  if command -v column >/dev/null 2>&1; then
+    column -t -s $'\t'
+  else
+    cat
+  fi
+}
+
+cmd_version() {
+  printf 'ngwaf %s\n' "$VERSION"
+}
+
+cmd_whoami() {
+  get "/tokens/self" |
+    jq '{name, scope, expires_at}'
+}
+
+cmd_use() {
+  [[ $# -eq 1 ]] || die 'usage: ngwaf use <customer_id>'
+
+  local cid="$1"
+  local body
+
+  body="$(get "/customer/$cid")"
+
+  mkdir -p "$CONFIG_DIR"
+  printf '%s\n' "$cid" > "$CID_FILE"
+
+  printf 'Selected customer: %s (%s)\n' \
+    "$(jq -r '.name' <<<"$body")" \
+    "$cid"
+}
+
+cmd_customer() {
+  local cid
+  cid="$(current_cid)"
+
+  get "/customer/$cid" |
+    jq '{id, name}'
+}
+
+cmd_workspaces() {
+  local cid body total returned
+  cid="$(current_cid)"
+
+  body="$(
+    get "/ngwaf/v1/workspaces" \
+      --data-urlencode "customer_id=$cid" \
+      --data-urlencode "limit=100"
+  )"
+
+  total="$(jq -r '.meta.total // (.data | length)' <<<"$body")"
+  returned="$(jq -r '.data | length' <<<"$body")"
+
+  printf 'Total NGWAF workspaces: %s\n\n' "$total"
+
+  jq -r '
+    .data
+    | sort_by(.name)
+    | .[]
+    | .name
+  ' <<<"$body"
+
+  if (( total > returned )); then
+    printf '\nWARNING: API returned %s of %s workspaces.\n' \
+      "$returned" "$total" >&2
+  fi
+}
+
+cmd_workspace() {
+  [[ $# -eq 1 ]] || die 'usage: ngwaf workspace <workspace>'
+
+  local cid w
+  cid="$(current_cid)"
+  w="$1"
+
+  get "$(workspace_path "$w")" \
+    --data-urlencode "customer_id=$cid" |
+    jq '{
+      name,
+      mode,
+      immediate_blocking: .attack_signal_thresholds.immediate,
+      default_blocking_response_code
+    }'
+}
+
+cmd_rules() {
+  [[ $# -ge 1 ]] || die 'usage: ngwaf rules <workspace> [--list|--json]'
+
+  local cid w mode body total returned
+  cid="$(current_cid)"
+  w="$1"
+  mode="${2:-}"
+
+  body="$(
+    get "$(workspace_path "$w")/rules" \
+      --data-urlencode "customer_id=$cid" \
+      --data-urlencode "limit=100"
+  )"
+
+  if [[ "$mode" == "--json" ]]; then
+    jq . <<<"$body"
+    return
+  fi
+
+  jq --arg w "$w" '{
+    workspace: $w,
+    total_rules_returned: (.data | length),
+    enabled_rules_returned: ([.data[] | select(.enabled == true)] | length),
+    disabled_rules_returned: ([.data[] | select(.enabled == false)] | length),
+    enabled_allow_rules_returned: (
+      [
+        .data[]
+        | select(
+            .enabled == true
+            and ((.actions | tostring) | test("allow"; "i"))
+          )
+      ] | length
+    )
+  }' <<<"$body"
+
+  total="$(jq -r '.meta.total // (.data | length)' <<<"$body")"
+  returned="$(jq -r '.data | length' <<<"$body")"
+  if (( total > returned )); then
+    printf 'WARNING: API returned %s of %s rules; counts above are partial.\n' \
+      "$returned" "$total" >&2
+  fi
+
+  if [[ "$mode" == "--list" ]]; then
+    printf '\n'
+    jq -r '
+      ["ENABLED", "ACTIONS", "DESCRIPTION"],
+      (
+        .data[]
+        | [
+            (.enabled | tostring),
+            ([.actions[]?.type] | join(",")),
+            (.description // "")
+          ]
+      )
+      | @tsv
+    ' <<<"$body" | human_table
+  fi
+}
+
+cmd_thresholds() {
+  [[ $# -ge 1 ]] || die 'usage: ngwaf thresholds <workspace> [--json]'
+
+  local cid w mode body
+  cid="$(current_cid)"
+  w="$1"
+  mode="${2:-}"
+
+  body="$(
+    get "$(workspace_path "$w")/thresholds" \
+      --data-urlencode "customer_id=$cid"
+  )"
+
+  if [[ "$mode" == "--json" ]]; then
+    jq . <<<"$body"
+    return
+  fi
+
+  jq --arg w "$w" '{
+    workspace: $w,
+    total_thresholds: (.data | length),
+    enabled_thresholds: ([.data[] | select(.enabled == true)] | length),
+    disabled_thresholds: ([.data[] | select(.enabled == false)] | length)
+  }' <<<"$body"
+}
+
+cmd_posture() {
+  [[ $# -eq 1 ]] || die 'usage: ngwaf posture <workspace>'
+
+  local cid w ws rules thresholds
+  local mode immediate response_code
+  local total_rules enabled_rules allow_rules
+  local total_thresholds enabled_thresholds
+
+  cid="$(current_cid)"
+  w="$1"
+
+  ws="$(
+    get "$(workspace_path "$w")" \
+      --data-urlencode "customer_id=$cid"
+  )"
+
+  rules="$(
+    get "$(workspace_path "$w")/rules" \
+      --data-urlencode "customer_id=$cid" \
+      --data-urlencode "limit=100"
+  )"
+
+  thresholds="$(
+    get "$(workspace_path "$w")/thresholds" \
+      --data-urlencode "customer_id=$cid"
+  )"
+
+  mode="$(jq -r '.mode // "unknown"' <<<"$ws")"
+  immediate="$(jq -r '.attack_signal_thresholds.immediate // false' <<<"$ws")"
+  response_code="$(jq -r '.default_blocking_response_code // null' <<<"$ws")"
+
+  total_rules="$(jq '.data | length' <<<"$rules")"
+  enabled_rules="$(jq '[.data[] | select(.enabled == true)] | length' <<<"$rules")"
+  allow_rules="$(
+    jq '
+      [
+        .data[]
+        | select(
+            .enabled == true
+            and ((.actions | tostring) | test("allow"; "i"))
+          )
+      ] | length
+    ' <<<"$rules"
+  )"
+
+  total_thresholds="$(jq '.data | length' <<<"$thresholds")"
+  enabled_thresholds="$(jq '[.data[] | select(.enabled == true)] | length' <<<"$thresholds")"
+
+  jq -n \
+    --arg workspace "$w" \
+    --arg mode "$mode" \
+    --argjson immediate "$immediate" \
+    --argjson response_code "$response_code" \
+    --argjson total_rules "$total_rules" \
+    --argjson enabled_rules "$enabled_rules" \
+    --argjson allow_rules "$allow_rules" \
+    --argjson total_thresholds "$total_thresholds" \
+    --argjson enabled_thresholds "$enabled_thresholds" \
+    '{
+      workspace: $workspace,
+      enforcement: {
+        mode: $mode,
+        immediate_blocking: $immediate,
+        default_blocking_response_code: $response_code
+      },
+      rules: {
+        total_returned: $total_rules,
+        enabled_returned: $enabled_rules,
+        enabled_allow_rules_returned: $allow_rules
+      },
+      thresholds: {
+        total: $total_thresholds,
+        enabled: $enabled_thresholds
+      }
+    }'
+}
+
+cmd_bot_rules() {
+  [[ $# -eq 1 ]] || die 'usage: ngwaf bot-rules <workspace>'
+
+  local cid w body
+  cid="$(current_cid)"
+  w="$1"
+
+  body="$(
+    get "$(workspace_path "$w")/rules" \
+      --data-urlencode "customer_id=$cid" \
+      --data-urlencode "limit=100"
+  )"
+
+  jq -r '
+    ["ENABLED", "ACTIONS", "DESCRIPTION"],
+    (
+      .data[]
+      | select(
+          ([.conditions[]? | tostring] | join(" "))
+          | test(
+              "VERIFIED-BOT|SUSPECTED-BOT|SUSPECTED-BAD-BOT|DATACENTER";
+              "i"
+            )
+        )
+      | [
+          (.enabled | tostring),
+          ([.actions[]?.type] | join(",")),
+          (.description // "")
+        ]
+    )
+    | @tsv
+  ' <<<"$body" | human_table
+}
+
+cmd_overview() {
+  local days="${1:-30}"
+  local format="${2:-}"
+  local cid customer body summary
+
+  [[ "$days" != "--json" ]] || {
+    format="--json"
+    days=30
+  }
+
+  validate_timeseries_days "$days"
+  [[ -z "$format" || "$format" == "--json" ]] ||
+    die 'usage: ngwaf overview [days] [--json]'
+
+  cid="$(current_cid)"
+  make_timeseries_window "$days"
+
+  customer="$(get "/customer/$cid" | jq -r '.name')"
+
+  body="$(
+    get "/ngwaf/v1/timeseries" \
+      --data-urlencode "customer_id=$cid" \
+      --data-urlencode "from=$TS_FROM" \
+      --data-urlencode "to=$TS_TO" \
+      --data-urlencode "metrics=$CORE_METRICS" \
+      --data-urlencode "dimensions=workspaces,time" \
+      --data-urlencode "granularity=86400"
+  )"
+
+  summary="$(
+    jq '
+      [
+        .data[]
+        | {
+            workspace: .dimensions.workspace,
+            values: (.values[0] // {})
+          }
+      ]
+      | group_by(.workspace)
+      | map({
+          workspace: .[0].workspace,
+          requests_total: (map(.values.requests_total // 0) | add),
+          requests_attack: (map(.values.requests_attack // 0) | add),
+          requests_total_blocked: (map(.values.requests_total_blocked // 0) | add)
+        })
+      | sort_by(-.requests_total)
+    ' <<<"$body"
+  )"
+
+  if [[ "$format" == "--json" ]]; then
+    jq -n \
+      --arg customer "$customer" \
+      --arg customer_id "$cid" \
+      --arg from "$TS_FROM" \
+      --arg to "$TS_TO" \
+      --argjson days "$days" \
+      --argjson workspaces "$summary" \
+      '{
+        customer: $customer,
+        customer_id: $customer_id,
+        days: $days,
+        from: $from,
+        to: $to,
+        workspaces: $workspaces
+      }'
+    return
+  fi
+
+  printf '%s — NGWAF %s-day overview\n' "$customer" "$days"
+  printf '%s → %s UTC (complete days)\n\n' "$TS_FROM" "$TS_TO"
+
+  jq -r '
+    def human:
+      if . >= 1000000000 then (((. / 1000000000) * 100 | round) / 100 | tostring) + "B"
+      elif . >= 1000000 then (((. / 1000000) * 100 | round) / 100 | tostring) + "M"
+      elif . >= 1000 then (((. / 1000) * 10 | round) / 10 | tostring) + "K"
+      else tostring
+      end;
+
+    ["WORKSPACE", "REQUESTS", "ATTACK-TAGGED", "BLOCKED"],
+    (
+      .[]
+      | [
+          .workspace,
+          (.requests_total | human),
+          (.requests_attack | human),
+          (.requests_total_blocked | human)
+        ]
+    )
+    | @tsv
+  ' <<<"$summary" | human_table
+
+  printf '\nNote: attack-tagged and blocked are independent metrics; do not divide one by the other as a block-rate calculation.\n'
+}
+
+cmd_timeseries() {
+  [[ $# -ge 1 ]] || die 'usage: ngwaf timeseries <workspace> [days] [--json]'
+
+  local cid w days format body
+  cid="$(current_cid)"
+  w="$1"
+  days="${2:-30}"
+  format="${3:-}"
+
+  if [[ "$days" == "--json" ]]; then
+    format="--json"
+    days=30
+  fi
+
+  validate_timeseries_days "$days"
+  [[ -z "$format" || "$format" == "--json" ]] ||
+    die 'usage: ngwaf timeseries <workspace> [days] [--json]'
+
+  make_timeseries_window "$days"
+
+  body="$(
+    get "$(workspace_path "$w")/timeseries" \
+      --data-urlencode "customer_id=$cid" \
+      --data-urlencode "from=$TS_FROM" \
+      --data-urlencode "to=$TS_TO" \
+      --data-urlencode "metrics=$CORE_METRICS" \
+      --data-urlencode "granularity=86400"
+  )"
+
+  if [[ "$format" == "--json" ]]; then
+    jq . <<<"$body"
+    return
+  fi
+
+  printf '%s — %s-day NGWAF timeseries\n' "$w" "$days"
+  printf '%s → %s UTC (complete days)\n\n' "$TS_FROM" "$TS_TO"
+
+  jq -r '
+    ["DATE", "REQUESTS", "ATTACK-TAGGED", "BLOCKED"],
+    (
+      .data
+      | sort_by(.dimensions.time // .timestamp)
+      | .[]
+      | [
+          ((.dimensions.time // .timestamp) | split("T")[0]),
+          ((.values[0].requests_total // 0) | tostring),
+          ((.values[0].requests_attack // 0) | tostring),
+          ((.values[0].requests_total_blocked // 0) | tostring)
+        ]
+    )
+    | @tsv
+  ' <<<"$body" | human_table
+}
+
+cmd_metrics() {
+  [[ $# -ge 1 ]] ||
+    die 'usage: ngwaf metrics <metric1,metric2,...> [days] [--json]'
+
+  local cid metrics days format body summary
+  cid="$(current_cid)"
+  metrics="$(tr -d '[:space:]' <<<"$1")"
+  days="${2:-30}"
+  format="${3:-}"
+
+  if [[ "$days" == "--json" ]]; then
+    format="--json"
+    days=30
+  fi
+
+  [[ -n "$metrics" ]] || die 'at least one metric is required'
+  validate_timeseries_days "$days"
+  [[ -z "$format" || "$format" == "--json" ]] ||
+    die 'usage: ngwaf metrics <metric1,metric2,...> [days] [--json]'
+
+  make_timeseries_window "$days"
+
+  body="$(
+    get "/ngwaf/v1/timeseries" \
+      --data-urlencode "customer_id=$cid" \
+      --data-urlencode "from=$TS_FROM" \
+      --data-urlencode "to=$TS_TO" \
+      --data-urlencode "metrics=$metrics" \
+      --data-urlencode "dimensions=workspaces,time" \
+      --data-urlencode "granularity=86400"
+  )"
+
+  summary="$(
+    jq --arg metrics "$metrics" '
+      ($metrics | split(",")) as $metrics
+      | [
+          .data[]
+          | {
+              workspace: .dimensions.workspace,
+              values: (.values[0] // {})
+            }
+        ]
+      | group_by(.workspace)
+      | map(
+          . as $rows
+          | {workspace: $rows[0].workspace}
+            + reduce $metrics[] as $metric (
+                {};
+                .[$metric] = (
+                  [$rows[] | (.values[$metric] // 0)] | add
+                )
+              )
+        )
+      | sort_by(.workspace)
+    ' <<<"$body"
+  )"
+
+  if [[ "$format" == "--json" ]]; then
+    jq . <<<"$summary"
+    return
+  fi
+
+  printf 'Account-level NGWAF metric summary — %s days\n' "$days"
+  printf '%s → %s UTC (complete days)\n\n' "$TS_FROM" "$TS_TO"
+
+  jq -r --arg metrics "$metrics" '
+    ($metrics | split(",")) as $metrics
+    | (["WORKSPACE"] + $metrics),
+      (
+        .[] as $row
+        | [$row.workspace]
+          + [$metrics[] as $metric | (($row[$metric] // 0) | tostring)]
+      )
+    | @tsv
+  ' <<<"$summary" | human_table
+}
+
+historical_bot_summary_json() {
+  local service_id="$1"
+  local cid service service_cid service_name body
+
+  cid="$(current_cid)"
+
+  service="$(get "/service/$service_id")"
+  service_cid="$(jq -r '.customer_id // ""' <<<"$service")"
+  service_name="$(jq -r '.name // ""' <<<"$service")"
+
+  [[ "$service_cid" == "$cid" ]] ||
+    die "service $service_id belongs to customer $service_cid, not selected customer $cid"
+
+  body="$(
+    get "/stats/service/$service_id" \
+      --data-urlencode "from=$HIST_FROM" \
+      --data-urlencode "to=$HIST_TO" \
+      --data-urlencode "by=day"
+  )"
+
+  jq -n \
+    --arg service_id "$service_id" \
+    --arg service_name "$service_name" \
+    --arg customer_id "$cid" \
+    --arg from "$HIST_FROM" \
+    --arg to "$HIST_TO" \
+    --argjson rows "$(jq '.data // []' <<<"$body")" \
+    '
+    def n:
+      if . == null then 0
+      elif type == "number" then .
+      else (tonumber? // 0)
+      end;
+
+    ($rows | map(.edge_requests | n) | add // 0) as $edge_requests
+    | ($rows | map(.bot_edge_requests_analyzed_count | n) | add // 0) as $analyzed
+    | ($rows | map(.bot_edge_requests_detected_count | n) | add // 0) as $detected
+    | ($rows | map(.bot_edge_requests_verified_count | n) | add // 0) as $verified
+    | ($rows | map(.bot_edge_requests_headless_count | n) | add // 0) as $headless
+    | ($rows | map(.bot_edge_requests_ai_crawler_count | n) | add // 0) as $ai
+    | ($rows | map(.bot_edge_requests_search_engine_crawler_count | n) | add // 0) as $search
+    | {
+        customer_id: $customer_id,
+        service_id: $service_id,
+        service_name: $service_name,
+        from: $from,
+        to: $to,
+        daily_rows: ($rows | length),
+        edge_requests: $edge_requests,
+        analyzed: $analyzed,
+        detected: $detected,
+        bot_percentage: (
+          if $analyzed > 0
+          then (($detected / $analyzed) * 100)
+          else null
+          end
+        ),
+        verified: $verified,
+        headless: $headless,
+        ai_crawler: $ai,
+        search_engine_crawler: $search
+      }
+    '
+}
+
+cmd_bot_stats() {
+  [[ $# -ge 1 ]] ||
+    die 'usage: ngwaf bot-stats <service_id> [days|FROM TO] [--json]'
+
+  local service_id="$1"
+  shift
+
+  local format=""
+  local summary
+
+  if [[ "${!#:-}" == "--json" ]]; then
+    format="--json"
+    set -- "${@:1:$(($#-1))}"
+  fi
+
+  case "$#" in
+    0)
+      make_historical_window_days 30
+      ;;
+    1)
+      validate_historical_days "$1"
+      make_historical_window_days "$1"
+      ;;
+    2)
+      set_historical_window_dates "$1" "$2"
+      validate_monthly_historical_window "$1" "$2"
+      ;;
+    *)
+      die 'usage: ngwaf bot-stats <service_id> [days|FROM TO] [--json]'
+      ;;
+  esac
+
+  summary="$(historical_bot_summary_json "$service_id")"
+
+  if [[ "$format" == "--json" ]]; then
+    jq . <<<"$summary"
+    return
+  fi
+
+  printf '%s — Historical Bot Management\n' "$(jq -r '.service_name' <<<"$summary")"
+  printf '%s → %s UTC (TO is exclusive)\n\n' "$HIST_FROM" "$HIST_TO"
+
+  jq -r '
+    def human:
+      if . >= 1000000000 then (((. / 1000000000) * 100 | round) / 100 | tostring) + "B"
+      elif . >= 1000000 then (((. / 1000000) * 100 | round) / 100 | tostring) + "M"
+      elif . >= 1000 then (((. / 1000) * 10 | round) / 10 | tostring) + "K"
+      else tostring
+      end;
+
+    ["SERVICE", "EDGE REQUESTS", "BOT ANALYZED*", "BOTS DETECTED*", "BOT % OF ANALYZED*", "VERIFIED*", "HEADLESS*", "AI CRAWLER*", "SEARCH CRAWLER*"],
+    [
+      .service_name,
+      (.edge_requests | human),
+      (.analyzed | human),
+      (.detected | human),
+      (if .bot_percentage == null then "n/a" else (((.bot_percentage * 100) | round) / 100 | tostring) + "%" end),
+      (.verified | human),
+      (.headless | human),
+      (.ai_crawler | human),
+      (.search_engine_crawler | human)
+    ]
+    | @tsv
+  ' <<<"$summary" | human_table
+
+  printf '\nDefinitions:\n'
+  printf '  Bot %% of analyzed* = bot-detected / bot-analyzed using Bot Management metrics.\n'
+  printf '  * Bot Management metrics are sampled and scaled estimates; do not divide them by edge_requests to calculate coverage.\n'
+  printf 'WARNING: Sanity-check service scope and outliers before using API-derived values in customer-facing material.\n'
+}
+
+
+historical_bot_summary_known_service_json() {
+  local service_id="$1"
+  local service_name="$2"
+  local cid body
+
+  cid="$(current_cid)"
+
+  body="$(
+    get "/stats/service/$service_id" \
+      --data-urlencode "from=$HIST_FROM" \
+      --data-urlencode "to=$HIST_TO" \
+      --data-urlencode "by=day"
+  )"
+
+  jq -n \
+    --arg service_id "$service_id" \
+    --arg service_name "$service_name" \
+    --arg customer_id "$cid" \
+    --arg from "$HIST_FROM" \
+    --arg to "$HIST_TO" \
+    --argjson rows "$(jq '.data // []' <<<"$body")" \
+    '
+    def n:
+      if . == null then 0
+      elif type == "number" then .
+      else (tonumber? // 0)
+      end;
+
+    ($rows | map(.edge_requests | n) | add // 0) as $edge_requests
+    | ($rows | map(.bot_edge_requests_analyzed_count | n) | add // 0) as $analyzed
+    | ($rows | map(.bot_edge_requests_detected_count | n) | add // 0) as $detected
+    | ($rows | map(.bot_edge_requests_verified_count | n) | add // 0) as $verified
+    | ($rows | map(.bot_edge_requests_headless_count | n) | add // 0) as $headless
+    | ($rows | map(.bot_edge_requests_ai_crawler_count | n) | add // 0) as $ai_crawler
+    | ($rows | map(.bot_edge_requests_ai_fetcher_count | n) | add // 0) as $ai_fetcher
+    | ($rows | map(.bot_edge_requests_search_engine_crawler_count | n) | add // 0) as $search_engine_crawler
+    | ($rows | map(.bot_edge_requests_accessibility_count | n) | add // 0) as $accessibility
+    | ($rows | map(.bot_edge_requests_content_fetcher_count | n) | add // 0) as $content_fetcher
+    | ($rows | map(.bot_edge_requests_monitoring_count | n) | add // 0) as $monitoring
+    | ($rows | map(.bot_edge_requests_online_marketing_count | n) | add // 0) as $online_marketing
+    | ($rows | map(.bot_edge_requests_page_preview_count | n) | add // 0) as $page_preview
+    | ($rows | map(.bot_edge_requests_platform_integrations_count | n) | add // 0) as $platform_integrations
+    | ($rows | map(.bot_edge_requests_research_count | n) | add // 0) as $research
+    | ($rows | map(.bot_edge_requests_search_engine_optimization_count | n) | add // 0) as $search_engine_optimization
+    | ($rows | map(.bot_edge_requests_security_tools_count | n) | add // 0) as $security_tools
+    | {
+        customer_id: $customer_id,
+        service_id: $service_id,
+        service_name: $service_name,
+        from: $from,
+        to: $to,
+        daily_rows: ($rows | length),
+        edge_requests: $edge_requests,
+        analyzed: $analyzed,
+        detected: $detected,
+        bot_percentage: (
+          if $analyzed > 0
+          then (($detected / $analyzed) * 100)
+          else null
+          end
+        ),
+        verified: $verified,
+        headless: $headless,
+        ai_crawler: $ai_crawler,
+        ai_fetcher: $ai_fetcher,
+        search_engine_crawler: $search_engine_crawler,
+        accessibility: $accessibility,
+        content_fetcher: $content_fetcher,
+        monitoring: $monitoring,
+        online_marketing: $online_marketing,
+        page_preview: $page_preview,
+        platform_integrations: $platform_integrations,
+        research: $research,
+        search_engine_optimization: $search_engine_optimization,
+        security_tools: $security_tools
+      }
+    '
+}
+
+cmd_intl_bot_stats() {
+  local format=""
+  local cid customer services matched tmp summary
+  local from_arg="" to_arg=""
+
+  if [[ "${!#:-}" == "--json" ]]; then
+    format="--json"
+    set -- "${@:1:$(($#-1))}"
+  fi
+
+  case "$#" in
+    0)
+      make_historical_window_days 30
+      ;;
+    1)
+      validate_historical_days "$1"
+      make_historical_window_days "$1"
+      ;;
+    2)
+      from_arg="$1"
+      to_arg="$2"
+      set_historical_window_dates "$from_arg" "$to_arg"
+      validate_monthly_historical_window "$from_arg" "$to_arg"
+      ;;
+    *)
+      die 'usage: ngwaf intl-bot-stats [days|FROM TO] [--json]'
+      ;;
+  esac
+
+  cid="$(current_cid)"
+  customer="$(get "/customer/$cid" | jq -r '.name')"
+
+  # This intentionally targets only the international production services
+  # represented on the current Costco QBR slide. It excludes staging/stg,
+  # perf/prf, preprod, tst, sbx, domestic cab*/usb*, and unrelated prod/prd
+  # services by using an exact service-name allowlist.
+  services="$(
+    get "/service" |
+      jq --arg cid "$cid" '
+        [
+          .[]
+          | select(.customer_id == $cid)
+          | select(
+              .name
+              | test("^prod-(au|es|fr|is|jp|kr|mx|nz|se|tw|uk)$")
+            )
+          | {name, id}
+        ]
+        | sort_by(.name)
+      '
+  )"
+
+  matched="$(jq 'length' <<<"$services")"
+  (( matched > 0 )) ||
+    die 'no matching international production services found'
+
+  tmp="$(mktemp)"
+  printf '[]' > "$tmp"
+
+  while IFS=$'\t' read -r service_name service_id; do
+    [[ -n "$service_name" && -n "$service_id" ]] || continue
+
+    summary="$(historical_bot_summary_known_service_json "$service_id" "$service_name")"
+
+    jq --argjson item "$summary" '. + [$item]' "$tmp" > "${tmp}.new"
+    mv "${tmp}.new" "$tmp"
+  done < <(
+    jq -r '.[] | [.name, .id] | @tsv' <<<"$services"
+  )
+
+  if [[ "$format" == "--json" ]]; then
+    jq \
+      --arg customer "$customer" \
+      --arg customer_id "$cid" \
+      --arg from "$HIST_FROM" \
+      --arg to "$HIST_TO" \
+      '{
+        customer: $customer,
+        customer_id: $customer_id,
+        from: $from,
+        to: $to,
+        scope: "international production services only",
+        services: (
+          map(
+            . + {
+              market: (
+                .service_name
+                | capture("^prod-(?<code>[a-z]{2})$").code
+                | {
+                    au: "Australia",
+                    es: "Spain",
+                    fr: "France",
+                    is: "Iceland",
+                    jp: "Japan",
+                    kr: "Korea",
+                    mx: "Mexico",
+                    nz: "New Zealand",
+                    se: "Sweden",
+                    tw: "Taiwan",
+                    uk: "UK"
+                  }[.]
+              )
+            }
+          )
+          | sort_by(-(.bot_percentage // -1))
+        )
+      }' "$tmp"
+    rm -f "$tmp"
+    return
+  fi
+
+  printf '%s — International Production Bot Management\n' "$customer"
+  printf '%s → %s UTC (TO is exclusive)\n' "$HIST_FROM" "$HIST_TO"
+  printf 'Scope: exact prod-{au,es,fr,is,jp,kr,mx,nz,se,tw,uk} services only\n\n'
+
+  jq -r '
+    def human:
+      if . >= 1000000000 then (((. / 1000000000) * 100 | round) / 100 | tostring) + "B"
+      elif . >= 1000000 then (((. / 1000000) * 100 | round) / 100 | tostring) + "M"
+      elif . >= 1000 then (((. / 1000) * 10 | round) / 10 | tostring) + "K"
+      else tostring
+      end;
+
+    def market:
+      .service_name
+      | capture("^prod-(?<code>[a-z]{2})$").code
+      | {
+          au: "Australia",
+          es: "Spain",
+          fr: "France",
+          is: "Iceland",
+          jp: "Japan",
+          kr: "Korea",
+          mx: "Mexico",
+          nz: "New Zealand",
+          se: "Sweden",
+          tw: "Taiwan",
+          uk: "UK"
+        }[.];
+
+    sort_by(-(.bot_percentage // -1))
+    | (
+        ["MARKET", "SERVICE", "EDGE REQUESTS", "BOT ANALYZED*", "BOTS DETECTED*", "BOT % OF ANALYZED*"],
+        (
+          .[]
+          | [
+              (market),
+              .service_name,
+              (.edge_requests | human),
+              (.analyzed | human),
+              (.detected | human),
+              (
+                if .bot_percentage == null
+                then "n/a"
+                else (((.bot_percentage * 100) | round) / 100 | tostring) + "%"
+                end
+              )
+            ]
+        )
+      )
+    | @tsv
+  ' "$tmp" | human_table
+
+  rm -f "$tmp"
+
+  printf '\nDefinitions:\n'
+  printf '  Bot %% of analyzed* = bot-detected / bot-analyzed using Bot Management metrics.\n'
+  printf '  * Bot Management metrics are sampled and scaled estimates; do not divide them by edge_requests to calculate coverage.\n'
+  printf 'WARNING: Review matched service scope and outliers before using API-derived values in customer-facing material.\n'
+  printf 'Excluded by design: staging/stg, perf/prf, preprod, tst, sbx, domestic cab*/usb*, and unrelated services.\n'
+}
+
+
+cmd_count() {
+  [[ $# -ge 2 && $# -le 3 ]] ||
+    die "usage: ngwaf count <workspace> '<search query>' [days]"
+
+  local cid w query days end start body
+  cid="$(current_cid)"
+  w="$1"
+  query="$2"
+  days="${3:-7}"
+
+  validate_request_days "$days"
+
+  # Five-minute buffer for the request-search ingestion pipeline.
+  if date -u -v-5M +%s >/dev/null 2>&1; then
+    end="$(date -u -v-5M +%s)"
+  else
+    end="$(date -u -d '5 minutes ago' +%s)"
+  fi
+
+  start=$((end - (days * 86400)))
+
+  body="$(
+    get "$(workspace_path "$w")/requests" \
+      --data-urlencode "customer_id=$cid" \
+      --data-urlencode "limit=1" \
+      --data-urlencode "q=from:$start until:$end $query"
+  )"
+
+  jq -n \
+    --arg workspace "$w" \
+    --arg query "$query" \
+    --argjson days "$days" \
+    --argjson count "$(jq '.meta.total // 0' <<<"$body")" \
+    '{
+      workspace: $workspace,
+      days: $days,
+      query: $query,
+      count: $count
+    }'
+}
+
+cmd_intl_bot_types() {
+  local format=""
+  local cid customer services matched tmp summary
+  local from_arg="" to_arg=""
+
+  if [[ "${!#:-}" == "--json" ]]; then
+    format="--json"
+    set -- "${@:1:$(($#-1))}"
+  fi
+
+  case "$#" in
+    0)
+      make_historical_window_days 30
+      ;;
+    1)
+      validate_historical_days "$1"
+      make_historical_window_days "$1"
+      ;;
+    2)
+      from_arg="$1"
+      to_arg="$2"
+      set_historical_window_dates "$from_arg" "$to_arg"
+      validate_monthly_historical_window "$from_arg" "$to_arg"
+      ;;
+    *)
+      die 'usage: ngwaf intl-bot-types [days|FROM TO] [--json]'
+      ;;
+  esac
+
+  cid="$(current_cid)"
+  customer="$(get "/customer/$cid" | jq -r '.name')"
+
+  services="$(
+    get "/service" |
+      jq --arg cid "$cid" '
+        [
+          .[]
+          | select(.customer_id == $cid)
+          | select(.name | test("^prod-(au|es|fr|is|jp|kr|mx|nz|se|tw|uk)$"))
+          | {name, id}
+        ]
+        | sort_by(.name)
+      '
+  )"
+
+  matched="$(jq 'length' <<<"$services")"
+  (( matched > 0 )) || die 'no matching international production services found'
+
+  tmp="$(mktemp)"
+  printf '[]' > "$tmp"
+
+  while IFS=$'\t' read -r service_name service_id; do
+    [[ -n "$service_name" && -n "$service_id" ]] || continue
+    summary="$(historical_bot_summary_known_service_json "$service_id" "$service_name")"
+    jq --argjson item "$summary" '. + [$item]' "$tmp" > "${tmp}.new"
+    mv "${tmp}.new" "$tmp"
+  done < <(jq -r '.[] | [.name, .id] | @tsv' <<<"$services")
+
+  if [[ "$format" == "--json" ]]; then
+    jq \
+      --arg customer "$customer" \
+      --arg customer_id "$cid" \
+      --arg from "$HIST_FROM" \
+      --arg to "$HIST_TO" \
+      '{
+        customer: $customer,
+        customer_id: $customer_id,
+        from: $from,
+        to: $to,
+        scope: "international production services only",
+        note: "Bot type metrics can overlap; they are not a mutually exclusive composition and should not be summed to 100%.",
+        services: (
+          map(
+            . + {
+              market: (
+                .service_name
+                | capture("^prod-(?<code>[a-z]{2})$").code
+                | {
+                    au: "Australia", es: "Spain", fr: "France", is: "Iceland",
+                    jp: "Japan", kr: "Korea", mx: "Mexico", nz: "New Zealand",
+                    se: "Sweden", tw: "Taiwan", uk: "UK"
+                  }[.]
+              )
+            }
+          )
+          | sort_by(-(.detected // 0))
+        )
+      }' "$tmp"
+    rm -f "$tmp"
+    return
+  fi
+
+  printf '%s — International Bot Type Signals\n' "$customer"
+  printf '%s → %s UTC (TO is exclusive)\n' "$HIST_FROM" "$HIST_TO"
+  printf 'Scope: exact prod-{au,es,fr,is,jp,kr,mx,nz,se,tw,uk} services only\n\n'
+
+  jq -r '
+    def human:
+      if . >= 1000000000 then (((. / 1000000000) * 100 | round) / 100 | tostring) + "B"
+      elif . >= 1000000 then (((. / 1000000) * 100 | round) / 100 | tostring) + "M"
+      elif . >= 1000 then (((. / 1000) * 10 | round) / 10 | tostring) + "K"
+      else tostring
+      end;
+
+    def market:
+      .service_name
+      | capture("^prod-(?<code>[a-z]{2})$").code
+      | {
+          au: "Australia", es: "Spain", fr: "France", is: "Iceland",
+          jp: "Japan", kr: "Korea", mx: "Mexico", nz: "New Zealand",
+          se: "Sweden", tw: "Taiwan", uk: "UK"
+        }[.];
+
+    sort_by(-(.detected // 0))
+    | (
+        ["MARKET", "DETECTED*", "VERIFIED*", "HEADLESS*", "AI CRAWLER*", "AI FETCHER*", "SEARCH CRAWLER*"],
+        (.[] | [
+          (market),
+          (.detected | human),
+          (.verified | human),
+          (.headless | human),
+          (.ai_crawler | human),
+          (.ai_fetcher | human),
+          (.search_engine_crawler | human)
+        ])
+      )
+    | @tsv
+  ' "$tmp" | human_table
+
+  printf '\nShare of detected bot requests carrying each classification:\n'
+  jq -r '
+    def pct($n; $d):
+      if ($d // 0) > 0 then (((($n // 0) / $d * 100) * 100 | round) / 100 | tostring) + "%" else "n/a" end;
+    def market:
+      .service_name
+      | capture("^prod-(?<code>[a-z]{2})$").code
+      | {
+          au: "Australia", es: "Spain", fr: "France", is: "Iceland",
+          jp: "Japan", kr: "Korea", mx: "Mexico", nz: "New Zealand",
+          se: "Sweden", tw: "Taiwan", uk: "UK"
+        }[.];
+    sort_by(-(.detected // 0))
+    | (
+        ["MARKET", "VERIFIED / DETECTED", "HEADLESS / DETECTED", "AI CRAWLER / DETECTED", "AI FETCHER / DETECTED", "SEARCH / DETECTED"],
+        (.[] | [
+          (market),
+          pct(.verified; .detected),
+          pct(.headless; .detected),
+          pct(.ai_crawler; .detected),
+          pct(.ai_fetcher; .detected),
+          pct(.search_engine_crawler; .detected)
+        ])
+      )
+    | @tsv
+  ' "$tmp" | human_table
+
+  rm -f "$tmp"
+
+  printf '\nDefinitions:\n'
+  printf '  * Bot Management metrics are statistically sampled and scaled estimates.\n'
+  printf '  Verified, headless, AI crawler/fetcher, and search crawler classifications can overlap.\n'
+  printf '  Do NOT add these columns together or treat them as a 100%% stacked composition.\n'
+  printf 'WARNING: Use this command to inspect classification patterns; validate semantics before building a customer-facing composition chart.\n'
+}
+
+
+cmd_attack_profile() {
+  local format=""
+  local cid customer body workspace_summary top_workspace_names signal_summary
+  local metrics="requests_attack,SQLI,TRAVERSAL,XSS,CMDEXE,AWS-SSRF"
+  local prod_regex='(^|[-_])(prd|prod|production)([-_]|$)'
+  local span_days=""
+  local top_n=5
+
+  if [[ "${!#:-}" == "--json" ]]; then
+    format="--json"
+    set -- "${@:1:$(($#-1))}"
+  fi
+
+  case "$#" in
+    0)
+      make_timeseries_window 30
+      span_days=30
+      ;;
+    1)
+      validate_timeseries_days "$1"
+      make_timeseries_window "$1"
+      span_days="$1"
+      ;;
+    2)
+      local from_date="$1"
+      local to_date="$2"
+      local from_epoch to_epoch
+
+      [[ "$from_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] ||
+        die 'FROM date must be YYYY-MM-DD'
+      [[ "$to_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] ||
+        die 'TO date must be YYYY-MM-DD'
+
+      if date -u -j -f "%Y-%m-%d" "$from_date" "+%s" >/dev/null 2>&1; then
+        from_epoch="$(date -u -j -f "%Y-%m-%d" "$from_date" "+%s")"
+        to_epoch="$(date -u -j -f "%Y-%m-%d" "$to_date" "+%s")"
+      else
+        from_epoch="$(date -u -d "$from_date" "+%s")"
+        to_epoch="$(date -u -d "$to_date" "+%s")"
+      fi
+
+      (( to_epoch > from_epoch )) || die 'TO date must be after FROM date'
+      span_days=$(( (to_epoch - from_epoch) / 86400 ))
+      (( span_days <= 31 )) ||
+        die 'exact attack-profile date range must be 31 days or less'
+
+      TS_FROM="${from_date}T00:00:00Z"
+      TS_TO="${to_date}T00:00:00Z"
+      ;;
+    *)
+      die 'usage: ngwaf attack-profile [days|FROM TO] [--json]'
+      ;;
+  esac
+
+  cid="$(current_cid)"
+  customer="$(get "/customer/$cid" | jq -r '.name')"
+
+  body="$(
+    get "/ngwaf/v1/timeseries" \
+      --data-urlencode "customer_id=$cid" \
+      --data-urlencode "from=$TS_FROM" \
+      --data-urlencode "to=$TS_TO" \
+      --data-urlencode "metrics=$metrics" \
+      --data-urlencode "dimensions=workspaces,time" \
+      --data-urlencode "granularity=86400"
+  )"
+
+  # First rank production workspaces by requests_attack for the selected window.
+  workspace_summary="$(
+    jq --arg prod_regex "$prod_regex" '
+      [
+        .data[]
+        | {
+            workspace: .dimensions.workspace,
+            attack: ((.values[0].requests_attack // 0) | tonumber? // 0)
+          }
+      ]
+      | group_by(.workspace)
+      | map({
+          workspace: .[0].workspace,
+          requests_attack: (map(.attack) | add // 0)
+        })
+      | map(select(.workspace | test($prod_regex; "i")))
+      | sort_by(-.requests_attack)
+    ' <<<"$body"
+  )"
+
+  # The QBR attack-signal chart is intentionally scoped to the SAME top five
+  # production workspaces shown in the workspace-ranking chart.
+  top_workspace_names="$(
+    jq --argjson n "$top_n" '[.[:$n][].workspace]' <<<"$workspace_summary"
+  )"
+
+  signal_summary="$(
+    jq --argjson top_workspaces "$top_workspace_names" '
+      def n:
+        if . == null then 0
+        elif type == "number" then .
+        else (tonumber? // 0)
+        end;
+
+      [
+        .data[]
+        | select(.dimensions.workspace as $w | $top_workspaces | index($w))
+        | (.values[0] // {})
+      ] as $rows
+      | [
+          {metric: "SQLI", label: "SQL Injection", requests: ($rows | map(.SQLI | n) | add // 0)},
+          {metric: "TRAVERSAL", label: "Directory Traversal", requests: ($rows | map(.TRAVERSAL | n) | add // 0)},
+          {metric: "XSS", label: "Cross-Site Scripting", requests: ($rows | map(.XSS | n) | add // 0)},
+          {metric: "CMDEXE", label: "Command Execution", requests: ($rows | map(.CMDEXE | n) | add // 0)},
+          {metric: "AWS-SSRF", label: "AWS Server-Side Request Forgery", requests: ($rows | map(."AWS-SSRF" | n) | add // 0)}
+        ]
+      | sort_by(-.requests)
+    ' <<<"$body"
+  )"
+
+  if [[ "$format" == "--json" ]]; then
+    jq -n \
+      --arg customer "$customer" \
+      --arg customer_id "$cid" \
+      --arg from "$TS_FROM" \
+      --arg to "$TS_TO" \
+      --argjson span_days "$span_days" \
+      --argjson top_n "$top_n" \
+      --arg production_workspace_filter "$prod_regex" \
+      --argjson production_workspaces "$workspace_summary" \
+      --argjson selected_workspaces "$top_workspace_names" \
+      --argjson attack_signals "$signal_summary" \
+      '{
+        customer: $customer,
+        customer_id: $customer_id,
+        from: $from,
+        to: $to,
+        to_is_exclusive: true,
+        span_days: $span_days,
+        scopes: {
+          workspace_ranking: "production workspaces only, identified by workspace name",
+          signal_totals: "same top production workspaces shown in the ranking"
+        },
+        top_n: $top_n,
+        production_workspace_filter: $production_workspace_filter,
+        selected_workspaces: $selected_workspaces,
+        production_workspaces: $production_workspaces[:$top_n],
+        attack_signals: $attack_signals
+      }'
+    return
+  fi
+
+  printf '%s — NGWAF attack profile\n' "$customer"
+  printf '%s → %s UTC (TO is exclusive; %s days)\n\n' "$TS_FROM" "$TS_TO" "$span_days"
+
+  printf 'Top %s production workspaces by attack-signaled requests\n' "$top_n"
+  jq -r --argjson n "$top_n" '
+    def human:
+      if . >= 1000000000 then (((. / 1000000000) * 100 | round) / 100 | tostring) + "B"
+      elif . >= 1000000 then (((. / 1000000) * 100 | round) / 100 | tostring) + "M"
+      elif . >= 1000 then (((. / 1000) * 10 | round) / 10 | tostring) + "K"
+      else tostring
+      end;
+
+    ["WORKSPACE", "ATTACK-SIGNALED"],
+    (
+      .[:$n][]
+      | [.workspace, (.requests_attack | human)]
+    )
+    | @tsv
+  ' <<<"$workspace_summary" | human_table
+
+  printf '\nTop attack signals — same top %s production workspaces\n' "$top_n"
+  jq -r '
+    def human:
+      if . >= 1000000000 then (((. / 1000000000) * 100 | round) / 100 | tostring) + "B"
+      elif . >= 1000000 then (((. / 1000000) * 100 | round) / 100 | tostring) + "M"
+      elif . >= 1000 then (((. / 1000) * 10 | round) / 10 | tostring) + "K"
+      else tostring
+      end;
+
+    ["SIGNAL", "METRIC", "REQUESTS"],
+    (
+      .[]
+      | [.label, .metric, (.requests | human)]
+    )
+    | @tsv
+  ' <<<"$signal_summary" | human_table
+
+  printf '\nScope / validation notes:\n'
+  printf '  - Workspace ranking: top %s production workspaces matched by name using %s.\n' "$top_n" "$prod_regex"
+  printf '  - Attack-signal totals: summed across exactly those same top %s workspaces.\n' "$top_n"
+  printf '  - Selected workspaces: %s\n' "$(jq -r 'join(", ")' <<<"$top_workspace_names")"
+  printf '  - Signals can overlap; signal counts are not mutually exclusive and should not be summed as unique attacked requests.\n'
+  if (( span_days == 31 )); then
+    printf '  - NOTE: this exact range spans 31 days. Prefer a calendar-month label such as "August 2026" over "Last 30 Days."\n'
+  fi
+  printf 'WARNING: NGWAF metrics retention depends on entitlement and current query date; validate the returned range before using it in customer-facing material.\n'
+}
+
+
+cmd_attack_origins() {
+  local format=""
+  local cid customer workspaces_body report_body matched_body
+  local workspace_ids workspace_total workspace_returned
+  local span_days="" source_summary attack_total returned_source_total source_coverage
+  local top_five_total top_five_share other_total other_share
+
+  if [[ "${!#:-}" == "--json" ]]; then
+    format="--json"
+    set -- "${@:1:$(($#-1))}"
+  fi
+
+  case "$#" in
+    0)
+      make_timeseries_window 30
+      span_days=30
+      ;;
+    1)
+      validate_timeseries_days "$1"
+      make_timeseries_window "$1"
+      span_days="$1"
+      ;;
+    2)
+      local from_date="$1"
+      local to_date="$2"
+      local from_epoch to_epoch
+
+      [[ "$from_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] ||
+        die 'FROM date must be YYYY-MM-DD'
+      [[ "$to_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] ||
+        die 'TO date must be YYYY-MM-DD'
+
+      if date -u -j -f "%Y-%m-%d" "$from_date" "+%s" >/dev/null 2>&1; then
+        from_epoch="$(date -u -j -f "%Y-%m-%d" "$from_date" "+%s")"
+        to_epoch="$(date -u -j -f "%Y-%m-%d" "$to_date" "+%s")"
+      else
+        from_epoch="$(date -u -d "$from_date" "+%s")"
+        to_epoch="$(date -u -d "$to_date" "+%s")"
+      fi
+
+      (( to_epoch > from_epoch )) || die 'TO date must be after FROM date'
+      span_days=$(( (to_epoch - from_epoch) / 86400 ))
+      (( span_days <= 30 )) ||
+        die 'attack-origins date range must be 30 days or less'
+
+      TS_FROM="${from_date}T00:00:00Z"
+      TS_TO="${to_date}T00:00:00Z"
+      ;;
+    *)
+      die 'usage: ngwaf attack-origins [days|FROM TO] [--json]'
+      ;;
+  esac
+
+  cid="$(current_cid)"
+  customer="$(get "/customer/$cid" | jq -r '.name')"
+
+  # The reports endpoint itself is account-scoped and does not document a
+  # customer_id parameter. Resolve the selected customer's workspace IDs first
+  # and filter the report to those IDs so a globally scoped token cannot
+  # accidentally mix customers.
+  workspaces_body="$(
+    get "/ngwaf/v1/workspaces" \
+      --data-urlencode "customer_id=$cid" \
+      --data-urlencode "limit=100"
+  )"
+
+  workspace_total="$(jq -r '.meta.total // (.data | length)' <<<"$workspaces_body")"
+  workspace_returned="$(jq -r '.data | length' <<<"$workspaces_body")"
+  if (( workspace_total > workspace_returned )); then
+    die "selected customer has $workspace_total workspaces but only $workspace_returned were returned; pagination is required before attack-origins can be trusted"
+  fi
+
+  workspace_ids="$(jq '[.data[].id]' <<<"$workspaces_body")"
+
+  report_body="$(
+    get "/ngwaf/v1/reports/attacks" \
+      --data-urlencode "from=$TS_FROM" \
+      --data-urlencode "to=$TS_TO"
+  )"
+
+  matched_body="$(
+    jq --argjson ids "$workspace_ids" '
+      [
+        (.data // [])[]
+        | select(.id as $id | $ids | index($id))
+      ]
+    ' <<<"$report_body"
+  )"
+
+  if [[ "$(jq 'length' <<<"$matched_body")" -eq 0 ]]; then
+    die 'attacks report returned no workspaces matching the selected customer; do not use this output for customer-facing data'
+  fi
+
+  attack_total="$(
+    jq '[.[].attack_count // 0] | add // 0' <<<"$matched_body"
+  )"
+
+  source_summary="$(
+    jq --argjson attack_total "$attack_total" '
+      def num:
+        if . == null then 0
+        elif type == "number" then .
+        else (tonumber? // 0)
+        end;
+
+      [
+        .[] as $w
+        | ($w.top_attack_sources // [])[]
+        | {
+            country_code: (.country_code // ""),
+            country_name: (
+              if ((.country_name // "") | length) > 0 then .country_name
+              elif (.country_code // "") == "private" then "Private Network"
+              elif (.country_code // "") == "" then "Unknown"
+              else .country_code
+              end
+            ),
+            requests: (.request_count | num)
+          }
+      ]
+      | sort_by(.country_code, .country_name)
+      | group_by([.country_code, .country_name])
+      | map({
+          country_code: .[0].country_code,
+          country: .[0].country_name,
+          requests: (map(.requests) | add // 0)
+        })
+      | map(. + {
+          share_of_attack_requests:
+            (if $attack_total > 0 then (.requests / $attack_total) else 0 end)
+        })
+      | sort_by(-.requests)
+    ' <<<"$matched_body"
+  )"
+
+  returned_source_total="$(
+    jq '[.[].requests] | add // 0' <<<"$source_summary"
+  )"
+
+  if (( attack_total > 0 )); then
+    source_coverage="$(jq -n --argjson n "$returned_source_total" --argjson d "$attack_total" '$n / $d')"
+  else
+    source_coverage="0"
+  fi
+
+  top_five_total="$(jq '[.[:5][].requests] | add // 0' <<<"$source_summary")"
+  if (( attack_total > 0 )); then
+    top_five_share="$(jq -n --argjson n "$top_five_total" --argjson d "$attack_total" '$n / $d')"
+  else
+    top_five_share="0"
+  fi
+
+  other_total=$(( attack_total - top_five_total ))
+  (( other_total >= 0 )) || other_total=0
+
+  if (( attack_total > 0 )); then
+    other_share="$(jq -n --argjson n "$other_total" --argjson d "$attack_total" '$n / $d')"
+  else
+    other_share="0"
+  fi
+
+  if [[ "$format" == "--json" ]]; then
+    jq -n \
+      --arg customer "$customer" \
+      --arg customer_id "$cid" \
+      --arg from "$TS_FROM" \
+      --arg to "$TS_TO" \
+      --argjson span_days "$span_days" \
+      --argjson selected_workspace_count "$(jq 'length' <<<"$workspace_ids")" \
+      --argjson matched_workspace_count "$(jq 'length' <<<"$matched_body")" \
+      --argjson attack_requests "$attack_total" \
+      --argjson returned_source_requests "$returned_source_total" \
+      --argjson returned_source_coverage "$source_coverage" \
+      --argjson top_five_requests "$top_five_total" \
+      --argjson top_five_share "$top_five_share" \
+      --argjson other_requests "$other_total" \
+      --argjson other_share "$other_share" \
+      --argjson countries "$source_summary" \
+      '{
+        customer: $customer,
+        customer_id: $customer_id,
+        from: $from,
+        to: $to,
+        to_is_exclusive: true,
+        span_days: $span_days,
+        selected_workspace_count: $selected_workspace_count,
+        matched_workspace_count: $matched_workspace_count,
+        attack_requests: $attack_requests,
+        returned_top_source_requests: $returned_source_requests,
+        returned_top_source_coverage: $returned_source_coverage,
+        top_five: {
+          requests: $top_five_requests,
+          share_of_attack_requests: $top_five_share
+        },
+        other_or_unreturned: {
+          requests: $other_requests,
+          share_of_attack_requests: $other_share
+        },
+        countries: $countries,
+        methodology: "Aggregate top_attack_sources.request_count across workspaces belonging to the selected customer; divide by summed attack_count. The report may return only top sources per workspace, so named-country counts can be understated when returned-source coverage is below 100%."
+      }'
+    return
+  fi
+
+  printf '%s — NGWAF attack request origins\n' "$customer"
+  printf '%s → %s UTC (TO is exclusive; %s days)\n' "$TS_FROM" "$TS_TO" "$span_days"
+  printf 'Scope: selected customer, all matched NGWAF workspaces\n\n'
+
+  jq -r '
+    def human:
+      if . >= 1000000000 then (((. / 1000000000) * 100 | round) / 100 | tostring) + "B"
+      elif . >= 1000000 then (((. / 1000000) * 100 | round) / 100 | tostring) + "M"
+      elif . >= 1000 then (((. / 1000) * 10 | round) / 10 | tostring) + "K"
+      else tostring
+      end;
+    def pct:
+      (((. * 10000) | round) / 100 | tostring) + "%";
+
+    ["COUNTRY", "REQUESTS", "SHARE OF ATTACK REQUESTS"],
+    (
+      .[:10][]
+      | [.country, (.requests | human), (.share_of_attack_requests | pct)]
+    )
+    | @tsv
+  ' <<<"$source_summary" | human_table
+
+  printf '\nTop five combined: %s (%s)\n' \
+    "$(jq -n --argjson n "$top_five_total" '
+      if $n >= 1000000000 then ((($n / 1000000000) * 100 | round) / 100 | tostring) + "B"
+      elif $n >= 1000000 then ((($n / 1000000) * 100 | round) / 100 | tostring) + "M"
+      elif $n >= 1000 then ((($n / 1000) * 10 | round) / 10 | tostring) + "K"
+      else ($n | tostring) end
+    ' -r)" \
+    "$(jq -n --argjson p "$top_five_share" '((($p * 10000) | round) / 100 | tostring) + "%"' -r)"
+
+  printf 'Other / unreturned: %s (%s)\n' \
+    "$(jq -n --argjson n "$other_total" '
+      if $n >= 1000000000 then ((($n / 1000000000) * 100 | round) / 100 | tostring) + "B"
+      elif $n >= 1000000 then ((($n / 1000000) * 100 | round) / 100 | tostring) + "M"
+      elif $n >= 1000 then ((($n / 1000) * 10 | round) / 10 | tostring) + "K"
+      else ($n | tostring) end
+    ' -r)" \
+    "$(jq -n --argjson p "$other_share" '((($p * 10000) | round) / 100 | tostring) + "%"' -r)"
+
+  printf '\nValidation:\n'
+  printf '  - Selected customer workspaces: %s; matched in attacks report: %s.\n' \
+    "$(jq 'length' <<<"$workspace_ids")" "$(jq 'length' <<<"$matched_body")"
+  printf '  - Total attack-signaled requests (report attack_count): %s.\n' "$attack_total"
+  printf '  - Returned per-workspace top-source rows account for %s of attack requests.\n' \
+    "$(jq -n --argjson p "$source_coverage" '((($p * 10000) | round) / 100 | tostring) + "%"' -r)"
+  printf '  - Country is request origin only; it does not establish attacker identity or intent.\n'
+  printf '  - Country is mutually exclusive per request, but the report may return only top sources for each workspace.\n'
+  printf 'WARNING: Named-country shares can be understated when returned-source coverage is below 100%%. Keep the remainder in "Other / unreturned" and validate coverage before using exact percentages in customer-facing material.\n'
+}
+
+cmd_signal_count() {
+  [[ $# -ge 2 && $# -le 3 ]] ||
+    die 'usage: ngwaf signal-count <workspace> <signal> [days]'
+
+  cmd_count "$1" "tag:$2" "${3:-7}"
+}
+
+usage() {
+  cat <<'HELP'
+Fastly NGWAF read-only helper
+
+Customer / auth:
+  ngwaf version
+  ngwaf whoami
+  ngwaf use <customer_id>
+  ngwaf customer
+  ngwaf workspaces
+
+30-day-style analytics:
+  ngwaf overview [days] [--json]
+  ngwaf timeseries <workspace> [days] [--json]
+  ngwaf metrics <metric1,metric2,...> [days] [--json]
+  ngwaf attack-profile [days] [--json]
+  ngwaf attack-profile <FROM> <TO> [--json]
+  ngwaf attack-origins [days] [--json]
+  ngwaf attack-origins <FROM> <TO> [--json]
+
+Bot Management monthly stats:
+  ngwaf bot-stats <service_id> [days] [--json]
+  ngwaf bot-stats <service_id> <FROM> <TO> [--json]
+  ngwaf intl-bot-stats [days] [--json]
+  ngwaf intl-bot-stats <FROM> <TO> [--json]
+  ngwaf intl-bot-types [days] [--json]
+  ngwaf intl-bot-types <FROM> <TO> [--json]
+
+Workspace configuration:
+  ngwaf workspace <workspace>
+  ngwaf posture <workspace>
+  ngwaf rules <workspace> [--list|--json]
+  ngwaf thresholds <workspace> [--json]
+  ngwaf bot-rules <workspace>
+
+Recent request search (1-7 days):
+  ngwaf count <workspace> '<Fastly Search query>' [days]
+  ngwaf signal-count <workspace> <signal> [days]
+
+Examples:
+  ngwaf use 6C07TtEzfBKdmffwdcdHLD
+  ngwaf overview
+  ngwaf overview 30 --json
+  ngwaf timeseries ngwaf-production 30
+  ngwaf metrics 'XSS,SQLI,HTTP404' 30
+  ngwaf metrics 'SUSPECTED-BAD-BOT,DATACENTER' 30
+
+  # QBR NGWAF attack-profile validation; TO is exclusive:
+  ngwaf attack-profile 2026-08-01 2026-09-01
+  ngwaf attack-profile 2026-08-01 2026-09-01 --json
+
+  # Attack origins report is limited to 30 days:
+  ngwaf attack-origins 30
+  ngwaf attack-origins 30 --json
+
+  # Historical Bot Management, default 30 complete UTC days:
+  ngwaf bot-stats SERVICE_ID
+  ngwaf bot-stats SERVICE_ID 30
+
+  # Exact slide-validation window; TO is exclusive:
+  ngwaf bot-stats SERVICE_ID 2026-08-01 2026-09-01
+
+  # Current Costco international Bot Management slide:
+  ngwaf intl-bot-stats 2026-08-01 2026-09-01
+  ngwaf intl-bot-stats 2026-08-01 2026-09-01 --json
+  ngwaf intl-bot-types 2026-08-01 2026-09-01
+
+  ngwaf posture production
+  ngwaf bot-rules production
+  ngwaf signal-count production SUSPECTED-BAD-BOT 7
+
+Notes:
+  - Timeseries commands use complete UTC days and accept 1-30 days.
+  - attack-profile defaults to 30 complete UTC days; exact FROM/TO windows up to
+    31 days are allowed for calendar-month slide validation. It ranks production
+    workspaces by requests_attack and sums attack signals across the same top five.
+    TO is exclusive.
+  - attack-origins uses the NGWAF attacks report and is limited to 30 days.
+    It filters report rows to workspace IDs belonging to the selected customer,
+    aggregates returned top_attack_sources by country, and reports source-list
+    coverage so truncated per-workspace source lists are not mistaken for a full
+    country histogram.
+  - bot-stats uses Fastly Historical Stats for one Fastly service and is
+    intentionally limited to a rolling 1-30 day window for this workflow.
+  - Exact Bot Management date windows are limited to 31 days so a full
+    calendar month such as Aug 1 -> Sep 1 can be reproduced.
+  - intl-bot-stats and intl-bot-types are intentionally scoped to the 11
+    international production service names used by the current Costco QBR slide.
+  - Bot type classifications can overlap. intl-bot-types reports them side by side
+    but does not treat them as mutually exclusive or force them to sum to 100%.
+  - Bot Management metrics are sampled and scaled estimates. The script reports
+    bot-detected / bot-analyzed for Bot % of analyzed, but it does not divide
+    Bot Management counters by edge_requests because those counters are not
+    directly comparable.
+  - Actual metrics retention depends on the customer's entitlement.
+  - Request-search commands are intentionally limited to 1-7 days.
+  - 'metrics' passes metric names directly to Fastly; invalid metrics return
+    the Fastly API error instead of silently changing the query.
+HELP
+}
+
+case "${1:-help}" in
+  version)
+    shift
+    cmd_version "$@"
+    ;;
+  whoami)
+    shift
+    cmd_whoami "$@"
+    ;;
+  use)
+    shift
+    cmd_use "$@"
+    ;;
+  customer)
+    shift
+    cmd_customer "$@"
+    ;;
+  workspaces)
+    shift
+    cmd_workspaces "$@"
+    ;;
+  overview)
+    shift
+    cmd_overview "$@"
+    ;;
+  timeseries)
+    shift
+    cmd_timeseries "$@"
+    ;;
+  metrics)
+    shift
+    cmd_metrics "$@"
+    ;;
+  attack-profile)
+    shift
+    cmd_attack_profile "$@"
+    ;;
+  attack-origins)
+    shift
+    cmd_attack_origins "$@"
+    ;;
+  bot-stats)
+    shift
+    cmd_bot_stats "$@"
+    ;;
+  intl-bot-stats)
+    shift
+    cmd_intl_bot_stats "$@"
+    ;;
+  intl-bot-types)
+    shift
+    cmd_intl_bot_types "$@"
+    ;;
+  workspace)
+    shift
+    cmd_workspace "$@"
+    ;;
+  posture)
+    shift
+    cmd_posture "$@"
+    ;;
+  rules)
+    shift
+    cmd_rules "$@"
+    ;;
+  thresholds)
+    shift
+    cmd_thresholds "$@"
+    ;;
+  bot-rules)
+    shift
+    cmd_bot_rules "$@"
+    ;;
+  count)
+    shift
+    cmd_count "$@"
+    ;;
+  signal-count)
+    shift
+    cmd_signal_count "$@"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    die "unknown command: $1; run: ngwaf help"
+    ;;
+esac

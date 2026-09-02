@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BIN_DIR="$HOME/bin"
+TARGET="$BIN_DIR/ngwaf"
+DOWNLOADS="$HOME/Downloads"
+
+candidate="${1:-}"
+
+if [[ -z "$candidate" ]]; then
+  shopt -s nullglob
+  files=("$DOWNLOADS"/ngwaf-v*.sh)
+  shopt -u nullglob
+
+  ((${#files[@]} > 0)) || {
+    printf 'ngwaf-update: no ngwaf-v*.sh files found in %s\n' "$DOWNLOADS" >&2
+    exit 1
+  }
+
+  candidate="$(ls -t "${files[@]}" | head -n 1)"
+fi
+
+[[ -f "$candidate" ]] || {
+  printf 'ngwaf-update: file not found: %s\n' "$candidate" >&2
+  exit 1
+}
+
+# Never replace the working helper with a shell-syntax error.
+bash -n "$candidate"
+
+mkdir -p "$BIN_DIR"
+
+if [[ -f "$TARGET" ]]; then
+  backup="$TARGET.backup-$(date +%Y%m%d-%H%M%S)"
+  cp "$TARGET" "$backup"
+  printf 'Backup: %s\n' "$backup"
+fi
+
+install -m 755 "$candidate" "$TARGET"
+printf 'Installed: %s -> %s\n' "$candidate" "$TARGET"
+
+if "$TARGET" version >/dev/null 2>&1; then
+  "$TARGET" version
+else
+  printf 'Update complete.\n'
+fi
