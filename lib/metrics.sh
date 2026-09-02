@@ -231,13 +231,23 @@ cmd_count() {
   [[ $# -ge 2 && $# -le 3 ]] ||
     die "usage: ngwaf count <workspace> '<search query>' [days]"
 
-  local cid w query days end start body
+  local cid w requested_query query days end start body
   cid="$(current_cid)"
   w="$1"
-  query="$2"
+  requested_query="$2"
+  query="$requested_query"
   days="${3:-7}"
 
   validate_request_days "$days"
+
+  # Fastly's request-search key for a matching rule ID is `ruleid`. Earlier
+  # helper guidance used `rule`, which the API silently ignored and therefore
+  # returned the unfiltered workspace total. Preserve that convenient spelling
+  # as an explicit, visible alias rather than returning a misleading count.
+  if [[ "$query" =~ (^|[[:space:]])rule: ]]; then
+    query="$(sed -E 's/(^|[[:space:]])rule:/\1ruleid:/g' <<<"$query")"
+    printf 'ngwaf: note: normalized search key rule: to ruleid:\n' >&2
+  fi
 
   # Five-minute buffer for the request-search ingestion pipeline.
   if date -u -v-5M +%s >/dev/null 2>&1; then
@@ -249,23 +259,37 @@ cmd_count() {
   start=$((end - (days * 86400)))
 
   body="$(
+    NGWAF_PROGRESS_LABEL="counting matching requests in $w" \
     get "$(workspace_path "$w")/requests" \
       --data-urlencode "customer_id=$cid" \
       --data-urlencode "limit=1" \
       --data-urlencode "q=from:$start until:$end $query"
   )"
 
+  jq -e '
+    (.data | type) == "array"
+    and (.meta | type) == "object"
+    and ((.meta.total | type) == "number")
+    and (.meta.total >= 0)
+  ' >/dev/null <<<"$body" ||
+    die 'request search returned an unexpected response; refusing to report a count'
+
   jq -n \
     --arg workspace "$w" \
     --arg query "$query" \
+    --arg requested_query "$requested_query" \
     --argjson days "$days" \
-    --argjson count "$(jq '.meta.total // 0' <<<"$body")" \
+    --argjson count "$(jq '.meta.total' <<<"$body")" \
     '{
       workspace: $workspace,
       days: $days,
       query: $query,
       count: $count
-    }'
+    }
+    + (if $query != $requested_query
+       then {requested_query: $requested_query, query_normalized: true}
+       else {query_normalized: false}
+       end)'
 }
 
 cmd_attack_profile() {
@@ -820,4 +844,3 @@ cmd_signal_count() {
 
   cmd_count "$1" "tag:$2" "${3:-7}"
 }
-

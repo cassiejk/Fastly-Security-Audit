@@ -1,6 +1,6 @@
-# ngwaf-helper v21
+# ngwaf-helper v21.2
 
-v21 is a **structural refactor of v20**. The command surface and API logic are intentionally unchanged; the monolithic 3,200-line Bash file is split into focused modules.
+v21.2 builds on the v21 structural refactor with shared HTTP progress and error handling, request-count query validation, and macOS Bash 3.2 compatibility for zero-retry API calls.
 
 ## Layout
 
@@ -39,6 +39,18 @@ Before committing:
 ./scripts/check
 ```
 
+API requests show an interactive spinner and elapsed time on stderr, leaving
+stdout safe for JSON pipelines. Useful controls:
+
+```bash
+NGWAF_PROGRESS=never ngwaf count production 'tag:XSS' 7
+NGWAF_DEBUG=1 ngwaf count production 'ruleid:RULE_ID' 7
+NGWAF_CURL_CONNECT_TIMEOUT=5 NGWAF_CURL_MAX_TIME=60 ngwaf workspaces
+```
+
+The default transport policy performs one retry, with a 90-second retry window.
+Override it with `NGWAF_CURL_RETRIES` and `NGWAF_CURL_RETRY_MAX_TIME`.
+
 ## Installation
 
 The old `ngwaf-update ./ngwaf` workflow is preserved, but the updater now installs the whole package under `~/.local/share/ngwaf` and symlinks `~/bin/ngwaf` to its entry point.
@@ -55,9 +67,9 @@ Then future updates remain:
 ngwaf-update ./ngwaf
 ```
 
-## Refactor boundary
+## Refactor history
 
-v21 deliberately does **not** change API semantics. Existing functions were moved intact from v20 into modules. Functional changes should be made in later versions so a behavioral regression can be distinguished from the refactor itself.
+v21 deliberately did **not** change API semantics. Existing functions were moved intact from v20 into modules so behavioral regressions could be distinguished from the refactor. v21.1 was the first post-refactor behavioral release; v21.2 fixes the zero-retry test path on macOS Bash 3.2.
 
 ### Known scope caveat retained from v20
 

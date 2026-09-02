@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# Globals below are consumed by modules sourced dynamically later in this file.
+# shellcheck disable=SC2034
 set -euo pipefail
 
-VERSION="21.0"
+VERSION="21.2"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -9,6 +11,8 @@ CORE_METRICS="requests_total,requests_attack,requests_total_blocked"
 BOT_HIST_FIELDS="edge_requests,bot_edge_requests_analyzed_count,bot_edge_requests_detected_count,bot_edge_requests_verified_count,bot_edge_requests_headless_count,bot_edge_requests_ai_crawler_count,bot_edge_requests_ai_fetcher_count,bot_edge_requests_search_engine_crawler_count,bot_edge_requests_accessibility_count,bot_edge_requests_content_fetcher_count,bot_edge_requests_monitoring_count,bot_edge_requests_online_marketing_count,bot_edge_requests_page_preview_count,bot_edge_requests_platform_integrations_count,bot_edge_requests_research_count,bot_edge_requests_search_engine_optimization_count,bot_edge_requests_security_tools_count"
 CURL_CONNECT_TIMEOUT="${NGWAF_CURL_CONNECT_TIMEOUT:-5}"
 CURL_MAX_TIME="${NGWAF_CURL_MAX_TIME:-60}"
+CURL_RETRIES="${NGWAF_CURL_RETRIES:-1}"
+CURL_RETRY_MAX_TIME="${NGWAF_CURL_RETRY_MAX_TIME:-90}"
 SERVICE_AUDIT_DAYS="${NGWAF_SERVICE_AUDIT_DAYS:-365}"
 SERVICE_AUDIT_MAX_PAGES="${NGWAF_SERVICE_AUDIT_MAX_PAGES:-25}"
 SERVICE_AUDIT_PAGE_SIZE="${NGWAF_SERVICE_AUDIT_PAGE_SIZE:-100}"

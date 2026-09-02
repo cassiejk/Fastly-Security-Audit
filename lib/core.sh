@@ -1,4 +1,6 @@
 # shellcheck shell=bash
+# Date-window globals are consumed by other sourced modules.
+# shellcheck disable=SC2034
 # Sourced by the ngwaf entry point; do not execute directly.
 
 die() {
@@ -26,41 +28,206 @@ urlencode() {
   jq -rn --arg v "$1" '$v | @uri'
 }
 
+progress_enabled() {
+  case "${NGWAF_PROGRESS:-auto}" in
+    always|1|true|yes)
+      return 0
+      ;;
+    never|0|false|no)
+      return 1
+      ;;
+    auto|'')
+      [[ -t 2 && "${TERM:-dumb}" != "dumb" ]]
+      ;;
+    *)
+      die 'NGWAF_PROGRESS must be auto, always, or never'
+      ;;
+  esac
+}
+
+_ngwaf_progress_pid=""
+_ngwaf_progress_label=""
+_ngwaf_progress_started=0
+
+progress_start() {
+  local label="$1"
+  local frames='|/-'
+
+  _ngwaf_progress_pid=""
+  _ngwaf_progress_label="$label"
+  _ngwaf_progress_started="$(date +%s)"
+
+  progress_enabled || return 0
+
+  printf '\rngwaf: %s %s (0s)' "${frames:0:1}" "$label" >&2
+  (
+    local i=1 now elapsed frame
+    trap 'exit 0' INT TERM HUP
+    while :; do
+      sleep 0.2
+      now="$(date +%s)"
+      elapsed=$((now - _ngwaf_progress_started))
+      frame="${frames:$((i % 3)):1}"
+      printf '\rngwaf: %s %s (%ss)' "$frame" "$label" "$elapsed" >&2
+      i=$((i + 1))
+    done
+  ) &
+  _ngwaf_progress_pid=$!
+}
+
+progress_stop() {
+  local outcome="${1:-success}"
+  local now elapsed
+
+  [[ -n "$_ngwaf_progress_pid" ]] || return 0
+
+  kill "$_ngwaf_progress_pid" 2>/dev/null || true
+  wait "$_ngwaf_progress_pid" 2>/dev/null || true
+  _ngwaf_progress_pid=""
+
+  now="$(date +%s)"
+  elapsed=$((now - _ngwaf_progress_started))
+
+  if [[ -t 2 ]]; then
+    printf '\r\033[2K' >&2
+  else
+    printf '\n' >&2
+  fi
+
+  if [[ "$outcome" == "success" && "$elapsed" -ge 2 ]]; then
+    printf 'ngwaf: completed %s in %ss\n' "$_ngwaf_progress_label" "$elapsed" >&2
+  fi
+}
+
+debug_get_request() {
+  [[ "${NGWAF_DEBUG:-0}" == "1" ]] || return 0
+
+  local path="$1"
+  shift
+  local arg expect_value=false
+
+  printf 'ngwaf: debug: GET %s%s\n' "$API_BASE" "$path" >&2
+  for arg in "$@"; do
+    if [[ "$expect_value" == "true" ]]; then
+      printf 'ngwaf: debug: query parameter: %s\n' "$arg" >&2
+      expect_value=false
+    elif [[ "$arg" == "--data-urlencode" ]]; then
+      expect_value=true
+    elif [[ "$arg" == --data-urlencode=* ]]; then
+      printf 'ngwaf: debug: query parameter: %s\n' "${arg#--data-urlencode=}" >&2
+    fi
+  done
+}
+
+validate_http_settings() {
+  [[ "$CURL_CONNECT_TIMEOUT" =~ ^[0-9]+$ ]] ||
+    die 'NGWAF_CURL_CONNECT_TIMEOUT must be a non-negative integer'
+  [[ "$CURL_MAX_TIME" =~ ^[0-9]+$ ]] ||
+    die 'NGWAF_CURL_MAX_TIME must be a non-negative integer'
+  [[ "$CURL_RETRIES" =~ ^[0-9]+$ ]] ||
+    die 'NGWAF_CURL_RETRIES must be a non-negative integer'
+  [[ "$CURL_RETRY_MAX_TIME" =~ ^[0-9]+$ ]] ||
+    die 'NGWAF_CURL_RETRY_MAX_TIME must be a non-negative integer'
+}
+
+print_curl_failure() {
+  local rc="$1"
+  local path="$2"
+  local errfile="$3"
+
+  case "$rc" in
+    28)
+      printf 'ngwaf: Fastly API request timed out: GET %s\n' "$path" >&2
+      printf 'ngwaf: timeout limits: connect=%ss, transfer=%ss, retry-window=%ss\n' \
+        "$CURL_CONNECT_TIMEOUT" "$CURL_MAX_TIME" "$CURL_RETRY_MAX_TIME" >&2
+      ;;
+    130)
+      printf 'ngwaf: Fastly API request interrupted: GET %s\n' "$path" >&2
+      ;;
+    *)
+      printf 'ngwaf: Fastly API transport failed (curl exit %s): GET %s\n' \
+        "$rc" "$path" >&2
+      ;;
+  esac
+
+  if [[ -s "$errfile" ]]; then
+    sed 's/^/ngwaf: curl: /' "$errfile" >&2
+  fi
+}
+
 get() {
   local path="$1"
   shift
 
-  local tmp code
+  local tmp err_tmp code curl_rc=0
+  # Keep the array non-empty for macOS Bash 3.2 with `set -u`. Expanding an
+  # empty array under nounset exits on that shell. curl accepts --retry 0, so
+  # including the base option unconditionally is safe.
+  local -a retry_args=(--retry "$CURL_RETRIES")
   tmp="$(mktemp)"
+  err_tmp="$(mktemp)"
 
-  code="$(
+  validate_http_settings
+  debug_get_request "$path" "$@"
+  if (( CURL_RETRIES > 0 )); then
+    retry_args+=(
+      --retry-delay 1
+      --retry-max-time "$CURL_RETRY_MAX_TIME"
+      --retry-connrefused
+    )
+  fi
+
+  progress_start "${NGWAF_PROGRESS_LABEL:-querying Fastly API: $path}"
+
+  if code="$(
     curl -sS -G \
       --connect-timeout "$CURL_CONNECT_TIMEOUT" \
       --max-time "$CURL_MAX_TIME" \
+      "${retry_args[@]}" \
       -o "$tmp" \
       -w '%{http_code}' \
       -H "Fastly-Key: $FASTLY_API_TOKEN" \
       -H "Accept: application/json" \
       "$@" \
-      "$API_BASE$path"
-  )" || {
-    rm -f "$tmp"
-    die "curl request failed"
-  }
+      "$API_BASE$path" \
+      2>"$err_tmp"
+  )"; then
+    curl_rc=0
+  else
+    curl_rc=$?
+  fi
+
+  if (( curl_rc != 0 )); then
+    progress_stop error
+    print_curl_failure "$curl_rc" "$path" "$err_tmp"
+    rm -f "$tmp" "$err_tmp"
+    exit 1
+  fi
 
   case "$code" in
     2*)
+      progress_stop success
+      if ! jq -e . "$tmp" >/dev/null 2>&1; then
+        printf 'ngwaf: Fastly API returned invalid JSON: GET %s\n' "$path" >&2
+        if [[ "${NGWAF_DEBUG:-0}" == "1" ]]; then
+          printf 'ngwaf: debug: response preview follows\n' >&2
+          sed -n '1,20p' "$tmp" >&2
+        fi
+        rm -f "$tmp" "$err_tmp"
+        exit 1
+      fi
       cat "$tmp"
       ;;
     *)
-      printf 'Fastly API returned HTTP %s\n' "$code" >&2
-      jq . "$tmp" 2>/dev/null >&2 || cat "$tmp" >&2
-      rm -f "$tmp"
+      progress_stop error
+      printf 'ngwaf: Fastly API returned HTTP %s: GET %s\n' "$code" "$path" >&2
+      jq . "$tmp" >&2 2>/dev/null || cat "$tmp" >&2
+      rm -f "$tmp" "$err_tmp"
       exit 1
       ;;
   esac
 
-  rm -f "$tmp"
+  rm -f "$tmp" "$err_tmp"
 }
 
 # Read-only probe helper for inventory discovery. Unlike get(), this does not
@@ -76,22 +243,56 @@ http_get_to_file() {
   local outfile="$2"
   shift 2
 
-  local code
-  code="$(
+  local code err_tmp curl_rc=0
+  # See get(): the base option prevents an empty-array nounset failure on the
+  # Bash 3.2 version included with macOS.
+  local -a retry_args=(--retry "$CURL_RETRIES")
+  err_tmp="$(mktemp)"
+
+  validate_http_settings
+  debug_get_request "$path" "$@"
+  if (( CURL_RETRIES > 0 )); then
+    retry_args+=(
+      --retry-delay 1
+      --retry-max-time "$CURL_RETRY_MAX_TIME"
+      --retry-connrefused
+    )
+  fi
+
+  progress_start "${NGWAF_PROGRESS_LABEL:-querying Fastly API: $path}"
+
+  if code="$(
     curl -sS -G \
       --connect-timeout "$CURL_CONNECT_TIMEOUT" \
       --max-time "$CURL_MAX_TIME" \
+      "${retry_args[@]}" \
       -o "$outfile" \
       -w '%{http_code}' \
       -H "Fastly-Key: $FASTLY_API_TOKEN" \
       -H "Accept: application/json" \
       "$@" \
-      "$API_BASE$path"
-  )" || {
+      "$API_BASE$path" \
+      2>"$err_tmp"
+  )"; then
+    curl_rc=0
+  else
+    curl_rc=$?
+  fi
+
+  if (( curl_rc != 0 )); then
+    progress_stop error
+    print_curl_failure "$curl_rc" "$path" "$err_tmp"
+    rm -f "$err_tmp"
     printf '000\n'
     return
-  }
+  fi
 
+  case "$code" in
+    2*) progress_stop success ;;
+    *) progress_stop error ;;
+  esac
+
+  rm -f "$err_tmp"
   printf '%s\n' "$code"
 }
 
@@ -379,4 +580,3 @@ summarize_lists_json() {
       }
   '
 }
-

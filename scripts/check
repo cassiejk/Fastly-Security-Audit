@@ -15,7 +15,10 @@ else
 fi
 
 printf 'CLI smoke tests...\n'
-[[ "$($ROOT/ngwaf version)" == 'ngwaf 21.0' ]]
+[[ "$($ROOT/ngwaf version)" == 'ngwaf 21.2' ]]
 $ROOT/ngwaf help >/dev/null
+
+printf 'Behavior tests...\n'
+$ROOT/tests/count.sh
 
 printf 'OK\n'

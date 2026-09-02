@@ -81,6 +81,7 @@ Examples:
   ngwaf lists production
   ngwaf bot-rules production
   ngwaf signal-count production SUSPECTED-BAD-BOT 7
+  ngwaf count production 'ruleid:6047e66d33e0b901e666e424' 7
 
 Notes:
   - Timeseries commands use complete UTC days and accept 1-30 days.
@@ -128,8 +129,11 @@ Notes:
     directly comparable.
   - Actual metrics retention depends on the customer's entitlement.
   - Request-search commands are intentionally limited to 1-7 days.
+  - The Fastly request-search key for a matching rule ID is ruleid:<id>.
+  - API calls show an interactive progress indicator on stderr. Set
+    NGWAF_PROGRESS=never to disable it, or NGWAF_PROGRESS=always to force it.
+    Set NGWAF_DEBUG=1 to show request paths and query parameters (never tokens).
   - 'metrics' passes metric names directly to Fastly; invalid metrics return
     the Fastly API error instead of silently changing the query.
 HELP
 }
-

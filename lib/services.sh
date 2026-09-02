@@ -1,4 +1,7 @@
 # shellcheck shell=bash
+# Backticks in user-facing single-quoted messages are intentional Markdown-like
+# command delimiters, not shell substitutions.
+# shellcheck disable=SC2016
 # Sourced by the ngwaf entry point; do not execute directly.
 
 get_selected_services() {
@@ -669,4 +672,3 @@ cmd_inventory() {
     printf '\nWARNING: Some product checks were inconclusive. Run `ngwaf inventory --json` for exact HTTP statuses.\n' >&2
   fi
 }
-
