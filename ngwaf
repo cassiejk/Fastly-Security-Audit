@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="12.0"
+VERSION="13.0"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -1481,6 +1481,10 @@ cmd_attack_origins() {
   local workspace_id workspace_name body
   local workspace_index=0
   local top_limit=100
+  local chunk_days=7
+  local chunk_count=0
+  local range_start_epoch range_end_epoch chunk_start_epoch chunk_end_epoch
+  local chunk_from chunk_to
 
   if [[ "${!#:-}" == "--json" ]]; then
     format="--json"
@@ -1563,6 +1567,23 @@ cmd_attack_origins() {
     jq '[.data[]? | ((.values[0].requests_attack // 0) | tonumber? // 0)] | add // 0' <<<"$attack_ts"
   )"
 
+  # top-attacks enforces a maximum 7-day interval. Split the requested
+  # reporting window into contiguous <=7-day chunks and aggregate the country
+  # counts across chunks. This lets attack-origins support the same <=30-day
+  # reporting window as NGWAF timeseries while honoring the endpoint limit.
+  if date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$TS_FROM" "+%s" >/dev/null 2>&1; then
+    range_start_epoch="$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$TS_FROM" "+%s")"
+    range_end_epoch="$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$TS_TO" "+%s")"
+  else
+    range_start_epoch="$(date -u -d "$TS_FROM" "+%s")"
+    range_end_epoch="$(date -u -d "$TS_TO" "+%s")"
+  fi
+
+  (( range_end_epoch > range_start_epoch )) ||
+    die 'attack-origins resolved an invalid time range'
+
+  chunk_count=$(( (span_days + chunk_days - 1) / chunk_days ))
+
   tmp="$(mktemp)"
   : > "$tmp"
 
@@ -1580,36 +1601,58 @@ cmd_attack_origins() {
       printf '\r  [%s/%s] %s' "$workspace_index" "$workspace_count" "$workspace_name" >&2
     fi
 
-    body="$(
-      get "/ngwaf/v1/workspaces/$workspace_id/top-attacks" \
-        --data-urlencode "field=remote_country_code" \
-        --data-urlencode "from=$TS_FROM" \
-        --data-urlencode "to=$TS_TO" \
-        --data-urlencode "limit=$top_limit"
-    )"
+    chunk_start_epoch="$range_start_epoch"
+    while (( chunk_start_epoch < range_end_epoch )); do
+      chunk_end_epoch=$(( chunk_start_epoch + (chunk_days * 86400) ))
+      (( chunk_end_epoch > range_end_epoch )) && chunk_end_epoch="$range_end_epoch"
 
-    # Fail closed if Fastly changes the response shape.
-    jq -e '.data | type == "array"' <<<"$body" >/dev/null || {
-      rm -f "$tmp"
-      die "unexpected top-attacks response for workspace $workspace_name ($workspace_id)"
-    }
+      if date -u -r "$chunk_start_epoch" "+%Y-%m-%dT%H:%M:%SZ" >/dev/null 2>&1; then
+        chunk_from="$(date -u -r "$chunk_start_epoch" "+%Y-%m-%dT%H:%M:%SZ")"
+        chunk_to="$(date -u -r "$chunk_end_epoch" "+%Y-%m-%dT%H:%M:%SZ")"
+      else
+        chunk_from="$(date -u -d "@$chunk_start_epoch" "+%Y-%m-%dT%H:%M:%SZ")"
+        chunk_to="$(date -u -d "@$chunk_end_epoch" "+%Y-%m-%dT%H:%M:%SZ")"
+      fi
 
-    jq -c --arg workspace_id "$workspace_id" --arg workspace_name "$workspace_name" '
-      .data[]?
-      | {
-          workspace_id: $workspace_id,
-          workspace: $workspace_name,
-          country_code: (.value // ""),
-          country: (
-            if ((.display_name // "") | length) > 0 then .display_name
-            elif (.value // "") == "private" then "Private Network"
-            elif (.value // "") == "" then "Unknown"
-            else .value
-            end
-          ),
-          requests: ((.count // 0) | tonumber? // 0)
-        }
-    ' <<<"$body" >> "$tmp"
+      body="$(
+        get "/ngwaf/v1/workspaces/$workspace_id/top-attacks" \
+          --data-urlencode "field=remote_country_code" \
+          --data-urlencode "from=$chunk_from" \
+          --data-urlencode "to=$chunk_to" \
+          --data-urlencode "limit=$top_limit"
+      )"
+
+      # Fail closed if Fastly changes the response shape.
+      jq -e '.data | type == "array"' <<<"$body" >/dev/null || {
+        rm -f "$tmp"
+        die "unexpected top-attacks response for workspace $workspace_name ($workspace_id), chunk $chunk_from -> $chunk_to"
+      }
+
+      jq -c \
+        --arg workspace_id "$workspace_id" \
+        --arg workspace_name "$workspace_name" \
+        --arg chunk_from "$chunk_from" \
+        --arg chunk_to "$chunk_to" '
+        .data[]?
+        | {
+            workspace_id: $workspace_id,
+            workspace: $workspace_name,
+            chunk_from: $chunk_from,
+            chunk_to: $chunk_to,
+            country_code: (.value // ""),
+            country: (
+              if ((.display_name // "") | length) > 0 then .display_name
+              elif (.value // "") == "private" then "Private Network"
+              elif (.value // "") == "" then "Unknown"
+              else .value
+              end
+            ),
+            requests: ((.count // 0) | tonumber? // 0)
+          }
+      ' <<<"$body" >> "$tmp"
+
+      chunk_start_epoch="$chunk_end_epoch"
+    done
   done < <(jq -r '.data[] | [.id, .name] | @tsv' <<<"$workspaces_body")
   if [[ "$format" != "--json" ]]; then
     printf '\r%*s\r' 100 '' >&2
@@ -1672,6 +1715,8 @@ cmd_attack_origins() {
       --argjson span_days "$span_days" \
       --argjson workspace_count "$workspace_count" \
       --argjson per_workspace_limit "$top_limit" \
+      --argjson chunk_days "$chunk_days" \
+      --argjson chunks_per_workspace "$chunk_count" \
       --argjson attack_requests "$attack_total" \
       --argjson returned_source_requests "$returned_source_total" \
       --argjson returned_source_coverage "$source_coverage" \
@@ -1690,7 +1735,9 @@ cmd_attack_origins() {
         span_days: $span_days,
         workspace_count: $workspace_count,
         source: "GET /ngwaf/v1/workspaces/{workspace_id}/top-attacks?field=remote_country_code",
-        per_workspace_limit: $per_workspace_limit,
+        per_workspace_limit_per_chunk: $per_workspace_limit,
+        max_days_per_top_attacks_query: $chunk_days,
+        chunks_per_workspace: $chunks_per_workspace,
         attack_requests_timeseries: $attack_requests,
         returned_country_requests: $returned_source_requests,
         returned_country_coverage_vs_requests_attack: $returned_source_coverage,
@@ -1704,7 +1751,7 @@ cmd_attack_origins() {
           share_of_attack_requests: $other_share
         },
         countries: $countries,
-        methodology: "Resolve workspaces from the selected customer ID, query each workspace top-attacks endpoint with field=remote_country_code, aggregate country counts across those workspaces, and reconcile the returned country counts against customer-scoped requests_attack timeseries."
+        methodology: "Resolve workspaces from the selected customer ID, split the requested reporting period into contiguous intervals of 7 days or less, query each workspace top-attacks endpoint with field=remote_country_code for every interval, aggregate country counts across intervals and workspaces, and reconcile the returned country counts against customer-scoped requests_attack timeseries."
       }'
     return
   fi
@@ -1740,12 +1787,14 @@ cmd_attack_origins() {
   printf '\nValidation:\n'
   printf '  - Customer: %s (%s).\n' "$customer" "$cid"
   printf '  - Workspaces queried directly: %s.\n' "$workspace_count"
+  printf '  - top-attacks chunking: %s chunk(s) per workspace, each <= %s days (%s API calls total).\n' \
+    "$chunk_count" "$chunk_days" "$((workspace_count * chunk_count))"
   printf '  - Customer-scoped requests_attack timeseries: %s.\n' "$attack_total"
   printf '  - Country rows returned by top-attacks: %s (%s of requests_attack).\n' \
     "$returned_source_total" \
     "$(jq -n --argjson p "$source_coverage" '((($p * 10000) | round) / 100 | tostring) + "%"' -r)"
   printf '  - Country identifies request origin only; it does not establish attacker identity or intent.\n'
-  printf '  - Each workspace query is capped at the top %s country rows; use the coverage figure to detect an incomplete tail.\n' "$top_limit"
+  printf '  - Each workspace/chunk query is capped at the top %s country rows; use the coverage figure to detect an incomplete tail.\n' "$top_limit"
   printf 'WARNING: Do not use exact country shares customer-facing unless returned country coverage reconciles closely with requests_attack. A materially low or >100%% coverage indicates truncation or a metric-semantics mismatch that must be investigated first.\n'
 }
 
