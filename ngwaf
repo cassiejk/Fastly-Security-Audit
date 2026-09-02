@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="14.0"
+VERSION="15.0"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -1474,8 +1474,10 @@ cmd_attack_profile() {
 
 cmd_attack_origins() {
   local format=""
-  local cid customer workspaces_body workspace_total workspace_returned
+  local cid customer workspaces_body production_workspaces workspace_total workspace_returned
   local span_days="" workspace_count attack_ts attack_total
+  local prod_regex='(^|[-_])(prd|prod|production)([-_]|$)'
+  local production_workspace_names
   local tmp rows source_summary returned_source_total source_coverage
   local top_five_total top_five_share returned_top_five_share other_total other_share
   local workspace_id workspace_name body
@@ -1549,22 +1551,37 @@ cmd_attack_origins() {
   if (( workspace_total > workspace_returned )); then
     die "selected customer has $workspace_total workspaces but only $workspace_returned were returned; pagination is required before attack-origins can be trusted"
   fi
-  workspace_count="$workspace_returned"
 
-  # requests_attack is used as an independent denominator/reconciliation check.
-  # Country rows come from each workspace's top-attacks aggregation.
+  # QBR scope: production workspaces only. Use the same token-aware production
+  # naming rule as attack-profile so dev/staging/perf/etc. are not queried.
+  production_workspaces="$(
+    jq --arg prod_regex "$prod_regex" '[.data[] | select(.name | test($prod_regex; "i"))]' <<<"$workspaces_body"
+  )"
+  workspace_count="$(jq 'length' <<<"$production_workspaces")"
+  (( workspace_count > 0 )) || die "no production workspaces matched $prod_regex for selected customer"
+  production_workspace_names="$(jq '[.[].name]' <<<"$production_workspaces")"
+
+  # requests_attack is the independent denominator/reconciliation check and MUST
+  # use the same production workspace set as the country numerator.
   attack_ts="$(
     get "/ngwaf/v1/timeseries" \
       --data-urlencode "customer_id=$cid" \
       --data-urlencode "from=$TS_FROM" \
       --data-urlencode "to=$TS_TO" \
       --data-urlencode "metrics=requests_attack" \
-      --data-urlencode "dimensions=time" \
+      --data-urlencode "dimensions=workspaces,time" \
       --data-urlencode "granularity=86400"
   )"
 
   attack_total="$(
-    jq '[.data[]? | ((.values[0].requests_attack // 0) | tonumber? // 0)] | add // 0' <<<"$attack_ts"
+    jq --argjson production_names "$production_workspace_names" '
+      [
+        .data[]?
+        | select(.dimensions.workspace as $w | $production_names | index($w))
+        | ((.values[0].requests_attack // 0) | tonumber? // 0)
+      ]
+      | add // 0
+    ' <<<"$attack_ts"
   )"
 
   # top-attacks enforces a maximum 7-day interval. Split the requested
@@ -1590,7 +1607,7 @@ cmd_attack_origins() {
   if [[ "$format" != "--json" ]]; then
     printf '%s — NGWAF attack request origins\n' "$customer"
     printf '%s → %s UTC (TO is exclusive; %s days)\n' "$TS_FROM" "$TS_TO" "$span_days"
-    printf 'Scope: selected customer (%s), %s NGWAF workspaces\n' "$cid" "$workspace_count"
+    printf 'Scope: selected customer (%s), %s production NGWAF workspaces (prd/prod/production)\n' "$cid" "$workspace_count"
     printf 'Querying per-workspace top-attacks by remote country code...\n\n'
   fi
 
@@ -1654,7 +1671,7 @@ cmd_attack_origins() {
 
       chunk_start_epoch="$chunk_end_epoch"
     done
-  done < <(jq -r '.data[] | [.id, .name] | @tsv' <<<"$workspaces_body")
+  done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$production_workspaces")
   if [[ "$format" != "--json" ]]; then
     printf '\r%*s\r' 100 '' >&2
   fi
@@ -1714,6 +1731,8 @@ cmd_attack_origins() {
       --arg from "$TS_FROM" \
       --arg to "$TS_TO" \
       --argjson span_days "$span_days" \
+      --arg production_workspace_filter "$prod_regex" \
+      --argjson production_workspaces "$production_workspace_names" \
       --argjson workspace_count "$workspace_count" \
       --argjson per_workspace_limit "$top_limit" \
       --argjson chunk_days "$chunk_days" \
@@ -1734,6 +1753,9 @@ cmd_attack_origins() {
         to: $to,
         to_is_exclusive: true,
         span_days: $span_days,
+        scope: "production workspaces only",
+        production_workspace_filter: $production_workspace_filter,
+        production_workspaces: $production_workspaces,
         workspace_count: $workspace_count,
         source: "GET /ngwaf/v1/workspaces/{workspace_id}/top-attacks?customer_id={customer_id}&field=remote_country_code",
         per_workspace_limit_per_chunk: $per_workspace_limit,
@@ -1752,7 +1774,7 @@ cmd_attack_origins() {
           share_of_attack_requests: $other_share
         },
         countries: $countries,
-        methodology: "Resolve workspaces from the selected customer ID, split the requested reporting period into contiguous intervals of 7 days or less, query each workspace top-attacks endpoint with customer_id and field=remote_country_code for every interval, aggregate country counts across intervals and workspaces, and reconcile the returned country counts against customer-scoped requests_attack timeseries."
+        methodology: "Resolve workspaces from the selected customer ID, retain production workspaces whose names contain a prd/prod/production token, split the requested reporting period into contiguous intervals of 7 days or less, query each selected workspace top-attacks endpoint with customer_id and field=remote_country_code for every interval, aggregate country counts across intervals and workspaces, and reconcile the returned country counts against requests_attack timeseries for that exact same production workspace set."
       }'
     return
   fi
@@ -1787,10 +1809,10 @@ cmd_attack_origins() {
 
   printf '\nValidation:\n'
   printf '  - Customer: %s (%s).\n' "$customer" "$cid"
-  printf '  - Workspaces queried directly: %s.\n' "$workspace_count"
+  printf '  - Production workspaces queried directly: %s (filter: %s).\n' "$workspace_count" "$prod_regex"
   printf '  - top-attacks chunking: %s chunk(s) per workspace, each <= %s days (%s API calls total).\n' \
     "$chunk_count" "$chunk_days" "$((workspace_count * chunk_count))"
-  printf '  - Customer-scoped requests_attack timeseries: %s.\n' "$attack_total"
+  printf '  - Production-workspace requests_attack timeseries: %s.\n' "$attack_total"
   printf '  - Country rows returned by top-attacks: %s (%s of requests_attack).\n' \
     "$returned_source_total" \
     "$(jq -n --argjson p "$source_coverage" '((($p * 10000) | round) / 100 | tostring) + "%"' -r)"
