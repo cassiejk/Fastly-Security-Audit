@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="17.0"
+VERSION="18.0"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -289,6 +289,67 @@ human_table() {
   fi
 }
 
+
+# Summarize a normalized rules collection without assuming that every customer
+# uses the same rule types or actions. The dynamic type/action maps preserve
+# unknown/new API values while the convenience counters expose common controls.
+summarize_rules_json() {
+  jq '
+    def norm:
+      tostring | gsub("[^A-Za-z0-9]"; "") | ascii_downcase;
+
+    def counts($items):
+      ($items | sort | group_by(.) | map({key: .[0], value: length}) | from_entries);
+
+    . as $body
+    | ($body.data // []) as $rules
+    | {
+        total: ($rules | length),
+        enabled: ([$rules[] | select(.enabled == true)] | length),
+        disabled: ([$rules[] | select(.enabled == false)] | length),
+        enabled_allow_rules: (
+          [$rules[] | select(.enabled == true and ([.actions[]?.type // empty | norm] | index("allow") != null))]
+          | length
+        ),
+        enabled_block_rules: (
+          [$rules[] | select(.enabled == true and ([.actions[]?.type // empty | norm] | index("block") != null))]
+          | length
+        ),
+        enabled_browser_challenge_rules: (
+          [$rules[] | select(.enabled == true and ([.actions[]?.type // empty | norm] | index("browserchallenge") != null))]
+          | length
+        ),
+        enabled_rate_limit_rules: (
+          [$rules[] | select(.enabled == true and ((.type // "") | norm | test("ratelimit")))]
+          | length
+        ),
+        enabled_signal_exclusion_rules: (
+          [$rules[] | select(.enabled == true and ((.type // "") | norm | test("signalexclusion")))]
+          | length
+        ),
+        rule_types: counts([$rules[] | (.type // "unknown")]),
+        enabled_actions: counts([$rules[] | select(.enabled == true) | .actions[]?.type // "unknown"]),
+        pages_fetched: ($body.meta.pages_fetched // 1)
+      }
+  '
+}
+
+summarize_lists_json() {
+  jq '
+    def counts($items):
+      ($items | sort | group_by(.) | map({key: .[0], value: length}) | from_entries);
+
+    . as $body
+    | ($body.data // []) as $lists
+    | {
+        total: ($lists | length),
+        by_type: counts([$lists[] | (.type // "unknown")]),
+        total_entries_returned: ([$lists[] | ((.entries // []) | length)] | add // 0),
+        pages_fetched: ($body.meta.pages_fetched // 1)
+      }
+  '
+}
+
 cmd_version() {
   printf 'ngwaf %s\n' "$VERSION"
 }
@@ -369,7 +430,7 @@ cmd_workspace() {
 cmd_rules() {
   [[ $# -ge 1 ]] || die 'usage: ngwaf rules <workspace> [--list|--json]'
 
-  local cid w mode body
+  local cid w mode body summary
   cid="$(current_cid)"
   w="$1"
   mode="${2:-}"
@@ -384,31 +445,85 @@ cmd_rules() {
     return
   fi
 
-  jq --arg w "$w" '{
-    workspace: $w,
-    total_rules: (.data | length),
-    enabled_rules: ([.data[] | select(.enabled == true)] | length),
-    disabled_rules: ([.data[] | select(.enabled == false)] | length),
-    enabled_allow_rules: (
-      [
-        .data[]
-        | select(
-            .enabled == true
-            and ((.actions | tostring) | test("allow"; "i"))
-          )
-      ] | length
-    ),
-    pages_fetched: (.meta.pages_fetched // 1)
-  }' <<<"$body"
+  summary="$(summarize_rules_json <<<"$body")"
+
+  jq --arg w "$w" '. + {workspace: $w}' <<<"$summary" |
+    jq '{
+      workspace,
+      total_rules: .total,
+      enabled_rules: .enabled,
+      disabled_rules: .disabled,
+      enabled_allow_rules,
+      enabled_block_rules,
+      enabled_browser_challenge_rules,
+      enabled_rate_limit_rules,
+      enabled_signal_exclusion_rules,
+      rule_types,
+      enabled_actions,
+      pages_fetched
+    }'
 
   if [[ "$mode" == "--list" ]]; then
     printf '\n'
     jq -r '
-      ["ENABLED", "ACTIONS", "DESCRIPTION"],
+      ["TYPE", "ENABLED", "ACTIONS", "DESCRIPTION"],
       (
         .data[]
         | [
+            (.type // "unknown"),
             (.enabled | tostring),
+            ([.actions[]?.type] | join(",")),
+            (.description // "")
+          ]
+      )
+      | @tsv
+    ' <<<"$body" | human_table
+  fi
+}
+
+cmd_account_rules() {
+  [[ $# -le 1 ]] || die 'usage: ngwaf account-rules [--list|--json]'
+
+  local cid mode body summary
+  cid="$(current_cid)"
+  mode="${1:-}"
+
+  [[ -z "$mode" || "$mode" == "--list" || "$mode" == "--json" ]] ||
+    die 'usage: ngwaf account-rules [--list|--json]'
+
+  body="$(
+    get_all_pages "/ngwaf/v1/rules" \
+      --data-urlencode "customer_id=$cid"
+  )"
+
+  if [[ "$mode" == "--json" ]]; then
+    jq . <<<"$body"
+    return
+  fi
+
+  summary="$(summarize_rules_json <<<"$body")"
+
+  jq --arg cid "$cid" '
+    . + {
+      customer_id: $cid,
+      global_rules: 0,
+      workspace_scoped_rules: 0
+    }
+  ' <<<"$summary" |
+  jq --argjson globals "$(jq '[.data[] | select(((.scope.applies_to // []) | index("*")) != null)] | length' <<<"$body")" \
+     --argjson scoped "$(jq '[.data[] | select(((.scope.applies_to // []) | index("*")) == null)] | length' <<<"$body")" \
+    '.global_rules = $globals | .workspace_scoped_rules = $scoped'
+
+  if [[ "$mode" == "--list" ]]; then
+    printf '\n'
+    jq -r '
+      ["TYPE", "ENABLED", "APPLIES TO", "ACTIONS", "DESCRIPTION"],
+      (
+        .data[]
+        | [
+            (.type // "unknown"),
+            (.enabled | tostring),
+            ((.scope.applies_to // []) | join(",")),
             ([.actions[]?.type] | join(",")),
             (.description // "")
           ]
@@ -447,10 +562,10 @@ cmd_thresholds() {
 cmd_posture() {
   [[ $# -eq 1 ]] || die 'usage: ngwaf posture <workspace>'
 
-  local cid w ws rules thresholds
-  local mode immediate response_code
-  local total_rules enabled_rules allow_rules pages_fetched
-  local total_thresholds enabled_thresholds
+  local cid w ws ws_id rules account_rules account_applying thresholds
+  local workspace_lists account_lists
+  local rules_summary account_summary workspace_lists_summary account_lists_summary
+  local threshold_summary
 
   cid="$(current_cid)"
   w="$1"
@@ -460,9 +575,32 @@ cmd_posture() {
       --data-urlencode "customer_id=$cid"
   )"
 
+  ws_id="$(jq -r '.id // empty' <<<"$ws")"
+  [[ -n "$ws_id" ]] || die "workspace $w response did not include an id"
+
   rules="$(
     get_all_pages "$(workspace_path "$w")/rules" \
       --data-urlencode "customer_id=$cid"
+  )"
+
+  # Account-level rules are a separate control layer. Filter their scope to
+  # rules that are global (*) or explicitly include this workspace ID.
+  account_rules="$(
+    get_all_pages "/ngwaf/v1/rules" \
+      --data-urlencode "customer_id=$cid"
+  )"
+
+  account_applying="$(
+    jq --arg wsid "$ws_id" '
+      .data = [
+        .data[]
+        | select(
+            ((.scope.applies_to // []) | index("*")) != null
+            or ((.scope.applies_to // []) | index($wsid)) != null
+          )
+      ]
+      | .meta.total = (.data | length)
+    ' <<<"$account_rules"
   )"
 
   thresholds="$(
@@ -470,56 +608,126 @@ cmd_posture() {
       --data-urlencode "customer_id=$cid"
   )"
 
-  mode="$(jq -r '.mode // "unknown"' <<<"$ws")"
-  immediate="$(jq -r '.attack_signal_thresholds.immediate // false' <<<"$ws")"
-  response_code="$(jq -r '.default_blocking_response_code // null' <<<"$ws")"
-
-  total_rules="$(jq '.data | length' <<<"$rules")"
-  pages_fetched="$(jq '.meta.pages_fetched // 1' <<<"$rules")"
-  enabled_rules="$(jq '[.data[] | select(.enabled == true)] | length' <<<"$rules")"
-  allow_rules="$(
-    jq '
-      [
-        .data[]
-        | select(
-            .enabled == true
-            and ((.actions | tostring) | test("allow"; "i"))
-          )
-      ] | length
-    ' <<<"$rules"
+  # Lists are inventory context: rules may reference account- or workspace-level
+  # lists. Presence of a list does not prove that any specific rule uses it.
+  workspace_lists="$(
+    get_all_pages "$(workspace_path "$w")/lists" \
+      --data-urlencode "customer_id=$cid"
   )"
 
-  total_thresholds="$(jq '.data | length' <<<"$thresholds")"
-  enabled_thresholds="$(jq '[.data[] | select(.enabled == true)] | length' <<<"$thresholds")"
+  account_lists="$(
+    get_all_pages "/ngwaf/v1/lists" \
+      --data-urlencode "customer_id=$cid"
+  )"
+
+  rules_summary="$(summarize_rules_json <<<"$rules")"
+  account_summary="$(summarize_rules_json <<<"$account_applying")"
+  workspace_lists_summary="$(summarize_lists_json <<<"$workspace_lists")"
+  account_lists_summary="$(summarize_lists_json <<<"$account_lists")"
+
+  threshold_summary="$(
+    jq '
+      def counts($items):
+        ($items | sort | group_by(.) | map({key: .[0], value: length}) | from_entries);
+      {
+        total: (.data | length),
+        enabled: ([.data[] | select(.enabled == true)] | length),
+        disabled: ([.data[] | select(.enabled == false)] | length),
+        enabled_by_action: counts([.data[] | select(.enabled == true) | (.action // "unknown")]),
+        enabled_block_immediately: ([.data[] | select(.enabled == true and .action == "block_immediately")] | length)
+      }
+    ' <<<"$thresholds"
+  )"
 
   jq -n \
     --arg workspace "$w" \
-    --arg mode "$mode" \
-    --argjson immediate "$immediate" \
-    --argjson response_code "$response_code" \
-    --argjson total_rules "$total_rules" \
-    --argjson enabled_rules "$enabled_rules" \
-    --argjson allow_rules "$allow_rules" \
-    --argjson pages_fetched "$pages_fetched" \
-    --argjson total_thresholds "$total_thresholds" \
-    --argjson enabled_thresholds "$enabled_thresholds" \
+    --arg workspace_id "$ws_id" \
+    --arg customer_id "$cid" \
+    --argjson ws "$ws" \
+    --argjson rules "$rules_summary" \
+    --argjson account_rules "$account_summary" \
+    --argjson account_global "$(jq '[.data[] | select(((.scope.applies_to // []) | index("*")) != null)] | length' <<<"$account_applying")" \
+    --argjson account_specific "$(jq --arg wsid "$ws_id" '[.data[] | select(((.scope.applies_to // []) | index("*")) == null and ((.scope.applies_to // []) | index($wsid)) != null)] | length' <<<"$account_applying")" \
+    --argjson thresholds "$threshold_summary" \
+    --argjson workspace_lists "$workspace_lists_summary" \
+    --argjson account_lists "$account_lists_summary" \
     '{
       workspace: $workspace,
+      workspace_id: $workspace_id,
+      customer_id: $customer_id,
       enforcement: {
-        mode: $mode,
-        immediate_blocking: $immediate,
-        default_blocking_response_code: $response_code
+        mode: ($ws.mode // "unknown"),
+        immediate_blocking: ($ws.attack_signal_thresholds.immediate // false),
+        default_blocking_response_code: ($ws.default_blocking_response_code // null)
       },
-      rules: {
-        total: $total_rules,
-        enabled: $enabled_rules,
-        enabled_allow_rules: $allow_rules,
-        pages_fetched: ($pages_fetched)
-      },
-      thresholds: {
-        total: $total_thresholds,
-        enabled: $enabled_thresholds
+      attack_thresholds: ($ws.attack_signal_thresholds // {}),
+      rules: $rules,
+      account_rules_applying: (
+        $account_rules
+        + {
+            global: $account_global,
+            workspace_specific: $account_specific,
+            note: "Filtered to account rules whose scope.applies_to is * or this workspace ID."
+          }
+      ),
+      signal_thresholds: $thresholds,
+      lists: {
+        workspace: $workspace_lists,
+        account: $account_lists,
+        note: "List inventory only. Presence of a list does not establish that a rule references it."
       }
+    }'
+}
+
+cmd_lists() {
+  [[ $# -ge 1 && $# -le 2 ]] || die 'usage: ngwaf lists <workspace> [--json]'
+
+  local cid w mode ws_body ws_id workspace_lists account_lists
+  local workspace_summary account_summary
+  cid="$(current_cid)"
+  w="$1"
+  mode="${2:-}"
+
+  [[ -z "$mode" || "$mode" == "--json" ]] ||
+    die 'usage: ngwaf lists <workspace> [--json]'
+
+  ws_body="$(get "$(workspace_path "$w")" --data-urlencode "customer_id=$cid")"
+  ws_id="$(jq -r '.id // empty' <<<"$ws_body")"
+  [[ -n "$ws_id" ]] || die "workspace $w response did not include an id"
+
+  workspace_lists="$(
+    get_all_pages "$(workspace_path "$w")/lists" \
+      --data-urlencode "customer_id=$cid"
+  )"
+  account_lists="$(
+    get_all_pages "/ngwaf/v1/lists" \
+      --data-urlencode "customer_id=$cid"
+  )"
+
+  if [[ "$mode" == "--json" ]]; then
+    jq -n \
+      --arg workspace "$w" \
+      --arg workspace_id "$ws_id" \
+      --argjson workspace_lists "$workspace_lists" \
+      --argjson account_lists "$account_lists" \
+      '{workspace: $workspace, workspace_id: $workspace_id, workspace_lists: $workspace_lists, account_lists: $account_lists}'
+    return
+  fi
+
+  workspace_summary="$(summarize_lists_json <<<"$workspace_lists")"
+  account_summary="$(summarize_lists_json <<<"$account_lists")"
+
+  jq -n \
+    --arg workspace "$w" \
+    --arg workspace_id "$ws_id" \
+    --argjson workspace_lists "$workspace_summary" \
+    --argjson account_lists "$account_summary" \
+    '{
+      workspace: $workspace,
+      workspace_id: $workspace_id,
+      workspace_lists: $workspace_lists,
+      account_lists: $account_lists,
+      note: "List inventory only; this does not prove which lists are referenced by effective rules."
     }'
 }
 
@@ -2055,11 +2263,13 @@ Bot Management monthly stats:
   ngwaf intl-bot-types [days] [--json]
   ngwaf intl-bot-types <FROM> <TO> [--json]
 
-Workspace configuration:
+Account / workspace configuration:
+  ngwaf account-rules [--list|--json]
   ngwaf workspace <workspace>
   ngwaf posture <workspace>
   ngwaf rules <workspace> [--list|--json]
   ngwaf thresholds <workspace> [--json]
+  ngwaf lists <workspace> [--json]
   ngwaf bot-rules <workspace> [--json]
 
 Recent request search (1-7 days):
@@ -2094,7 +2304,9 @@ Examples:
   ngwaf intl-bot-stats 2026-08-01 2026-09-01 --json
   ngwaf intl-bot-types 2026-08-01 2026-09-01
 
+  ngwaf account-rules
   ngwaf posture production
+  ngwaf lists production
   ngwaf bot-rules production
   ngwaf signal-count production SUSPECTED-BAD-BOT 7
 
@@ -2114,6 +2326,12 @@ Notes:
     calendar month such as Aug 1 -> Sep 1 can be reproduced.
   - intl-bot-stats and intl-bot-types are intentionally scoped to the 11
     international production service names used by the current Costco QBR slide.
+  - posture includes workspace rule types/actions, standard attack thresholds,
+    signal thresholds, account-level rules whose scope applies to the workspace,
+    and account/workspace list inventory. List presence is inventory context only;
+    it does not prove that a rule references a list.
+  - account-rules reads the separate account-level NGWAF rule layer and preserves
+    rule type, action, and scope details.
   - bot-rules scans the complete paginated workspace rule set for bot signal
     families, client-challenge signals/actions, and DATACENTER as bot-adjacent
     evidence. DATACENTER is not treated as a bot verdict.
@@ -2183,6 +2401,10 @@ case "${1:-help}" in
     shift
     cmd_intl_bot_types "$@"
     ;;
+  account-rules)
+    shift
+    cmd_account_rules "$@"
+    ;;
   workspace)
     shift
     cmd_workspace "$@"
@@ -2198,6 +2420,10 @@ case "${1:-help}" in
   thresholds)
     shift
     cmd_thresholds "$@"
+    ;;
+  lists)
+    shift
+    cmd_lists "$@"
     ;;
   bot-rules)
     shift
