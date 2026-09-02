@@ -79,6 +79,8 @@ jq -e '
   and .requested_query == "rule:abc123"
   and .query_normalized == true
   and .count == 42
+  and .count_scope == "retained_searchable_request_records"
+  and .sampling_caveat == "This count may reflect sampled or mixed-storage request data. It is not raw traffic or a scaled estimate."
 ' >/dev/null <<<"$output"
 grep -E '^q=from:[0-9]+ until:[0-9]+ ruleid:abc123$' "$TEST_TMP/curl-args" >/dev/null
 ! grep -E '^q=.* rule:abc123$' "$TEST_TMP/curl-args" >/dev/null

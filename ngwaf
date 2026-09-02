@@ -3,7 +3,7 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-VERSION="21.2"
+VERSION="21.3"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"

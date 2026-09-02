@@ -130,6 +130,10 @@ Notes:
   - Actual metrics retention depends on the customer's entitlement.
   - Request-search commands are intentionally limited to 1-7 days.
   - The Fastly request-search key for a matching rule ID is ruleid:<id>.
+  - count and signal-count report the request-search API's matching retained
+    records. Depending on storage category, those records may be sampled or
+    mixed-storage data. The result is not raw traffic or a scaled estimate, and
+    ratios derived from it describe searchable matches rather than all traffic.
   - API calls show an interactive progress indicator on stderr. Set
     NGWAF_PROGRESS=never to disable it, or NGWAF_PROGRESS=always to force it.
     Set NGWAF_DEBUG=1 to show request paths and query parameters (never tokens).

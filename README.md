@@ -1,6 +1,6 @@
-# ngwaf-helper v21.2
+# ngwaf-helper v21.3
 
-v21.2 builds on the v21 structural refactor with shared HTTP progress and error handling, request-count query validation, and macOS Bash 3.2 compatibility for zero-retry API calls.
+v21.3 builds on the v21 structural refactor with shared HTTP progress and error handling, request-count query validation, macOS Bash 3.2 compatibility, and explicit request-search sampling semantics.
 
 ## Layout
 
@@ -21,7 +21,8 @@ ngwaf-helper/
 ├── scripts/
 │   └── check              # syntax + optional ShellCheck + smoke tests
 └── tests/
-    └── smoke.sh
+    ├── smoke.sh
+    └── count.sh
 ```
 
 ## Development
@@ -51,6 +52,15 @@ NGWAF_CURL_CONNECT_TIMEOUT=5 NGWAF_CURL_MAX_TIME=60 ngwaf workspaces
 The default transport policy performs one retry, with a 90-second retry window.
 Override it with `NGWAF_CURL_RETRIES` and `NGWAF_CURL_RETRY_MAX_TIME`.
 
+### Request-search count semantics
+
+`count` and `signal-count` return Fastly's request-search `meta.total` value.
+This is a count of retained searchable request records, which may include
+sampled or mixed-storage data depending on the matching signals and storage
+category. It is not raw traffic and the helper does not scale it into an
+estimated traffic total. Ratios calculated from these values describe shares
+of searchable matches, not exact shares of all production traffic.
+
 ## Installation
 
 The old `ngwaf-update ./ngwaf` workflow is preserved, but the updater now installs the whole package under `~/.local/share/ngwaf` and symlinks `~/bin/ngwaf` to its entry point.
@@ -69,7 +79,7 @@ ngwaf-update ./ngwaf
 
 ## Refactor history
 
-v21 deliberately did **not** change API semantics. Existing functions were moved intact from v20 into modules so behavioral regressions could be distinguished from the refactor. v21.1 was the first post-refactor behavioral release; v21.2 fixes the zero-retry test path on macOS Bash 3.2.
+v21 deliberately did **not** change API semantics. Existing functions were moved intact from v20 into modules so behavioral regressions could be distinguished from the refactor. v21.1 was the first post-refactor behavioral release, v21.2 fixed the zero-retry test path on macOS Bash 3.2, and v21.3 makes request-search sampling semantics explicit in every count result.
 
 ### Known scope caveat retained from v20
 

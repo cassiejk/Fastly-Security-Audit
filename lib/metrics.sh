@@ -284,7 +284,9 @@ cmd_count() {
       workspace: $workspace,
       days: $days,
       query: $query,
-      count: $count
+      count: $count,
+      count_scope: "retained_searchable_request_records",
+      sampling_caveat: "This count may reflect sampled or mixed-storage request data. It is not raw traffic or a scaled estimate."
     }
     + (if $query != $requested_query
        then {requested_query: $requested_query, query_normalized: true}
