@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="15.0"
+VERSION="16.0"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -66,6 +66,117 @@ get() {
   esac
 
   rm -f "$tmp"
+}
+
+# Fetch every page from NGWAF list endpoints that use limit/page pagination.
+# Returns one normalized object:
+#   {"meta":{"limit":100,"total":N,"pages_fetched":P},"data":[...]}
+#
+# Safety behavior: if the API advertises more rows than we can retrieve,
+# fail rather than silently returning a partial security configuration.
+get_all_pages() {
+  [[ $# -ge 1 ]] || die 'get_all_pages requires an API path'
+
+  local path="$1"
+  shift
+
+  local limit=100
+  local page=1
+  local pages_fetched=0
+  local fetched=0
+  local total=-1
+  local body count page_total
+  local pages_tmp
+
+  pages_tmp="$(mktemp)"
+
+  while :; do
+    body="$(
+      get "$path" \
+        "$@" \
+        --data-urlencode "limit=$limit" \
+        --data-urlencode "page=$page"
+    )"
+
+    jq -e '.data | type == "array"' >/dev/null <<<"$body" ||
+      {
+        rm -f "$pages_tmp"
+        die "paginated endpoint $path did not return a data array"
+      }
+
+    count="$(jq '.data | length' <<<"$body")"
+    page_total="$(jq -r '.meta.total // empty' <<<"$body")"
+
+    if [[ -n "$page_total" && "$page_total" =~ ^[0-9]+$ ]]; then
+      if (( total < 0 )); then
+        total="$page_total"
+      elif (( page_total != total )); then
+        printf 'WARNING: pagination total changed from %s to %s while reading %s; using latest total.\n' \
+          "$total" "$page_total" "$path" >&2
+        total="$page_total"
+      fi
+    elif (( total < 0 )); then
+      # Metadata should normally contain meta.total. If it does not,
+      # a short page is the only safe completion signal available.
+      total=0
+    fi
+
+    jq '.data' <<<"$body" >>"$pages_tmp"
+    fetched=$(( fetched + count ))
+    pages_fetched=$(( pages_fetched + 1 ))
+
+    if (( total > 0 && fetched >= total )); then
+      break
+    fi
+
+    if (( count == 0 )); then
+      if (( total > fetched )); then
+        rm -f "$pages_tmp"
+        die "pagination for $path stopped early: retrieved $fetched of $total items"
+      fi
+      total="$fetched"
+      break
+    fi
+
+    if (( count < limit )); then
+      if (( total > fetched )); then
+        rm -f "$pages_tmp"
+        die "pagination for $path returned a short page before completion: retrieved $fetched of $total items"
+      fi
+      total="$fetched"
+      break
+    fi
+
+    page=$(( page + 1 ))
+    (( page <= 1000 )) || {
+      rm -f "$pages_tmp"
+      die "pagination safety limit exceeded for $path"
+    }
+  done
+
+  if (( total == 0 )); then
+    total="$fetched"
+  fi
+
+  if (( fetched < total )); then
+    rm -f "$pages_tmp"
+    die "pagination for $path incomplete: retrieved $fetched of $total items"
+  fi
+
+  jq -s \
+    --argjson limit "$limit" \
+    --argjson total "$total" \
+    --argjson pages_fetched "$pages_fetched" \
+    '{
+      meta: {
+        limit: $limit,
+        total: $total,
+        pages_fetched: $pages_fetched
+      },
+      data: (add // [])
+    }' "$pages_tmp"
+
+  rm -f "$pages_tmp"
 }
 
 current_cid() {
@@ -216,9 +327,8 @@ cmd_workspaces() {
   cid="$(current_cid)"
 
   body="$(
-    get "/ngwaf/v1/workspaces" \
-      --data-urlencode "customer_id=$cid" \
-      --data-urlencode "limit=100"
+    get_all_pages "/ngwaf/v1/workspaces" \
+      --data-urlencode "customer_id=$cid"
   )"
 
   total="$(jq -r '.meta.total // (.data | length)' <<<"$body")"
@@ -259,15 +369,14 @@ cmd_workspace() {
 cmd_rules() {
   [[ $# -ge 1 ]] || die 'usage: ngwaf rules <workspace> [--list|--json]'
 
-  local cid w mode body total returned
+  local cid w mode body
   cid="$(current_cid)"
   w="$1"
   mode="${2:-}"
 
   body="$(
-    get "$(workspace_path "$w")/rules" \
-      --data-urlencode "customer_id=$cid" \
-      --data-urlencode "limit=100"
+    get_all_pages "$(workspace_path "$w")/rules" \
+      --data-urlencode "customer_id=$cid"
   )"
 
   if [[ "$mode" == "--json" ]]; then
@@ -277,10 +386,10 @@ cmd_rules() {
 
   jq --arg w "$w" '{
     workspace: $w,
-    total_rules_returned: (.data | length),
-    enabled_rules_returned: ([.data[] | select(.enabled == true)] | length),
-    disabled_rules_returned: ([.data[] | select(.enabled == false)] | length),
-    enabled_allow_rules_returned: (
+    total_rules: (.data | length),
+    enabled_rules: ([.data[] | select(.enabled == true)] | length),
+    disabled_rules: ([.data[] | select(.enabled == false)] | length),
+    enabled_allow_rules: (
       [
         .data[]
         | select(
@@ -288,15 +397,9 @@ cmd_rules() {
             and ((.actions | tostring) | test("allow"; "i"))
           )
       ] | length
-    )
+    ),
+    pages_fetched: (.meta.pages_fetched // 1)
   }' <<<"$body"
-
-  total="$(jq -r '.meta.total // (.data | length)' <<<"$body")"
-  returned="$(jq -r '.data | length' <<<"$body")"
-  if (( total > returned )); then
-    printf 'WARNING: API returned %s of %s rules; counts above are partial.\n' \
-      "$returned" "$total" >&2
-  fi
 
   if [[ "$mode" == "--list" ]]; then
     printf '\n'
@@ -346,7 +449,7 @@ cmd_posture() {
 
   local cid w ws rules thresholds
   local mode immediate response_code
-  local total_rules enabled_rules allow_rules
+  local total_rules enabled_rules allow_rules pages_fetched
   local total_thresholds enabled_thresholds
 
   cid="$(current_cid)"
@@ -358,9 +461,8 @@ cmd_posture() {
   )"
 
   rules="$(
-    get "$(workspace_path "$w")/rules" \
-      --data-urlencode "customer_id=$cid" \
-      --data-urlencode "limit=100"
+    get_all_pages "$(workspace_path "$w")/rules" \
+      --data-urlencode "customer_id=$cid"
   )"
 
   thresholds="$(
@@ -373,6 +475,7 @@ cmd_posture() {
   response_code="$(jq -r '.default_blocking_response_code // null' <<<"$ws")"
 
   total_rules="$(jq '.data | length' <<<"$rules")"
+  pages_fetched="$(jq '.meta.pages_fetched // 1' <<<"$rules")"
   enabled_rules="$(jq '[.data[] | select(.enabled == true)] | length' <<<"$rules")"
   allow_rules="$(
     jq '
@@ -397,6 +500,7 @@ cmd_posture() {
     --argjson total_rules "$total_rules" \
     --argjson enabled_rules "$enabled_rules" \
     --argjson allow_rules "$allow_rules" \
+    --argjson pages_fetched "$pages_fetched" \
     --argjson total_thresholds "$total_thresholds" \
     --argjson enabled_thresholds "$enabled_thresholds" \
     '{
@@ -407,9 +511,10 @@ cmd_posture() {
         default_blocking_response_code: $response_code
       },
       rules: {
-        total_returned: $total_rules,
-        enabled_returned: $enabled_rules,
-        enabled_allow_rules_returned: $allow_rules
+        total: $total_rules,
+        enabled: $enabled_rules,
+        enabled_allow_rules: $allow_rules,
+        pages_fetched: ($pages_fetched)
       },
       thresholds: {
         total: $total_thresholds,
@@ -426,9 +531,8 @@ cmd_bot_rules() {
   w="$1"
 
   body="$(
-    get "$(workspace_path "$w")/rules" \
-      --data-urlencode "customer_id=$cid" \
-      --data-urlencode "limit=100"
+    get_all_pages "$(workspace_path "$w")/rules" \
+      --data-urlencode "customer_id=$cid"
   )"
 
   jq -r '
