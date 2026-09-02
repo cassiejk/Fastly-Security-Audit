@@ -16,11 +16,12 @@ cmd_workspaces() {
   printf 'Total NGWAF workspaces: %s\n\n' "$total"
 
   jq -r '
-    .data
-    | sort_by(.name)
-    | .[]
-    | .name
-  ' <<<"$body"
+    ["NAME", "ID"],
+    (.data | sort_by(.name) | .[] | [.name, .id])
+    | @tsv
+  ' <<<"$body" | human_table
+
+  printf '\nSource: GET /ngwaf/v1/workspaces (selected customer; complete pagination or failure)\n'
 
   if (( total > returned )); then
     printf '\nWARNING: API returned %s of %s workspaces.\n' \
@@ -31,43 +32,73 @@ cmd_workspaces() {
 cmd_workspace() {
   [[ $# -eq 1 ]] || die 'usage: ngwaf workspace <workspace>'
 
-  local cid w
+  local cid input resolved w ws_id body
   cid="$(current_cid)"
-  w="$1"
+  input="$1"
+  resolved="$(resolve_workspace_json "$input")"
+  w="$(jq -r '.name' <<<"$resolved")"
+  ws_id="$(jq -r '.id' <<<"$resolved")"
 
-  get "$(workspace_path "$w")" \
-    --data-urlencode "customer_id=$cid" |
-    jq '{
-      name,
+  body="$(get "$(workspace_path "$ws_id")" --data-urlencode "customer_id=$cid")"
+  jq --arg input "$input" --arg workspace "$w" --arg workspace_id "$ws_id" '{
+      workspace: $workspace,
+      workspace_id: $workspace_id,
+      workspace_input: $input,
       mode,
       immediate_blocking: (.attack_signal_thresholds.immediate // null),
-      default_blocking_response_code
-    }'
+      default_blocking_response_code,
+      provenance: {
+        endpoint: "GET /ngwaf/v1/workspaces/{workspace_id}",
+        data_class: "configuration_snapshot",
+        customer_scoped: true
+      }
+    }' <<<"$body"
 }
 
 cmd_rules() {
   [[ $# -ge 1 ]] || die 'usage: ngwaf rules <workspace> [--list|--json]'
 
-  local cid w mode body summary
+  local cid input resolved w ws_id mode body summary
   cid="$(current_cid)"
-  w="$1"
+  input="$1"
+  resolved="$(resolve_workspace_json "$input")"
+  w="$(jq -r '.name' <<<"$resolved")"
+  ws_id="$(jq -r '.id' <<<"$resolved")"
   mode="${2:-}"
 
   body="$(
-    get_all_pages "$(workspace_path "$w")/rules" \
+    get_all_pages "$(workspace_path "$ws_id")/rules" \
       --data-urlencode "customer_id=$cid"
   )"
 
   if [[ "$mode" == "--json" ]]; then
-    jq . <<<"$body"
+    jq \
+      --arg workspace "$w" \
+      --arg workspace_id "$ws_id" \
+      --arg workspace_input "$input" \
+      '. + {
+        context: {
+          workspace: $workspace,
+          workspace_id: $workspace_id,
+          workspace_input: $workspace_input
+        },
+        provenance: {
+          endpoint: "GET /ngwaf/v1/workspaces/{workspace_id}/rules",
+          data_class: "configuration_snapshot",
+          pagination: "complete_or_fail"
+        }
+      }' <<<"$body"
     return
   fi
 
   summary="$(summarize_rules_json <<<"$body")"
 
-  jq --arg w "$w" '. + {workspace: $w}' <<<"$summary" |
+  jq --arg w "$w" --arg wsid "$ws_id" --arg input "$input" \
+    '. + {workspace: $w, workspace_id: $wsid, workspace_input: $input}' <<<"$summary" |
     jq '{
       workspace,
+      workspace_id,
+      workspace_input,
       total_rules: .total,
       enabled_rules: .enabled,
       disabled_rules: .disabled,
@@ -115,7 +146,14 @@ cmd_account_rules() {
   )"
 
   if [[ "$mode" == "--json" ]]; then
-    jq . <<<"$body"
+    jq --arg customer_id "$cid" '. + {
+      context: {customer_id: $customer_id},
+      provenance: {
+        endpoint: "GET /ngwaf/v1/rules",
+        data_class: "configuration_snapshot",
+        pagination: "complete_or_fail"
+      }
+    }' <<<"$body"
     return
   fi
 
@@ -125,7 +163,12 @@ cmd_account_rules() {
     . + {
       customer_id: $cid,
       global_rules: 0,
-      workspace_scoped_rules: 0
+      workspace_scoped_rules: 0,
+      provenance: {
+        endpoint: "GET /ngwaf/v1/rules",
+        data_class: "configuration_snapshot",
+        pagination: "complete_or_fail"
+      }
     }
   ' <<<"$summary" |
   jq --argjson globals "$(jq '[.data[] | select(((.scope.applies_to // []) | index("*")) != null)] | length' <<<"$body")" \
@@ -154,23 +197,40 @@ cmd_account_rules() {
 cmd_thresholds() {
   [[ $# -ge 1 ]] || die 'usage: ngwaf thresholds <workspace> [--json]'
 
-  local cid w mode body
+  local cid input resolved w ws_id mode body
   cid="$(current_cid)"
-  w="$1"
+  input="$1"
+  resolved="$(resolve_workspace_json "$input")"
+  w="$(jq -r '.name' <<<"$resolved")"
+  ws_id="$(jq -r '.id' <<<"$resolved")"
   mode="${2:-}"
 
   body="$(
-    get "$(workspace_path "$w")/thresholds" \
+    get "$(workspace_path "$ws_id")/thresholds" \
       --data-urlencode "customer_id=$cid"
   )"
 
   if [[ "$mode" == "--json" ]]; then
-    jq . <<<"$body"
+    jq --arg workspace "$w" --arg workspace_id "$ws_id" --arg workspace_input "$input" '
+      . + {
+        context: {
+          workspace: $workspace,
+          workspace_id: $workspace_id,
+          workspace_input: $workspace_input
+        },
+        provenance: {
+          endpoint: "GET /ngwaf/v1/workspaces/{workspace_id}/thresholds",
+          data_class: "configuration_snapshot"
+        }
+      }
+    ' <<<"$body"
     return
   fi
 
-  jq --arg w "$w" '{
+  jq --arg w "$w" --arg wsid "$ws_id" --arg input "$input" '{
     workspace: $w,
+    workspace_id: $wsid,
+    workspace_input: $input,
     total_thresholds: (.data | length),
     enabled_thresholds: ([.data[] | select(.enabled == true)] | length),
     disabled_thresholds: ([.data[] | select(.enabled == false)] | length)
@@ -180,24 +240,27 @@ cmd_thresholds() {
 cmd_posture() {
   [[ $# -eq 1 ]] || die 'usage: ngwaf posture <workspace>'
 
-  local cid w ws ws_id rules account_rules account_applying thresholds
+  local cid input resolved w ws ws_id rules account_rules account_applying thresholds
   local workspace_lists account_lists
   local rules_summary account_summary workspace_lists_summary account_lists_summary
   local threshold_summary
 
   cid="$(current_cid)"
-  w="$1"
+  input="$1"
+  resolved="$(resolve_workspace_json "$input")"
+  w="$(jq -r '.name' <<<"$resolved")"
+  ws_id="$(jq -r '.id' <<<"$resolved")"
 
   ws="$(
-    get "$(workspace_path "$w")" \
+    get "$(workspace_path "$ws_id")" \
       --data-urlencode "customer_id=$cid"
   )"
 
-  ws_id="$(jq -r '.id // empty' <<<"$ws")"
-  [[ -n "$ws_id" ]] || die "workspace $w response did not include an id"
+  [[ "$(jq -r '.id // empty' <<<"$ws")" == "$ws_id" ]] ||
+    die "workspace response ID did not match resolved workspace $ws_id"
 
   rules="$(
-    get_all_pages "$(workspace_path "$w")/rules" \
+    get_all_pages "$(workspace_path "$ws_id")/rules" \
       --data-urlencode "customer_id=$cid"
   )"
 
@@ -222,14 +285,14 @@ cmd_posture() {
   )"
 
   thresholds="$(
-    get "$(workspace_path "$w")/thresholds" \
+    get "$(workspace_path "$ws_id")/thresholds" \
       --data-urlencode "customer_id=$cid"
   )"
 
   # Lists are inventory context: rules may reference account- or workspace-level
   # lists. Presence of a list does not prove that any specific rule uses it.
   workspace_lists="$(
-    get_all_pages "$(workspace_path "$w")/lists" \
+    get_all_pages "$(workspace_path "$ws_id")/lists" \
       --data-urlencode "customer_id=$cid"
   )"
 
@@ -260,6 +323,7 @@ cmd_posture() {
   jq -n \
     --arg workspace "$w" \
     --arg workspace_id "$ws_id" \
+    --arg workspace_input "$input" \
     --arg customer_id "$cid" \
     --argjson ws "$ws" \
     --argjson rules "$rules_summary" \
@@ -272,6 +336,7 @@ cmd_posture() {
     '{
       workspace: $workspace,
       workspace_id: $workspace_id,
+      workspace_input: $workspace_input,
       customer_id: $customer_id,
       enforcement: {
         mode: ($ws.mode // "unknown"),
@@ -293,6 +358,11 @@ cmd_posture() {
         workspace: $workspace_lists,
         account: $account_lists,
         note: "List inventory only. Presence of a list does not establish that a rule references it."
+      },
+      provenance: {
+        data_class: "configuration_snapshot",
+        workspace_resolution: "exact ID first; otherwise case-insensitive exact name",
+        pagination: "complete_or_fail"
       }
     }'
 }
@@ -300,21 +370,20 @@ cmd_posture() {
 cmd_lists() {
   [[ $# -ge 1 && $# -le 2 ]] || die 'usage: ngwaf lists <workspace> [--json]'
 
-  local cid w mode ws_body ws_id workspace_lists account_lists
+  local cid input resolved w mode ws_id workspace_lists account_lists
   local workspace_summary account_summary
   cid="$(current_cid)"
-  w="$1"
+  input="$1"
+  resolved="$(resolve_workspace_json "$input")"
+  w="$(jq -r '.name' <<<"$resolved")"
+  ws_id="$(jq -r '.id' <<<"$resolved")"
   mode="${2:-}"
 
   [[ -z "$mode" || "$mode" == "--json" ]] ||
     die 'usage: ngwaf lists <workspace> [--json]'
 
-  ws_body="$(get "$(workspace_path "$w")" --data-urlencode "customer_id=$cid")"
-  ws_id="$(jq -r '.id // empty' <<<"$ws_body")"
-  [[ -n "$ws_id" ]] || die "workspace $w response did not include an id"
-
   workspace_lists="$(
-    get_all_pages "$(workspace_path "$w")/lists" \
+    get_all_pages "$(workspace_path "$ws_id")/lists" \
       --data-urlencode "customer_id=$cid"
   )"
   account_lists="$(
@@ -326,9 +395,22 @@ cmd_lists() {
     jq -n \
       --arg workspace "$w" \
       --arg workspace_id "$ws_id" \
+      --arg workspace_input "$input" \
       --argjson workspace_lists "$workspace_lists" \
       --argjson account_lists "$account_lists" \
-      '{workspace: $workspace, workspace_id: $workspace_id, workspace_lists: $workspace_lists, account_lists: $account_lists}'
+      '{
+        workspace: $workspace,
+        workspace_id: $workspace_id,
+        workspace_input: $workspace_input,
+        workspace_lists: $workspace_lists,
+        account_lists: $account_lists,
+        provenance: {
+          data_class: "configuration_snapshot",
+          workspace_endpoint: "GET /ngwaf/v1/workspaces/{workspace_id}/lists",
+          account_endpoint: "GET /ngwaf/v1/lists",
+          pagination: "complete_or_fail"
+        }
+      }'
     return
   fi
 
@@ -338,14 +420,15 @@ cmd_lists() {
   jq -n \
     --arg workspace "$w" \
     --arg workspace_id "$ws_id" \
+    --arg workspace_input "$input" \
     --argjson workspace_lists "$workspace_summary" \
     --argjson account_lists "$account_summary" \
     '{
       workspace: $workspace,
       workspace_id: $workspace_id,
+      workspace_input: $workspace_input,
       workspace_lists: $workspace_lists,
       account_lists: $account_lists,
       note: "List inventory only; this does not prove which lists are referenced by effective rules."
     }'
 }
-

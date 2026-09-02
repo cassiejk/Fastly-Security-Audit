@@ -3,7 +3,7 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-VERSION="21.3"
+VERSION="22.0"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -16,6 +16,7 @@ CURL_RETRY_MAX_TIME="${NGWAF_CURL_RETRY_MAX_TIME:-90}"
 SERVICE_AUDIT_DAYS="${NGWAF_SERVICE_AUDIT_DAYS:-365}"
 SERVICE_AUDIT_MAX_PAGES="${NGWAF_SERVICE_AUDIT_MAX_PAGES:-25}"
 SERVICE_AUDIT_PAGE_SIZE="${NGWAF_SERVICE_AUDIT_PAGE_SIZE:-100}"
+NGWAF_CUSTOMER_CONTEXT_JSON=""
 
 # Resolve the real installation directory even when ~/bin/ngwaf is a symlink.
 _ngwaf_source="${BASH_SOURCE[0]}"
@@ -54,6 +55,14 @@ case "${1:-help}" in
   *)
     [[ -n "${FASTLY_API_TOKEN:-}" ]] ||
       die 'FASTLY_API_TOKEN is not set'
+    ;;
+esac
+
+case "${1:-help}" in
+  help|-h|--help|version|whoami|use)
+    ;;
+  *)
+    confirm_customer_scope
     ;;
 esac
 

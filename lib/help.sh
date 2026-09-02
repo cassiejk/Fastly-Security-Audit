@@ -84,7 +84,13 @@ Examples:
   ngwaf count production 'ruleid:6047e66d33e0b901e666e424' 7
 
 Notes:
+  - Customer-scoped commands validate and print the selected customer name, ID,
+    and selection source on stderr. FASTLY_CUSTOMER_ID overrides the saved ID.
+  - Workspace arguments may be IDs or case-insensitive exact names. Exact IDs
+    win; missing or ambiguous names fail instead of being guessed.
   - Timeseries commands use complete UTC days and accept 1-30 days.
+    JSON output includes an exact window, provenance, and fail-closed
+    missing-data policy. Missing requested metrics are not replaced with zero.
   - attack-profile defaults to 30 complete UTC days; exact FROM/TO windows up to
     31 days are allowed for calendar-month slide validation. It ranks production
     workspaces by requests_attack and sums attack signals across the same top five.
@@ -129,6 +135,8 @@ Notes:
     directly comparable.
   - Actual metrics retention depends on the customer's entitlement.
   - Request-search commands are intentionally limited to 1-7 days.
+    Their JSON includes the exact rolling from/until timestamps, a five-minute
+    ingestion buffer, and request-search provenance.
   - The Fastly request-search key for a matching rule ID is ruleid:<id>.
   - count and signal-count report the request-search API's matching retained
     records. Depending on storage category, those records may be sampled or

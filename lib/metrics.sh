@@ -18,7 +18,7 @@ cmd_overview() {
   cid="$(current_cid)"
   make_timeseries_window "$days"
 
-  customer="$(get "/customer/$cid" | jq -r '.name')"
+  customer="$(current_customer_name)"
 
   body="$(
     get "/ngwaf/v1/timeseries" \
@@ -29,6 +29,8 @@ cmd_overview() {
       --data-urlencode "dimensions=workspaces,time" \
       --data-urlencode "granularity=86400"
   )"
+
+  validate_timeseries_response "$body" "$CORE_METRICS" "account overview"
 
   summary="$(
     jq '
@@ -42,9 +44,9 @@ cmd_overview() {
       | group_by(.workspace)
       | map({
           workspace: .[0].workspace,
-          requests_total: (map(.values.requests_total // 0) | add),
-          requests_attack: (map(.values.requests_attack // 0) | add),
-          requests_total_blocked: (map(.values.requests_total_blocked // 0) | add)
+          requests_total: (map(.values.requests_total | tonumber) | add),
+          requests_attack: (map(.values.requests_attack | tonumber) | add),
+          requests_total_blocked: (map(.values.requests_total_blocked | tonumber) | add)
         })
       | sort_by(-.requests_total)
     ' <<<"$body"
@@ -64,7 +66,20 @@ cmd_overview() {
         days: $days,
         from: $from,
         to: $to,
-        workspaces: $workspaces
+        window: {
+          type: "complete_utc_days",
+          from: $from,
+          to: $to,
+          to_is_exclusive: true
+        },
+        workspaces: $workspaces,
+        provenance: {
+          endpoint: "GET /ngwaf/v1/timeseries",
+          data_class: "ngwaf_timeseries",
+          aggregation: "sum_of_daily_workspace_rows",
+          requested_metrics: ["requests_total", "requests_attack", "requests_total_blocked"],
+          missing_data_policy: "fail_closed"
+        }
       }'
     return
   fi
@@ -99,9 +114,13 @@ cmd_overview() {
 cmd_timeseries() {
   [[ $# -ge 1 ]] || die 'usage: ngwaf timeseries <workspace> [days] [--json]'
 
-  local cid w days format body
+  local cid customer input resolved w ws_id days format body
   cid="$(current_cid)"
-  w="$1"
+  customer="$(current_customer_name)"
+  input="$1"
+  resolved="$(resolve_workspace_json "$input")"
+  w="$(jq -r '.name' <<<"$resolved")"
+  ws_id="$(jq -r '.id' <<<"$resolved")"
   days="${2:-30}"
   format="${3:-}"
 
@@ -117,7 +136,7 @@ cmd_timeseries() {
   make_timeseries_window "$days"
 
   body="$(
-    get "$(workspace_path "$w")/timeseries" \
+    get "$(workspace_path "$ws_id")/timeseries" \
       --data-urlencode "customer_id=$cid" \
       --data-urlencode "from=$TS_FROM" \
       --data-urlencode "to=$TS_TO" \
@@ -125,8 +144,42 @@ cmd_timeseries() {
       --data-urlencode "granularity=86400"
   )"
 
+  validate_timeseries_response "$body" "$CORE_METRICS" "timeseries for workspace $w"
+
   if [[ "$format" == "--json" ]]; then
-    jq . <<<"$body"
+    jq -n \
+      --arg workspace "$w" \
+      --arg workspace_id "$ws_id" \
+      --arg workspace_input "$input" \
+      --arg customer "$customer" \
+      --arg customer_id "$cid" \
+      --arg from "$TS_FROM" \
+      --arg to "$TS_TO" \
+      --argjson days "$days" \
+      --argjson response "$body" \
+      '{
+        customer: $customer,
+        customer_id: $customer_id,
+        workspace: $workspace,
+        workspace_id: $workspace_id,
+        workspace_input: $workspace_input,
+        days: $days,
+        window: {
+          type: "complete_utc_days",
+          from: $from,
+          to: $to,
+          to_is_exclusive: true
+        },
+        data: $response.data,
+        meta: ($response.meta // null),
+        provenance: {
+          endpoint: "GET /ngwaf/v1/workspaces/{workspace_id}/timeseries",
+          data_class: "ngwaf_timeseries",
+          granularity_seconds: 86400,
+          requested_metrics: ["requests_total", "requests_attack", "requests_total_blocked"],
+          missing_data_policy: "fail_closed"
+        }
+      }'
     return
   fi
 
@@ -141,9 +194,9 @@ cmd_timeseries() {
       | .[]
       | [
           ((.dimensions.time // .timestamp) | split("T")[0]),
-          ((.values[0].requests_total // 0) | tostring),
-          ((.values[0].requests_attack // 0) | tostring),
-          ((.values[0].requests_total_blocked // 0) | tostring)
+          ((.values[0].requests_total | tonumber) | tostring),
+          ((.values[0].requests_attack | tonumber) | tostring),
+          ((.values[0].requests_total_blocked | tonumber) | tostring)
         ]
     )
     | @tsv
@@ -154,8 +207,9 @@ cmd_metrics() {
   [[ $# -ge 1 ]] ||
     die 'usage: ngwaf metrics <metric1,metric2,...> [days] [--json]'
 
-  local cid metrics days format body summary
+  local cid customer metrics days format body summary
   cid="$(current_cid)"
+  customer="$(current_customer_name)"
   metrics="$(tr -d '[:space:]' <<<"$1")"
   days="${2:-30}"
   format="${3:-}"
@@ -182,6 +236,8 @@ cmd_metrics() {
       --data-urlencode "granularity=86400"
   )"
 
+  validate_timeseries_response "$body" "$metrics" "account metric summary"
+
   summary="$(
     jq --arg metrics "$metrics" '
       ($metrics | split(",")) as $metrics
@@ -199,7 +255,7 @@ cmd_metrics() {
             + reduce $metrics[] as $metric (
                 {};
                 .[$metric] = (
-                  [$rows[] | (.values[$metric] // 0)] | add
+                  [$rows[] | (.values[$metric] | tonumber)] | add
                 )
               )
         )
@@ -208,7 +264,34 @@ cmd_metrics() {
   )"
 
   if [[ "$format" == "--json" ]]; then
-    jq . <<<"$summary"
+    jq -n \
+      --arg from "$TS_FROM" \
+      --arg to "$TS_TO" \
+      --arg metrics "$metrics" \
+      --arg customer "$customer" \
+      --arg customer_id "$cid" \
+      --argjson days "$days" \
+      --argjson data "$summary" \
+      '{
+        customer: $customer,
+        customer_id: $customer_id,
+        days: $days,
+        window: {
+          type: "complete_utc_days",
+          from: $from,
+          to: $to,
+          to_is_exclusive: true
+        },
+        requested_metrics: ($metrics | split(",")),
+        data: $data,
+        provenance: {
+          endpoint: "GET /ngwaf/v1/timeseries",
+          data_class: "ngwaf_timeseries",
+          aggregation: "sum_of_daily_workspace_rows",
+          granularity_seconds: 86400,
+          missing_data_policy: "fail_closed"
+        }
+      }'
     return
   fi
 
@@ -221,7 +304,7 @@ cmd_metrics() {
       (
         .[] as $row
         | [$row.workspace]
-          + [$metrics[] as $metric | (($row[$metric] // 0) | tostring)]
+          + [$metrics[] as $metric | (($row[$metric] | tonumber) | tostring)]
       )
     | @tsv
   ' <<<"$summary" | human_table
@@ -231,9 +314,13 @@ cmd_count() {
   [[ $# -ge 2 && $# -le 3 ]] ||
     die "usage: ngwaf count <workspace> '<search query>' [days]"
 
-  local cid w requested_query query days end start body
+  local cid customer input resolved w ws_id requested_query query days end start from_utc until_utc body
   cid="$(current_cid)"
-  w="$1"
+  customer="$(current_customer_name)"
+  input="$1"
+  resolved="$(resolve_workspace_json "$input")"
+  w="$(jq -r '.name' <<<"$resolved")"
+  ws_id="$(jq -r '.id' <<<"$resolved")"
   requested_query="$2"
   query="$requested_query"
   days="${3:-7}"
@@ -257,10 +344,12 @@ cmd_count() {
   fi
 
   start=$((end - (days * 86400)))
+  from_utc="$(epoch_to_utc "$start")"
+  until_utc="$(epoch_to_utc "$end")"
 
   body="$(
     NGWAF_PROGRESS_LABEL="counting matching requests in $w" \
-    get "$(workspace_path "$w")/requests" \
+    get "$(workspace_path "$ws_id")/requests" \
       --data-urlencode "customer_id=$cid" \
       --data-urlencode "limit=1" \
       --data-urlencode "q=from:$start until:$end $query"
@@ -276,17 +365,49 @@ cmd_count() {
 
   jq -n \
     --arg workspace "$w" \
+    --arg workspace_id "$ws_id" \
+    --arg workspace_input "$input" \
+    --arg customer "$customer" \
+    --arg customer_id "$cid" \
     --arg query "$query" \
     --arg requested_query "$requested_query" \
+    --arg from "$from_utc" \
+    --arg until "$until_utc" \
+    --argjson from_epoch "$start" \
+    --argjson until_epoch "$end" \
     --argjson days "$days" \
     --argjson count "$(jq '.meta.total' <<<"$body")" \
     '{
+      customer: $customer,
+      customer_id: $customer_id,
       workspace: $workspace,
+      workspace_id: $workspace_id,
+      workspace_input: $workspace_input,
       days: $days,
       query: $query,
       count: $count,
       count_scope: "retained_searchable_request_records",
-      sampling_caveat: "This count may reflect sampled or mixed-storage request data. It is not raw traffic or a scaled estimate."
+      sampling_caveat: "This count may reflect sampled or mixed-storage request data. It is not raw traffic or a scaled estimate.",
+      window: {
+        type: "rolling",
+        from: $from,
+        until: $until,
+        from_epoch: $from_epoch,
+        until_epoch: $until_epoch,
+        boundary_semantics: "from/until passed verbatim to request search; endpoint-defined",
+        ingestion_buffer_seconds: 300
+      },
+      provenance: {
+        endpoint: "GET /ngwaf/v1/workspaces/{workspace_id}/requests",
+        data_class: "retained_request_search",
+        aggregation: "response.meta.total",
+        rows_requested: 1,
+        missing_data_policy: "fail_closed",
+        limitations: [
+          "May contain sampled or mixed-storage request records.",
+          "Not raw traffic and not a scaled estimate."
+        ]
+      }
     }
     + (if $query != $requested_query
        then {requested_query: $requested_query, query_normalized: true}
@@ -349,7 +470,7 @@ cmd_attack_profile() {
   esac
 
   cid="$(current_cid)"
-  customer="$(get "/customer/$cid" | jq -r '.name')"
+  customer="$(current_customer_name)"
 
   body="$(
     get "/ngwaf/v1/timeseries" \
@@ -361,6 +482,8 @@ cmd_attack_profile() {
       --data-urlencode "granularity=86400"
   )"
 
+  validate_timeseries_response "$body" "$metrics" "attack profile"
+
   # First rank production workspaces by requests_attack for the selected window.
   workspace_summary="$(
     jq --arg prod_regex "$prod_regex" '
@@ -368,7 +491,7 @@ cmd_attack_profile() {
         .data[]
         | {
             workspace: .dimensions.workspace,
-            attack: ((.values[0].requests_attack // 0) | tonumber? // 0)
+            attack: (.values[0].requests_attack | tonumber)
           }
       ]
       | group_by(.workspace)
@@ -389,11 +512,7 @@ cmd_attack_profile() {
 
   signal_summary="$(
     jq --argjson top_workspaces "$top_workspace_names" '
-      def n:
-        if . == null then 0
-        elif type == "number" then .
-        else (tonumber? // 0)
-        end;
+      def n: tonumber;
 
       [
         .data[]
@@ -430,6 +549,12 @@ cmd_attack_profile() {
         to: $to,
         to_is_exclusive: true,
         span_days: $span_days,
+        window: {
+          type: "complete_utc_days",
+          from: $from,
+          to: $to,
+          to_is_exclusive: true
+        },
         scopes: {
           workspace_ranking: "production workspaces only, identified by workspace name",
           signal_totals: "same top production workspaces shown in the ranking"
@@ -438,7 +563,13 @@ cmd_attack_profile() {
         production_workspace_filter: $production_workspace_filter,
         selected_workspaces: $selected_workspaces,
         production_workspaces: $production_workspaces[:$top_n],
-        attack_signals: $attack_signals
+        attack_signals: $attack_signals,
+        provenance: {
+          endpoint: "GET /ngwaf/v1/timeseries",
+          data_class: "ngwaf_timeseries_with_name_based_workspace_filter",
+          aggregation: "sum_of_daily_rows_for_selected_workspaces",
+          missing_data_policy: "fail_closed"
+        }
       }'
     return
   fi
@@ -554,15 +685,14 @@ cmd_attack_origins() {
   esac
 
   cid="$(current_cid)"
-  customer="$(get "/customer/$cid" | jq -r '.name')"
+  customer="$(current_customer_name)"
 
   # Resolve the selected customer's workspace set FIRST. Every top-attacks
   # request below is made directly against one of these workspace IDs, which
   # avoids relying on the ambiguous account-level reports/attacks response.
   workspaces_body="$(
-    get "/ngwaf/v1/workspaces" \
-      --data-urlencode "customer_id=$cid" \
-      --data-urlencode "limit=100"
+    get_all_pages "/ngwaf/v1/workspaces" \
+      --data-urlencode "customer_id=$cid"
   )"
 
   workspace_total="$(jq -r '.meta.total // (.data | length)' <<<"$workspaces_body")"
@@ -592,12 +722,14 @@ cmd_attack_origins() {
       --data-urlencode "granularity=86400"
   )"
 
+  validate_timeseries_response "$attack_ts" "requests_attack" "attack-origins denominator"
+
   attack_total="$(
     jq --argjson production_names "$production_workspace_names" '
       [
         .data[]?
         | select(.dimensions.workspace as $w | $production_names | index($w))
-        | ((.values[0].requests_attack // 0) | tonumber? // 0)
+        | (.values[0].requests_attack | tonumber)
       ]
       | add // 0
     ' <<<"$attack_ts"
@@ -665,6 +797,16 @@ cmd_attack_origins() {
         die "unexpected top-attacks response for workspace $workspace_name ($workspace_id), chunk $chunk_from -> $chunk_to"
       }
 
+      jq -e '
+        all(.data[]?;
+          (.count | type) == "number"
+          or ((.count | type) == "string" and (.count | tonumber? != null))
+        )
+      ' <<<"$body" >/dev/null || {
+        rm -f "$tmp"
+        die "top-attacks returned a missing or non-numeric count for workspace $workspace_name ($workspace_id), chunk $chunk_from -> $chunk_to"
+      }
+
       jq -c \
         --arg workspace_id "$workspace_id" \
         --arg workspace_name "$workspace_name" \
@@ -684,7 +826,7 @@ cmd_attack_origins() {
               else .value
               end
             ),
-            requests: ((.count // 0) | tonumber? // 0)
+            requests: (.count | tonumber)
           }
       ' <<<"$body" >> "$tmp"
 
@@ -772,6 +914,12 @@ cmd_attack_origins() {
         to: $to,
         to_is_exclusive: true,
         span_days: $span_days,
+        window: {
+          type: "complete_utc_days",
+          from: $from,
+          to: $to,
+          to_is_exclusive: true
+        },
         scope: "production workspaces only",
         production_workspace_filter: $production_workspace_filter,
         production_workspaces: $production_workspaces,
@@ -793,7 +941,17 @@ cmd_attack_origins() {
           share_of_attack_requests: $other_share
         },
         countries: $countries,
-        methodology: "Resolve workspaces from the selected customer ID, retain production workspaces whose names contain a prd/prod/production token, split the requested reporting period into contiguous intervals of 7 days or less, query each selected workspace top-attacks endpoint with customer_id and field=remote_country_code for every interval, aggregate country counts across intervals and workspaces, and reconcile the returned country counts against requests_attack timeseries for that exact same production workspace set."
+        methodology: "Resolve workspaces from the selected customer ID, retain production workspaces whose names contain a prd/prod/production token, split the requested reporting period into contiguous intervals of 7 days or less, query each selected workspace top-attacks endpoint with customer_id and field=remote_country_code for every interval, aggregate country counts across intervals and workspaces, and reconcile the returned country counts against requests_attack timeseries for that exact same production workspace set.",
+        provenance: {
+          data_class: "ngwaf_top_attacks_reconciled_to_timeseries",
+          endpoints: [
+            "GET /ngwaf/v1/workspaces/{workspace_id}/top-attacks",
+            "GET /ngwaf/v1/timeseries"
+          ],
+          workspace_selection: "name_regex",
+          pagination: "workspace_inventory_complete_or_fail",
+          missing_data_policy: "fail_closed"
+        }
       }'
     return
   fi

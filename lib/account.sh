@@ -27,11 +27,8 @@ cmd_use() {
 }
 
 cmd_customer() {
-  local cid
-  cid="$(current_cid)"
-
-  get "/customer/$cid" |
-    jq '{id, name}'
+  load_customer_context
+  jq '{id, name, source}' <<<"$NGWAF_CUSTOMER_CONTEXT_JSON"
 }
 
 # Service discovery for a selected customer must not enumerate the global
@@ -52,4 +49,3 @@ cmd_customer() {
 #
 # SERVICE_AUDIT_MAX_PAGES bounds activation-event pagination so a very active
 # account cannot silently turn this command into a long-running crawl.
-

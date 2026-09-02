@@ -4,16 +4,19 @@
 cmd_bot_rules() {
   [[ $# -ge 1 && $# -le 2 ]] || die 'usage: ngwaf bot-rules <workspace> [--json]'
 
-  local cid w format body matches
+  local cid input resolved w ws_id format body matches
   cid="$(current_cid)"
-  w="$1"
+  input="$1"
+  resolved="$(resolve_workspace_json "$input")"
+  w="$(jq -r '.name' <<<"$resolved")"
+  ws_id="$(jq -r '.id' <<<"$resolved")"
   format="${2:-}"
 
   [[ -z "$format" || "$format" == "--json" ]] ||
     die 'usage: ngwaf bot-rules <workspace> [--json]'
 
   body="$(
-    get_all_pages "$(workspace_path "$w")/rules" \
+    get_all_pages "$(workspace_path "$ws_id")/rules" \
       --data-urlencode "customer_id=$cid"
   )"
 
@@ -84,11 +87,15 @@ cmd_bot_rules() {
   if [[ "$format" == "--json" ]]; then
     jq -n \
       --arg workspace "$w" \
+      --arg workspace_id "$ws_id" \
+      --arg workspace_input "$input" \
       --argjson total_rules "$(jq '.data | length' <<<"$body")" \
       --argjson pages_fetched "$(jq '.meta.pages_fetched // 1' <<<"$body")" \
       --argjson matched_rules "$matches" \
       '{
         workspace: $workspace,
+        workspace_id: $workspace_id,
+        workspace_input: $workspace_input,
         total_rules_scanned: $total_rules,
         pages_fetched: $pages_fetched,
         matched_rules: ($matched_rules | length),
@@ -97,7 +104,12 @@ cmd_bot_rules() {
           "Bot signals include VERIFIED-BOT.*, SUSPECTED-BOT.*, SUSPECTED-BAD-BOT.*, CHALLENGE-TOKEN-VALID/INVALID, and CLIENTSIDE-COOKIE-VALID.",
           "Rules using browserChallenge or verifyToken are included even when no bot signal appears in the rule conditions.",
           "DATACENTER is included as bot-adjacent evidence only; it is not a bot verdict."
-        ]
+        ],
+        provenance: {
+          endpoint: "GET /ngwaf/v1/workspaces/{workspace_id}/rules",
+          data_class: "configuration_snapshot_with_heuristic_classification",
+          pagination: "complete_or_fail"
+        }
       }'
     return
   fi
@@ -131,9 +143,10 @@ cmd_bot_rules() {
 
 historical_bot_summary_json() {
   local service_id="$1"
-  local cid service service_cid service_name body
+  local cid customer service service_cid service_name body
 
   cid="$(current_cid)"
+  customer="$(current_customer_name)"
 
   service="$(get "/service/$service_id")"
   service_cid="$(jq -r '.customer_id // ""' <<<"$service")"
@@ -149,10 +162,16 @@ historical_bot_summary_json() {
       --data-urlencode "by=day"
   )"
 
+  validate_historical_response \
+    "$body" \
+    "edge_requests,bot_edge_requests_analyzed_count,bot_edge_requests_detected_count,bot_edge_requests_verified_count,bot_edge_requests_headless_count,bot_edge_requests_ai_crawler_count,bot_edge_requests_search_engine_crawler_count" \
+    "Historical Stats for service $service_id"
+
   jq -n \
     --arg service_id "$service_id" \
     --arg service_name "$service_name" \
     --arg customer_id "$cid" \
+    --arg customer "$customer" \
     --arg from "$HIST_FROM" \
     --arg to "$HIST_TO" \
     --argjson rows "$(jq '.data // []' <<<"$body")" \
@@ -171,11 +190,18 @@ historical_bot_summary_json() {
     | ($rows | map(.bot_edge_requests_ai_crawler_count | n) | add // 0) as $ai
     | ($rows | map(.bot_edge_requests_search_engine_crawler_count | n) | add // 0) as $search
     | {
+        customer: $customer,
         customer_id: $customer_id,
         service_id: $service_id,
         service_name: $service_name,
         from: $from,
         to: $to,
+        window: {
+          type: "complete_utc_days",
+          from: $from,
+          to: $to,
+          to_is_exclusive: true
+        },
         daily_rows: ($rows | length),
         edge_requests: $edge_requests,
         analyzed: $analyzed,
@@ -189,7 +215,14 @@ historical_bot_summary_json() {
         verified: $verified,
         headless: $headless,
         ai_crawler: $ai,
-        search_engine_crawler: $search
+        search_engine_crawler: $search,
+        provenance: {
+          endpoint: "GET /stats/service/{service_id}",
+          data_class: "historical_stats",
+          aggregation: "sum_of_daily_rows",
+          missing_data_policy: "fail_closed",
+          bot_metric_semantics: "sampled_and_scaled_estimates"
+        }
       }
     '
 }
@@ -268,9 +301,10 @@ cmd_bot_stats() {
 historical_bot_summary_known_service_json() {
   local service_id="$1"
   local service_name="$2"
-  local cid body
+  local cid customer body
 
   cid="$(current_cid)"
+  customer="$(current_customer_name)"
 
   body="$(
     get "/stats/service/$service_id" \
@@ -279,10 +313,16 @@ historical_bot_summary_known_service_json() {
       --data-urlencode "by=day"
   )"
 
+  validate_historical_response \
+    "$body" \
+    "$BOT_HIST_FIELDS" \
+    "Historical Stats for service $service_id"
+
   jq -n \
     --arg service_id "$service_id" \
     --arg service_name "$service_name" \
     --arg customer_id "$cid" \
+    --arg customer "$customer" \
     --arg from "$HIST_FROM" \
     --arg to "$HIST_TO" \
     --argjson rows "$(jq '.data // []' <<<"$body")" \
@@ -311,11 +351,18 @@ historical_bot_summary_known_service_json() {
     | ($rows | map(.bot_edge_requests_search_engine_optimization_count | n) | add // 0) as $search_engine_optimization
     | ($rows | map(.bot_edge_requests_security_tools_count | n) | add // 0) as $security_tools
     | {
+        customer: $customer,
         customer_id: $customer_id,
         service_id: $service_id,
         service_name: $service_name,
         from: $from,
         to: $to,
+        window: {
+          type: "complete_utc_days",
+          from: $from,
+          to: $to,
+          to_is_exclusive: true
+        },
         daily_rows: ($rows | length),
         edge_requests: $edge_requests,
         analyzed: $analyzed,
@@ -339,8 +386,14 @@ historical_bot_summary_known_service_json() {
         platform_integrations: $platform_integrations,
         research: $research,
         search_engine_optimization: $search_engine_optimization,
-        security_tools: $security_tools
+        security_tools: $security_tools,
+        provenance: {
+          endpoint: "GET /stats/service/{service_id}",
+          data_class: "historical_stats",
+          aggregation: "sum_of_daily_rows",
+          missing_data_policy: "fail_closed",
+          bot_metric_semantics: "sampled_and_scaled_estimates"
+        }
       }
     '
 }
-

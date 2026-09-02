@@ -418,8 +418,184 @@ current_cid() {
   fi
 }
 
+customer_context_source() {
+  if [[ -n "${FASTLY_CUSTOMER_ID:-}" ]]; then
+    printf 'environment\n'
+  else
+    printf 'selected_file\n'
+  fi
+}
+
+load_customer_context() {
+  local cid source body returned_id name
+
+  [[ -z "$NGWAF_CUSTOMER_CONTEXT_JSON" ]] || return 0
+
+  cid="$(current_cid)"
+  source="$(customer_context_source)"
+  body="$(NGWAF_PROGRESS_LABEL="confirming customer scope" get "/customer/$cid")"
+  returned_id="$(jq -r '.id // empty' <<<"$body")"
+  name="$(jq -r '.name // empty' <<<"$body")"
+
+  [[ "$returned_id" == "$cid" ]] ||
+    die "customer-scope validation mismatch: selected $cid but API returned ${returned_id:-no id}"
+  [[ -n "$name" ]] ||
+    die "customer-scope validation failed: customer $cid response did not include a name"
+
+  NGWAF_CUSTOMER_CONTEXT_JSON="$(
+    jq -n \
+      --arg id "$cid" \
+      --arg name "$name" \
+      --arg source "$source" \
+      '{id: $id, name: $name, source: $source}'
+  )"
+}
+
+confirm_customer_scope() {
+  load_customer_context
+  printf 'ngwaf: customer scope: %s (%s; source=%s)\n' \
+    "$(jq -r '.name' <<<"$NGWAF_CUSTOMER_CONTEXT_JSON")" \
+    "$(jq -r '.id' <<<"$NGWAF_CUSTOMER_CONTEXT_JSON")" \
+    "$(jq -r '.source' <<<"$NGWAF_CUSTOMER_CONTEXT_JSON")" >&2
+}
+
+current_customer_name() {
+  load_customer_context
+  jq -r '.name' <<<"$NGWAF_CUSTOMER_CONTEXT_JSON"
+}
+
 workspace_path() {
   printf '/ngwaf/v1/workspaces/%s' "$(urlencode "$1")"
+}
+
+# Resolve a workspace argument against the selected customer's complete
+# workspace collection. Exact ID matches win; otherwise require one
+# case-insensitive exact name match. Never guess on partial or ambiguous names.
+resolve_workspace_json() {
+  [[ $# -eq 1 ]] || die 'resolve_workspace_json requires one workspace ID or name'
+
+  local input="$1"
+  local cid body matches count resolution resolved
+  cid="$(current_cid)"
+  body="$(
+    NGWAF_PROGRESS_LABEL="resolving workspace $input" \
+    get_all_pages "/ngwaf/v1/workspaces" \
+      --data-urlencode "customer_id=$cid"
+  )"
+
+  matches="$(jq --arg input "$input" '[.data[] | select(.id == $input)]' <<<"$body")"
+  count="$(jq 'length' <<<"$matches")"
+  resolution="id"
+
+  if (( count == 0 )); then
+    matches="$(
+      jq --arg input "$input" \
+        '[.data[] | select(((.name // "") | ascii_downcase) == ($input | ascii_downcase))]' \
+        <<<"$body"
+    )"
+    count="$(jq 'length' <<<"$matches")"
+    resolution="name"
+  fi
+
+  (( count > 0 )) ||
+    die "workspace not found for selected customer: $input"
+  (( count == 1 )) ||
+    die "workspace name is ambiguous for selected customer: $input"
+
+  resolved="$(
+    jq --arg input "$input" --arg resolution "$resolution" '
+      .[0]
+      | select((.id // "") != "" and (.name // "") != "")
+      | {
+          id,
+          name,
+          input: $input,
+          resolved_by: $resolution
+        }
+    ' <<<"$matches"
+  )"
+  [[ -n "$resolved" ]] ||
+    die "workspace resolution returned an incomplete object for: $input"
+
+  printf 'ngwaf: workspace scope: %s (%s; resolved_by=%s)\n' \
+    "$(jq -r '.name' <<<"$resolved")" \
+    "$(jq -r '.id' <<<"$resolved")" \
+    "$(jq -r '.resolved_by' <<<"$resolved")" >&2
+  printf '%s\n' "$resolved"
+}
+
+validate_timeseries_response() {
+  [[ $# -eq 3 ]] || die 'validate_timeseries_response requires <body> <metrics> <context>'
+
+  local body="$1"
+  local metrics="$2"
+  local context="$3"
+  local missing
+
+  jq -e '.data | type == "array" and length > 0' >/dev/null <<<"$body" ||
+    die "$context returned no timeseries rows; refusing to treat missing data as zero"
+
+  missing="$(
+    jq -r --arg metrics "$metrics" '
+      def numeric:
+        (type == "number") or (type == "string" and (tonumber? != null));
+      ($metrics | split(",")) as $metrics
+      | [
+          .data[]
+          | . as $row
+          | $metrics[]
+          | select(
+              (($row.values[0]? | type) != "object")
+              or (($row.values[0][.]? | numeric) | not)
+            )
+        ]
+      | unique
+      | join(",")
+    ' <<<"$body"
+  )"
+
+  [[ -z "$missing" ]] ||
+    die "$context omitted or returned non-numeric requested metric(s): $missing; refusing to substitute zero"
+}
+
+validate_historical_response() {
+  [[ $# -eq 3 ]] || die 'validate_historical_response requires <body> <fields> <context>'
+
+  local body="$1"
+  local fields="$2"
+  local context="$3"
+  local missing
+
+  jq -e '.data | type == "array" and length > 0' >/dev/null <<<"$body" ||
+    die "$context returned no historical rows; refusing to treat missing data as zero"
+
+  missing="$(
+    jq -r --arg fields "$fields" '
+      def numeric:
+        (type == "number") or (type == "string" and (tonumber? != null));
+      ($fields | split(",")) as $fields
+      | [
+          .data[]
+          | . as $row
+          | $fields[]
+          | select((($row[.]? | numeric) | not))
+        ]
+      | unique
+      | join(",")
+    ' <<<"$body"
+  )"
+
+  [[ -z "$missing" ]] ||
+    die "$context omitted or returned non-numeric requested field(s): $missing; refusing to substitute zero"
+}
+
+epoch_to_utc() {
+  local epoch="$1"
+  if date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ' >/dev/null 2>&1; then
+    date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ'
+  else
+    date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ'
+  fi
 }
 
 validate_timeseries_days() {
