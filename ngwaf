@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="18.0"
+VERSION="19.0"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -66,6 +66,35 @@ get() {
   esac
 
   rm -f "$tmp"
+}
+
+# Read-only probe helper for inventory discovery. Unlike get(), this does not
+# fail on a non-2xx response. The caller receives the HTTP status on stdout and
+# can inspect the response body at the supplied path. This is used so product
+# discovery can distinguish enabled, disabled/not-found, and permission errors
+# without turning an inventory command into a write-risky or fail-open workflow.
+http_get_to_file() {
+  [[ $# -ge 2 ]] || die 'http_get_to_file requires <path> <output-file>'
+
+  local path="$1"
+  local outfile="$2"
+  shift 2
+
+  local code
+  code="$(
+    curl -sS -G \
+      -o "$outfile" \
+      -w '%{http_code}' \
+      -H "Fastly-Key: $FASTLY_API_TOKEN" \
+      -H "Accept: application/json" \
+      "$@" \
+      "$API_BASE$path"
+  )" || {
+    printf '000\n'
+    return
+  }
+
+  printf '%s\n' "$code"
 }
 
 # Fetch every page from NGWAF list endpoints that use limit/page pagination.
@@ -383,6 +412,546 @@ cmd_customer() {
     jq '{id, name}'
 }
 
+# /service uses page/per_page pagination and returns a bare JSON array rather
+# than the {meta,data} shape used by NGWAF list endpoints. Fetch every visible
+# service, then scope the result to the selected customer_id. This prevents a
+# global/read-only token from accidentally mixing services from other accounts.
+get_selected_services() {
+  local cid page per_page pages_fetched count body pages_tmp
+  local scanned selected
+
+  cid="$(current_cid)"
+  page=1
+  per_page=100
+  pages_fetched=0
+  scanned=0
+  pages_tmp="$(mktemp)"
+
+  while :; do
+    body="$(
+      get "/service" \
+        --data-urlencode "page=$page" \
+        --data-urlencode "per_page=$per_page"
+    )"
+
+    jq -e 'type == "array"' >/dev/null <<<"$body" || {
+      rm -f "$pages_tmp"
+      die '/service did not return a JSON array'
+    }
+
+    count="$(jq 'length' <<<"$body")"
+    scanned=$(( scanned + count ))
+    pages_fetched=$(( pages_fetched + 1 ))
+
+    jq --arg cid "$cid" '[.[] | select(.customer_id == $cid)]' <<<"$body" >>"$pages_tmp"
+
+    (( count < per_page )) && break
+
+    page=$(( page + 1 ))
+    (( page <= 1000 )) || {
+      rm -f "$pages_tmp"
+      die 'service pagination safety limit exceeded'
+    }
+  done
+
+  selected="$(jq -s 'add // []' "$pages_tmp")"
+  rm -f "$pages_tmp"
+
+  jq -n \
+    --argjson scanned "$scanned" \
+    --argjson pages_fetched "$pages_fetched" \
+    --argjson data "$selected" \
+    '{
+      meta: {
+        api_services_scanned: $scanned,
+        selected_total: ($data | length),
+        pages_fetched: $pages_fetched
+      },
+      data: $data
+    }'
+}
+
+# Service-level products that currently expose a public "services with product
+# enabled" endpoint. Account-level products (for example KV Store or Domain
+# Research) are intentionally excluded from this service matrix.
+service_product_specs() {
+  cat <<'EOF'
+api_discovery	API Discovery	none	security
+bot_management	Bot Management	bot_management	security
+brotli_compression	Brotli Compression	none	delivery
+ddos_protection	DDoS Protection	ddos_protection	security
+domain_inspector	Domain Inspector	none	observability
+fanout	Fanout	none	delivery
+image_optimizer	Image Optimizer	none	delivery
+log_explorer_insights	Log Explorer & Insights	none	observability
+ngwaf	Next-Gen WAF	ngwaf	security
+origin_inspector	Origin Inspector	none	observability
+websockets	WebSockets	none	delivery
+EOF
+}
+
+# Return one normalized JSON object for a service-level product. Prefer the
+# efficient customer-level enabled-services endpoint when it is demonstrably
+# scoped to the selected customer. If that endpoint is unavailable or reports a
+# different customer, fall back to read-only per-service enablement probes.
+discover_product_json() {
+  [[ $# -eq 5 ]] || die 'discover_product_json requires <id> <label> <config-kind> <category> <services-json>'
+
+  local product_id="$1"
+  local label="$2"
+  local config_kind="$3"
+  local category="$4"
+  local services_body="$5"
+  local cid list_tmp list_code returned_cid method enabled_ids unknown_checks
+  local probe_tmp probe_code sid configs_tmp configs
+
+  cid="$(current_cid)"
+  list_tmp="$(mktemp)"
+  list_code="$(http_get_to_file "/enabled-products/v1/$product_id/services" "$list_tmp")"
+  enabled_ids='[]'
+  unknown_checks='[]'
+  returned_cid=''
+  method='customer-list'
+
+  if [[ "$list_code" == 2* ]] && jq -e 'type == "object" and ((.services // []) | type == "array")' >/dev/null 2>&1 <"$list_tmp"; then
+    returned_cid="$(jq -r '.customer.id // empty' "$list_tmp")"
+    if [[ -n "$returned_cid" && "$returned_cid" == "$cid" ]]; then
+      enabled_ids="$(
+        jq --argjson services "$(jq '.data' <<<"$services_body")" '
+          (.services // []) as $enabled
+          | [$services[] | select(.id as $id | $enabled | index($id) != null) | .id]
+        ' "$list_tmp"
+      )"
+    else
+      method='per-service-probe'
+    fi
+  else
+    method='per-service-probe'
+  fi
+  rm -f "$list_tmp"
+
+  if [[ "$method" == 'per-service-probe' ]]; then
+    local enabled_tmp unknown_tmp
+    enabled_tmp="$(mktemp)"
+    unknown_tmp="$(mktemp)"
+
+    while IFS= read -r sid; do
+      [[ -n "$sid" ]] || continue
+      probe_tmp="$(mktemp)"
+      probe_code="$(http_get_to_file "/enabled-products/v1/$product_id/services/$sid" "$probe_tmp")"
+      case "$probe_code" in
+        2*) printf '%s\n' "$sid" >>"$enabled_tmp" ;;
+        404) : ;;
+        *)
+          jq -n --arg service_id "$sid" --arg status "$probe_code" \
+            '{service_id: $service_id, http_status: $status}' >>"$unknown_tmp"
+          ;;
+      esac
+      rm -f "$probe_tmp"
+    done < <(jq -r '.data[].id' <<<"$services_body")
+
+    enabled_ids="$(jq -Rn '[inputs | select(length > 0)]' <"$enabled_tmp")"
+    unknown_checks="$(jq -s '.' "$unknown_tmp")"
+    rm -f "$enabled_tmp" "$unknown_tmp"
+  fi
+
+  # Fetch configuration only for products whose public API exposes a useful
+  # configuration resource today: NGWAF, Bot Management, and DDoS Protection.
+  configs_tmp="$(mktemp)"
+  if [[ "$config_kind" != 'none' ]]; then
+    while IFS= read -r sid; do
+      [[ -n "$sid" ]] || continue
+      probe_tmp="$(mktemp)"
+      probe_code="$(http_get_to_file "/enabled-products/v1/$product_id/services/$sid/configuration" "$probe_tmp")"
+      if [[ "$probe_code" == 2* ]] && jq -e 'type == "object"' >/dev/null 2>&1 <"$probe_tmp"; then
+        jq -n \
+          --arg service_id "$sid" \
+          --argjson configuration "$(jq '.configuration // {}' "$probe_tmp")" \
+          '{service_id: $service_id, configuration: $configuration, configuration_http_status: 200}' >>"$configs_tmp"
+      else
+        jq -n \
+          --arg service_id "$sid" \
+          --arg status "$probe_code" \
+          '{service_id: $service_id, configuration: null, configuration_http_status: $status}' >>"$configs_tmp"
+      fi
+      rm -f "$probe_tmp"
+    done < <(jq -r '.[]' <<<"$enabled_ids")
+  fi
+  configs="$(jq -s '.' "$configs_tmp")"
+  rm -f "$configs_tmp"
+
+  jq -n \
+    --arg id "$product_id" \
+    --arg label "$label" \
+    --arg category "$category" \
+    --arg discovery_method "$method" \
+    --arg list_customer_id "$returned_cid" \
+    --argjson all_services "$(jq '.data' <<<"$services_body")" \
+    --argjson enabled_ids "$enabled_ids" \
+    --argjson configs "$configs" \
+    --argjson unknown_checks "$unknown_checks" '
+      def platform:
+        if (.type // "") == "vcl" then "CDN"
+        elif (.type // "") == "wasm" then "Compute"
+        else (.type // "unknown")
+        end;
+      def active_version:
+        if (.active_version | type) == "object" then
+          (.active_version.number // .active_version.version // .active_version.id // null)
+        elif .active_version != null then .active_version
+        elif ((.environments // []) | type) == "array" then
+          (([.environments[] | select((.name // "") == "production") | .active_version] | .[0]) // .version // null)
+        else (.version // null)
+        end;
+      {
+        id: $id,
+        label: $label,
+        category: $category,
+        discovery_method: $discovery_method,
+        product_list_customer_id: (if $list_customer_id == "" then null else $list_customer_id end),
+        enabled_count: ($enabled_ids | length),
+        unknown_check_count: ($unknown_checks | length),
+        unknown_checks: $unknown_checks,
+        services: [
+          $all_services[]
+          | select(.id as $sid | $enabled_ids | index($sid) != null)
+          | . as $svc
+          | ($configs | map(select(.service_id == $svc.id)) | .[0] // {}) as $cfg
+          | {
+              id: $svc.id,
+              name: ($svc.name // ""),
+              customer_id: ($svc.customer_id // null),
+              type: ($svc.type // "unknown"),
+              platform: ($svc | platform),
+              active_version: ($svc | active_version),
+              paused: ($svc.paused // false),
+              configuration: ($cfg.configuration // null),
+              configuration_http_status: ($cfg.configuration_http_status // null)
+            }
+        ]
+      }
+    '
+}
+
+collect_products_json() {
+  [[ $# -eq 1 ]] || die 'collect_products_json requires <services-json>'
+
+  local services_body="$1"
+  local tmp product_id label config_kind category
+  tmp="$(mktemp)"
+
+  while IFS=$'\t' read -r product_id label config_kind category; do
+    [[ -n "$product_id" ]] || continue
+    discover_product_json "$product_id" "$label" "$config_kind" "$category" "$services_body" >>"$tmp"
+  done < <(service_product_specs)
+
+  jq -s '.' "$tmp"
+  rm -f "$tmp"
+}
+
+cmd_services() {
+  [[ $# -le 1 ]] || die 'usage: ngwaf services [--json]'
+
+  local mode="${1:-}"
+  local cid customer services_body normalized
+  [[ -z "$mode" || "$mode" == '--json' ]] || die 'usage: ngwaf services [--json]'
+
+  cid="$(current_cid)"
+  customer="$(get "/customer/$cid")"
+  services_body="$(get_selected_services)"
+
+  normalized="$(
+    jq -n \
+      --argjson customer "$customer" \
+      --argjson body "$services_body" '
+        def platform:
+          if (.type // "") == "vcl" then "CDN"
+          elif (.type // "") == "wasm" then "Compute"
+          else (.type // "unknown")
+          end;
+        def active_version:
+          if (.active_version | type) == "object" then
+            (.active_version.number // .active_version.version // .active_version.id // null)
+          elif .active_version != null then .active_version
+          elif ((.environments // []) | type) == "array" then
+            (([.environments[] | select((.name // "") == "production") | .active_version] | .[0]) // .version // null)
+          else (.version // null)
+          end;
+        ($body.data // []) as $services
+        | {
+            customer: {id: ($customer.id // null), name: ($customer.name // null)},
+            summary: {
+              total: ($services | length),
+              cdn: ([$services[] | select((.type // "") == "vcl")] | length),
+              compute: ([$services[] | select((.type // "") == "wasm")] | length),
+              other: ([$services[] | select(((.type // "") != "vcl") and ((.type // "") != "wasm"))] | length),
+              paused: ([$services[] | select(.paused == true)] | length),
+              pages_fetched: ($body.meta.pages_fetched // null),
+              api_services_scanned: ($body.meta.api_services_scanned // null)
+            },
+            services: [
+              $services[]
+              | {
+                  id,
+                  name,
+                  customer_id,
+                  type: (.type // "unknown"),
+                  platform: platform,
+                  active_version: active_version,
+                  paused: (.paused // false),
+                  created_at: (.created_at // null),
+                  updated_at: (.updated_at // null)
+                }
+            ]
+          }
+      '
+  )"
+
+  if [[ "$mode" == '--json' ]]; then
+    jq . <<<"$normalized"
+    return
+  fi
+
+  jq -r '
+    "Customer: \(.customer.name) (\(.customer.id))",
+    "Services: \(.summary.total) total — \(.summary.cdn) CDN, \(.summary.compute) Compute, \(.summary.other) other; \(.summary.paused) paused"
+  ' <<<"$normalized"
+  printf '\n'
+
+  jq -r '
+    ["TYPE", "ACTIVE", "PAUSED", "NAME", "SERVICE ID"],
+    (
+      .services
+      | sort_by(.platform, .name)
+      | .[]
+      | [
+          .platform,
+          (.active_version // "-" | tostring),
+          (.paused | tostring),
+          .name,
+          .id
+        ]
+    )
+    | @tsv
+  ' <<<"$normalized" | human_table
+}
+
+cmd_products() {
+  [[ $# -le 1 ]] || die 'usage: ngwaf products [--json]'
+
+  local mode="${1:-}"
+  local cid customer services_body products payload
+  [[ -z "$mode" || "$mode" == '--json' ]] || die 'usage: ngwaf products [--json]'
+
+  cid="$(current_cid)"
+  customer="$(get "/customer/$cid")"
+  services_body="$(get_selected_services)"
+  products="$(collect_products_json "$services_body")"
+
+  payload="$(
+    jq -n \
+      --argjson customer "$customer" \
+      --argjson services_body "$services_body" \
+      --argjson products "$products" '
+        {
+          customer: {id: ($customer.id // null), name: ($customer.name // null)},
+          services_scanned: ($services_body.data | length),
+          product_definitions_scanned: ($products | length),
+          products: $products,
+          note: "Service-level product inventory only. Account-level products without a service mapping are not included. Non-2xx checks other than 404 are reported as unknown rather than treated as disabled."
+        }
+      '
+  )"
+
+  if [[ "$mode" == '--json' ]]; then
+    jq . <<<"$payload"
+    return
+  fi
+
+  jq -r '
+    "Customer: \(.customer.name) (\(.customer.id))",
+    "Services scanned: \(.services_scanned)",
+    "Service-level products checked: \(.product_definitions_scanned)"
+  ' <<<"$payload"
+
+  printf '\nPRODUCT SUMMARY\n'
+  jq -r '
+    ["CATEGORY", "PRODUCT", "ENABLED SERVICES", "UNKNOWN CHECKS", "DISCOVERY"],
+    (
+      .products
+      | sort_by(.category, .label)
+      | .[]
+      | [
+          (.category | ascii_upcase),
+          .label,
+          (.enabled_count | tostring),
+          (.unknown_check_count | tostring),
+          .discovery_method
+        ]
+    )
+    | @tsv
+  ' <<<"$payload" | human_table
+
+  printf '\nENABLED SERVICE / PRODUCT MAPPING\n'
+  jq -r '
+    def cfg($pid; $c):
+      if $c == null then "-"
+      elif $pid == "bot_management" then "contentguard=" + (($c.contentguard // "unknown") | tostring)
+      elif $pid == "ddos_protection" then "mode=" + (($c.mode // "unknown") | tostring)
+      elif $pid == "ngwaf" then
+        "workspace_id=" + (($c.workspace_id // "unknown") | tostring)
+        + ", traffic_ramp=" + (($c.traffic_ramp // "unknown") | tostring)
+      else ($c | tostring)
+      end;
+    ["SERVICE", "TYPE", "PRODUCT", "CONFIGURATION"],
+    (
+      .products[] as $p
+      | $p.services[]?
+      | [
+          .name,
+          .platform,
+          $p.label,
+          cfg($p.id; .configuration)
+        ]
+    )
+    | @tsv
+  ' <<<"$payload" | human_table
+
+  if jq -e '[.products[].unknown_check_count] | add > 0' >/dev/null <<<"$payload"; then
+    printf '\nWARNING: One or more product checks were inconclusive (for example permission/API errors). Use --json to inspect unknown_checks; they are not counted as disabled.\n' >&2
+  fi
+}
+
+cmd_inventory() {
+  [[ $# -le 1 ]] || die 'usage: ngwaf inventory [--json]'
+
+  local mode="${1:-}"
+  local cid customer services_body products workspaces payload
+  [[ -z "$mode" || "$mode" == '--json' ]] || die 'usage: ngwaf inventory [--json]'
+
+  cid="$(current_cid)"
+  customer="$(get "/customer/$cid")"
+  services_body="$(get_selected_services)"
+  products="$(collect_products_json "$services_body")"
+  workspaces="$(
+    get_all_pages "/ngwaf/v1/workspaces" \
+      --data-urlencode "customer_id=$cid"
+  )"
+
+  payload="$(
+    jq -n \
+      --argjson customer "$customer" \
+      --argjson services_body "$services_body" \
+      --argjson products "$products" \
+      --argjson workspaces "$workspaces" '
+        ($services_body.data // []) as $services
+        | {
+            customer: {id: ($customer.id // null), name: ($customer.name // null)},
+            edge_services: {
+              total: ($services | length),
+              cdn: ([$services[] | select((.type // "") == "vcl")] | length),
+              compute: ([$services[] | select((.type // "") == "wasm")] | length),
+              other: ([$services[] | select(((.type // "") != "vcl") and ((.type // "") != "wasm"))] | length),
+              paused: ([$services[] | select(.paused == true)] | length),
+              services: [
+                $services[]
+                | {
+                    id,
+                    name,
+                    type: (.type // "unknown"),
+                    platform: (if (.type // "") == "vcl" then "CDN" elif (.type // "") == "wasm" then "Compute" else (.type // "unknown") end),
+                    active_version: (
+                      if (.active_version | type) == "object" then (.active_version.number // .active_version.version // .active_version.id // null)
+                      elif .active_version != null then .active_version
+                      elif ((.environments // []) | type) == "array" then (([.environments[] | select((.name // "") == "production") | .active_version] | .[0]) // .version // null)
+                      else (.version // null)
+                      end
+                    ),
+                    paused: (.paused // false)
+                  }
+              ]
+            },
+            service_products: {
+              definitions_scanned: ($products | length),
+              products: $products
+            },
+            ngwaf: {
+              workspace_count: ($workspaces.data | length),
+              workspaces: [$workspaces.data[] | {id, name, mode, default_blocking_response_code}],
+              pages_fetched: ($workspaces.meta.pages_fetched // null)
+            },
+            notes: [
+              "Service inventory is filtered to the selected customer_id from the /service API.",
+              "Product inventory covers known public service-level product enablement APIs; account-level products are not included.",
+              "A product check that returns a non-2xx status other than 404 is reported as unknown, not disabled.",
+              "Product enablement is configuration inventory and does not prove that a service currently carries meaningful production traffic."
+            ]
+          }
+      '
+  )"
+
+  if [[ "$mode" == '--json' ]]; then
+    jq . <<<"$payload"
+    return
+  fi
+
+  jq -r '
+    "Customer: \(.customer.name) (\(.customer.id))",
+    "",
+    "EDGE SERVICES",
+    "  Total:   \(.edge_services.total)",
+    "  CDN:     \(.edge_services.cdn)",
+    "  Compute: \(.edge_services.compute)",
+    "  Other:   \(.edge_services.other)",
+    "  Paused:  \(.edge_services.paused)",
+    "",
+    "NGWAF",
+    "  Workspaces: \(.ngwaf.workspace_count)"
+  ' <<<"$payload"
+
+  printf '\nSERVICE-LEVEL PRODUCTS\n'
+  jq -r '
+    ["CATEGORY", "PRODUCT", "ENABLED SERVICES", "UNKNOWN"],
+    (
+      .service_products.products
+      | sort_by(.category, .label)
+      | .[]
+      | [
+          (.category | ascii_upcase),
+          .label,
+          (.enabled_count | tostring),
+          (.unknown_check_count | tostring)
+        ]
+    )
+    | @tsv
+  ' <<<"$payload" | human_table
+
+  printf '\nSECURITY PRODUCT MAPPING\n'
+  jq -r '
+    def cfg($pid; $c):
+      if $c == null then "-"
+      elif $pid == "bot_management" then "contentguard=" + (($c.contentguard // "unknown") | tostring)
+      elif $pid == "ddos_protection" then "mode=" + (($c.mode // "unknown") | tostring)
+      elif $pid == "ngwaf" then
+        "workspace_id=" + (($c.workspace_id // "unknown") | tostring)
+        + ", traffic_ramp=" + (($c.traffic_ramp // "unknown") | tostring)
+      else "-"
+      end;
+    ["SERVICE", "TYPE", "PRODUCT", "CONFIGURATION"],
+    (
+      .service_products.products[] as $p
+      | select($p.category == "security")
+      | $p.services[]?
+      | [.name, .platform, $p.label, cfg($p.id; .configuration)]
+    )
+    | @tsv
+  ' <<<"$payload" | human_table
+
+  if jq -e '[.service_products.products[].unknown_check_count] | add > 0' >/dev/null <<<"$payload"; then
+    printf '\nWARNING: Some product checks were inconclusive. Run `ngwaf inventory --json` for exact HTTP statuses.\n' >&2
+  fi
+}
+
 cmd_workspaces() {
   local cid body total returned
   cid="$(current_cid)"
@@ -422,7 +991,7 @@ cmd_workspace() {
     jq '{
       name,
       mode,
-      immediate_blocking: .attack_signal_thresholds.immediate,
+      immediate_blocking: (.attack_signal_thresholds.immediate // null),
       default_blocking_response_code
     }'
 }
@@ -657,7 +1226,7 @@ cmd_posture() {
       customer_id: $customer_id,
       enforcement: {
         mode: ($ws.mode // "unknown"),
-        immediate_blocking: ($ws.attack_signal_thresholds.immediate // false),
+        immediate_blocking: ($ws.attack_signal_thresholds.immediate // null),
         default_blocking_response_code: ($ws.default_blocking_response_code // null)
       },
       attack_thresholds: ($ws.attack_signal_thresholds // {}),
@@ -2239,11 +2808,14 @@ usage() {
   cat <<'HELP'
 Fastly NGWAF read-only helper
 
-Customer / auth:
+Customer / auth and account inventory:
   ngwaf version
   ngwaf whoami
   ngwaf use <customer_id>
   ngwaf customer
+  ngwaf services [--json]
+  ngwaf products [--json]
+  ngwaf inventory [--json]
   ngwaf workspaces
 
 30-day-style analytics:
@@ -2304,6 +2876,9 @@ Examples:
   ngwaf intl-bot-stats 2026-08-01 2026-09-01 --json
   ngwaf intl-bot-types 2026-08-01 2026-09-01
 
+  ngwaf services
+  ngwaf products
+  ngwaf inventory
   ngwaf account-rules
   ngwaf posture production
   ngwaf lists production
@@ -2326,6 +2901,15 @@ Notes:
     calendar month such as Aug 1 -> Sep 1 can be reproduced.
   - intl-bot-stats and intl-bot-types are intentionally scoped to the 11
     international production service names used by the current Costco QBR slide.
+  - services enumerates Fastly edge services for the selected customer and maps
+    service type vcl -> CDN and wasm -> Compute.
+  - products inventories known public service-level product enablement APIs and
+    maps enabled products back to selected-customer services. NGWAF, Bot Management,
+    and DDoS Protection include configuration when the API returns it.
+  - inventory combines service counts, product enablement, and NGWAF workspace
+    inventory. Product enablement does not prove meaningful production traffic.
+  - account-level products without a service mapping are intentionally not included
+    in the v19 product matrix.
   - posture includes workspace rule types/actions, standard attack thresholds,
     signal thresholds, account-level rules whose scope applies to the workspace,
     and account/workspace list inventory. List presence is inventory context only;
@@ -2364,6 +2948,18 @@ case "${1:-help}" in
   customer)
     shift
     cmd_customer "$@"
+    ;;
+  services)
+    shift
+    cmd_services "$@"
+    ;;
+  products)
+    shift
+    cmd_products "$@"
+    ;;
+  inventory)
+    shift
+    cmd_inventory "$@"
     ;;
   workspaces)
     shift
