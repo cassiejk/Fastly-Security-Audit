@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="19.0"
+VERSION="20.0"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
 CORE_METRICS="requests_total,requests_attack,requests_total_blocked"
 BOT_HIST_FIELDS="edge_requests,bot_edge_requests_analyzed_count,bot_edge_requests_detected_count,bot_edge_requests_verified_count,bot_edge_requests_headless_count,bot_edge_requests_ai_crawler_count,bot_edge_requests_ai_fetcher_count,bot_edge_requests_search_engine_crawler_count,bot_edge_requests_accessibility_count,bot_edge_requests_content_fetcher_count,bot_edge_requests_monitoring_count,bot_edge_requests_online_marketing_count,bot_edge_requests_page_preview_count,bot_edge_requests_platform_integrations_count,bot_edge_requests_research_count,bot_edge_requests_search_engine_optimization_count,bot_edge_requests_security_tools_count"
+CURL_CONNECT_TIMEOUT="${NGWAF_CURL_CONNECT_TIMEOUT:-5}"
+CURL_MAX_TIME="${NGWAF_CURL_MAX_TIME:-60}"
+SERVICE_AUDIT_DAYS="${NGWAF_SERVICE_AUDIT_DAYS:-365}"
+SERVICE_AUDIT_MAX_PAGES="${NGWAF_SERVICE_AUDIT_MAX_PAGES:-25}"
+SERVICE_AUDIT_PAGE_SIZE="${NGWAF_SERVICE_AUDIT_PAGE_SIZE:-100}"
 
 die() {
   printf 'ngwaf: %s\n' "$*" >&2
@@ -42,6 +47,8 @@ get() {
 
   code="$(
     curl -sS -G \
+      --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+      --max-time "$CURL_MAX_TIME" \
       -o "$tmp" \
       -w '%{http_code}' \
       -H "Fastly-Key: $FASTLY_API_TOKEN" \
@@ -83,6 +90,8 @@ http_get_to_file() {
   local code
   code="$(
     curl -sS -G \
+      --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+      --max-time "$CURL_MAX_TIME" \
       -o "$outfile" \
       -w '%{http_code}' \
       -H "Fastly-Key: $FASTLY_API_TOKEN" \
@@ -412,60 +421,183 @@ cmd_customer() {
     jq '{id, name}'
 }
 
-# /service uses page/per_page pagination and returns a bare JSON array rather
-# than the {meta,data} shape used by NGWAF list endpoints. Fetch every visible
-# service, then scope the result to the selected customer_id. This prevents a
-# global/read-only token from accidentally mixing services from other accounts.
+# Service discovery for a selected customer must not enumerate the global
+# /service collection. With a root:read token, /service is effectively global
+# and the endpoint does not honor customer_id as a documented filter.
+#
+# Instead, discover service IDs from customer-scoped audit events, then fetch
+# each observed service directly by ID and verify its customer_id before using
+# it. Fastly retains audit events for a finite window, so this is deliberately
+# reported as an observed-service inventory rather than a guaranteed complete
+# all-time account inventory.
+#
+# Discovery sources:
+#   1. version.activate events within SERVICE_AUDIT_DAYS (default 365), because
+#      they provide a relatively low-noise record of services actively deployed.
+#   2. the most recent page of all customer events, which helps surface newly
+#      configured services (for example a fresh product PoC) before activation.
+#
+# SERVICE_AUDIT_MAX_PAGES bounds activation-event pagination so a very active
+# account cannot silently turn this command into a long-running crawl.
 get_selected_services() {
-  local cid page per_page pages_fetched count body pages_tmp
-  local scanned selected
+  local cid from_ts page page_size max_pages
+  local body count activation_pages activation_events truncated
+  local ids_tmp recent_tmp services_tmp unknown_tmp
+  local sid detail_tmp code observed_ids selected unknown_checks
 
   cid="$(current_cid)"
-  page=1
-  per_page=100
-  pages_fetched=0
-  scanned=0
-  pages_tmp="$(mktemp)"
+  page_size="$SERVICE_AUDIT_PAGE_SIZE"
+  max_pages="$SERVICE_AUDIT_MAX_PAGES"
 
+  [[ "$SERVICE_AUDIT_DAYS" =~ ^[0-9]+$ ]] || die 'NGWAF_SERVICE_AUDIT_DAYS must be an integer'
+  [[ "$page_size" =~ ^[0-9]+$ ]] || die 'NGWAF_SERVICE_AUDIT_PAGE_SIZE must be an integer'
+  [[ "$max_pages" =~ ^[0-9]+$ ]] || die 'NGWAF_SERVICE_AUDIT_MAX_PAGES must be an integer'
+  (( SERVICE_AUDIT_DAYS >= 1 && SERVICE_AUDIT_DAYS <= 365 )) || die 'NGWAF_SERVICE_AUDIT_DAYS must be between 1 and 365'
+  (( page_size >= 1 && page_size <= 100 )) || die 'NGWAF_SERVICE_AUDIT_PAGE_SIZE must be between 1 and 100'
+  (( max_pages >= 1 && max_pages <= 500 )) || die 'NGWAF_SERVICE_AUDIT_MAX_PAGES must be between 1 and 500'
+
+  if date -u -v-"${SERVICE_AUDIT_DAYS}"d '+%Y-%m-%dT%H:%M:%SZ' >/dev/null 2>&1; then
+    from_ts="$(date -u -v-"${SERVICE_AUDIT_DAYS}"d '+%Y-%m-%dT%H:%M:%SZ')"
+  else
+    from_ts="$(date -u -d "$SERVICE_AUDIT_DAYS days ago" '+%Y-%m-%dT%H:%M:%SZ')"
+  fi
+
+  ids_tmp="$(mktemp)"
+  recent_tmp="$(mktemp)"
+  services_tmp="$(mktemp)"
+  unknown_tmp="$(mktemp)"
+  activation_pages=0
+  activation_events=0
+  truncated=false
+
+  printf 'Discovering selected-customer services from Fastly audit events...\n' >&2
+
+  # Scan deployment activations within the audit window. The customer_id
+  # filter was explicitly validated with the root:read token before this path
+  # was adopted.
+  page=1
   while :; do
     body="$(
-      get "/service" \
-        --data-urlencode "page=$page" \
-        --data-urlencode "per_page=$per_page"
+      get "/events" \
+        -H "Accept: application/vnd.api+json" \
+        --data-urlencode "filter[customer_id]=$cid" \
+        --data-urlencode "filter[event_type]=version.activate" \
+        --data-urlencode "filter[created_at][gte]=$from_ts" \
+        --data-urlencode "sort=-created_at" \
+        --data-urlencode "page[number]=$page" \
+        --data-urlencode "page[size]=$page_size"
     )"
 
-    jq -e 'type == "array"' >/dev/null <<<"$body" || {
-      rm -f "$pages_tmp"
-      die '/service did not return a JSON array'
+    jq -e '.data | type == "array"' >/dev/null <<<"$body" || {
+      rm -f "$ids_tmp" "$recent_tmp" "$services_tmp" "$unknown_tmp"
+      die '/events did not return a JSON:API data array'
     }
 
-    count="$(jq 'length' <<<"$body")"
-    scanned=$(( scanned + count ))
-    pages_fetched=$(( pages_fetched + 1 ))
+    # Fail closed if customer scoping is ever ignored or changes semantics.
+    if ! jq -e --arg cid "$cid" '[.data[].attributes.customer_id // empty] | all(. == $cid)' >/dev/null <<<"$body"; then
+      rm -f "$ids_tmp" "$recent_tmp" "$services_tmp" "$unknown_tmp"
+      die '/events customer_id filter returned events for another customer; refusing service discovery'
+    fi
 
-    jq --arg cid "$cid" '[.[] | select(.customer_id == $cid)]' <<<"$body" >>"$pages_tmp"
+    count="$(jq '.data | length' <<<"$body")"
+    activation_events=$(( activation_events + count ))
+    activation_pages=$(( activation_pages + 1 ))
+    jq -r '.data[].attributes.service_id // empty' <<<"$body" >>"$ids_tmp"
 
-    (( count < per_page )) && break
+    if (( activation_pages % 5 == 0 )); then
+      printf '  scanned %s activation event page(s) / %s event(s)...\n' \
+        "$activation_pages" "$activation_events" >&2
+    fi
 
+    (( count < page_size )) && break
+
+    if (( page >= max_pages )); then
+      truncated=true
+      break
+    fi
     page=$(( page + 1 ))
-    (( page <= 1000 )) || {
-      rm -f "$pages_tmp"
-      die 'service pagination safety limit exceeded'
-    }
   done
 
-  selected="$(jq -s 'add // []' "$pages_tmp")"
-  rm -f "$pages_tmp"
+  # Add the most recent general customer events. This is intentionally only one
+  # page: it catches very new service configuration activity without crawling
+  # the account's full high-volume audit stream.
+  body="$(
+    get "/events" \
+      -H "Accept: application/vnd.api+json" \
+      --data-urlencode "filter[customer_id]=$cid" \
+      --data-urlencode "sort=-created_at" \
+      --data-urlencode "page[number]=1" \
+      --data-urlencode "page[size]=$page_size"
+  )"
+  jq -e '.data | type == "array"' >/dev/null <<<"$body" || {
+    rm -f "$ids_tmp" "$recent_tmp" "$services_tmp" "$unknown_tmp"
+    die '/events recent activity query did not return a JSON:API data array'
+  }
+  if ! jq -e --arg cid "$cid" '[.data[].attributes.customer_id // empty] | all(. == $cid)' >/dev/null <<<"$body"; then
+    rm -f "$ids_tmp" "$recent_tmp" "$services_tmp" "$unknown_tmp"
+    die '/events recent activity query returned another customer; refusing service discovery'
+  fi
+  jq -r '.data[].attributes.service_id // empty' <<<"$body" >"$recent_tmp"
+  cat "$recent_tmp" >>"$ids_tmp"
+
+  observed_ids="$(sort -u "$ids_tmp" | jq -Rn '[inputs | select(length > 0)]')"
+  printf 'Observed %s unique service ID(s); fetching service metadata...\n' "$(jq 'length' <<<"$observed_ids")" >&2
+
+  # Resolve each observed service directly. Do not use /service pagination.
+  while IFS= read -r sid; do
+    [[ -n "$sid" ]] || continue
+    detail_tmp="$(mktemp)"
+    code="$(http_get_to_file "/service/$sid" "$detail_tmp")"
+    case "$code" in
+      2*)
+        if jq -e --arg cid "$cid" '(.customer_id // "") == $cid' >/dev/null 2>&1 <"$detail_tmp"; then
+          jq . "$detail_tmp" >>"$services_tmp"
+        else
+          jq -n --arg service_id "$sid" --arg status "$code" \
+            '{service_id: $service_id, http_status: $status, reason: "customer_id_mismatch"}' >>"$unknown_tmp"
+        fi
+        ;;
+      404)
+        # Audit logs can retain references to deleted services. A 404 is not an
+        # inventory error; simply omit that historical/deleted service.
+        ;;
+      *)
+        jq -n --arg service_id "$sid" --arg status "$code" \
+          '{service_id: $service_id, http_status: $status, reason: "service_lookup_failed"}' >>"$unknown_tmp"
+        ;;
+    esac
+    rm -f "$detail_tmp"
+  done < <(jq -r '.[]' <<<"$observed_ids")
+
+  selected="$(jq -s 'unique_by(.id)' "$services_tmp")"
+  unknown_checks="$(jq -s '.' "$unknown_tmp")"
+  rm -f "$ids_tmp" "$recent_tmp" "$services_tmp" "$unknown_tmp"
 
   jq -n \
-    --argjson scanned "$scanned" \
-    --argjson pages_fetched "$pages_fetched" \
+    --arg method "customer-audit-events" \
+    --arg from "$from_ts" \
+    --argjson audit_days "$SERVICE_AUDIT_DAYS" \
+    --argjson activation_pages "$activation_pages" \
+    --argjson activation_events "$activation_events" \
+    --argjson recent_events "$(jq '.data | length' <<<"$body")" \
+    --argjson truncated "$truncated" \
+    --argjson observed_ids "$observed_ids" \
+    --argjson unknown_checks "$unknown_checks" \
     --argjson data "$selected" \
     '{
       meta: {
-        api_services_scanned: $scanned,
+        discovery_method: $method,
+        audit_window_days: $audit_days,
+        audit_from: $from,
+        activation_event_pages_fetched: $activation_pages,
+        activation_events_scanned: $activation_events,
+        recent_events_scanned: $recent_events,
+        observed_service_ids: ($observed_ids | length),
         selected_total: ($data | length),
-        pages_fetched: $pages_fetched
+        activation_scan_truncated: $truncated,
+        unknown_service_lookup_count: ($unknown_checks | length),
+        unknown_service_lookups: $unknown_checks,
+        completeness: "observed-within-audit-window"
       },
       data: $data
     }'
@@ -686,8 +818,14 @@ cmd_services() {
               compute: ([$services[] | select((.type // "") == "wasm")] | length),
               other: ([$services[] | select(((.type // "") != "vcl") and ((.type // "") != "wasm"))] | length),
               paused: ([$services[] | select(.paused == true)] | length),
-              pages_fetched: ($body.meta.pages_fetched // null),
-              api_services_scanned: ($body.meta.api_services_scanned // null)
+              discovery_method: ($body.meta.discovery_method // null),
+              audit_window_days: ($body.meta.audit_window_days // null),
+              activation_event_pages_fetched: ($body.meta.activation_event_pages_fetched // null),
+              activation_events_scanned: ($body.meta.activation_events_scanned // null),
+              recent_events_scanned: ($body.meta.recent_events_scanned // null),
+              activation_scan_truncated: ($body.meta.activation_scan_truncated // false),
+              unknown_service_lookup_count: ($body.meta.unknown_service_lookup_count // 0),
+              completeness: ($body.meta.completeness // "unknown")
             },
             services: [
               $services[]
@@ -714,8 +852,15 @@ cmd_services() {
 
   jq -r '
     "Customer: \(.customer.name) (\(.customer.id))",
-    "Services: \(.summary.total) total — \(.summary.cdn) CDN, \(.summary.compute) Compute, \(.summary.other) other; \(.summary.paused) paused"
+    "Observed services: \(.summary.total) total — \(.summary.cdn) CDN, \(.summary.compute) Compute, \(.summary.other) other; \(.summary.paused) paused",
+    "Discovery: audit events over \(.summary.audit_window_days)d; activation pages=\(.summary.activation_event_pages_fetched), activation events=\(.summary.activation_events_scanned), recent events=\(.summary.recent_events_scanned)"
   ' <<<"$normalized"
+  if jq -e '.summary.activation_scan_truncated == true' >/dev/null <<<"$normalized"; then
+    printf 'WARNING: activation-event discovery hit the configured page cap; this observed service set may be incomplete. Increase NGWAF_SERVICE_AUDIT_MAX_PAGES if needed.\n' >&2
+  fi
+  if jq -e '.summary.unknown_service_lookup_count > 0' >/dev/null <<<"$normalized"; then
+    printf 'WARNING: one or more observed service IDs could not be resolved. Use `ngwaf services --json` for discovery metadata.\n' >&2
+  fi
   printf '\n'
 
   jq -r '
@@ -756,9 +901,10 @@ cmd_products() {
         {
           customer: {id: ($customer.id // null), name: ($customer.name // null)},
           services_scanned: ($services_body.data | length),
+          service_discovery: ($services_body.meta // {}),
           product_definitions_scanned: ($products | length),
           products: $products,
-          note: "Service-level product inventory only. Account-level products without a service mapping are not included. Non-2xx checks other than 404 are reported as unknown rather than treated as disabled."
+          note: "Service-level product inventory is evaluated against the audit-observed selected-customer service set. Account-level products without a service mapping are not included. Non-2xx checks other than 404 are reported as unknown rather than treated as disabled."
         }
       '
   )"
@@ -770,7 +916,8 @@ cmd_products() {
 
   jq -r '
     "Customer: \(.customer.name) (\(.customer.id))",
-    "Services scanned: \(.services_scanned)",
+    "Observed services scanned: \(.services_scanned)",
+    "Service discovery: audit events over \(.service_discovery.audit_window_days // "?")d; truncated=\(.service_discovery.activation_scan_truncated // false)",
     "Service-level products checked: \(.product_definitions_scanned)"
   ' <<<"$payload"
 
@@ -853,6 +1000,7 @@ cmd_inventory() {
               compute: ([$services[] | select((.type // "") == "wasm")] | length),
               other: ([$services[] | select(((.type // "") != "vcl") and ((.type // "") != "wasm"))] | length),
               paused: ([$services[] | select(.paused == true)] | length),
+              discovery: ($services_body.meta // {}),
               services: [
                 $services[]
                 | {
@@ -881,7 +1029,8 @@ cmd_inventory() {
               pages_fetched: ($workspaces.meta.pages_fetched // null)
             },
             notes: [
-              "Service inventory is filtered to the selected customer_id from the /service API.",
+              "Service inventory contains services observed through selected-customer audit events and then verified by direct service lookup; it is not guaranteed to be a complete all-time account inventory.",
+              "The audit-based service discovery window is finite and may be truncated by NGWAF_SERVICE_AUDIT_MAX_PAGES on very active accounts.",
               "Product inventory covers known public service-level product enablement APIs; account-level products are not included.",
               "A product check that returns a non-2xx status other than 404 is reported as unknown, not disabled.",
               "Product enablement is configuration inventory and does not prove that a service currently carries meaningful production traffic."
@@ -898,12 +1047,13 @@ cmd_inventory() {
   jq -r '
     "Customer: \(.customer.name) (\(.customer.id))",
     "",
-    "EDGE SERVICES",
+    "EDGE SERVICES (AUDIT-OBSERVED)",
     "  Total:   \(.edge_services.total)",
     "  CDN:     \(.edge_services.cdn)",
     "  Compute: \(.edge_services.compute)",
     "  Other:   \(.edge_services.other)",
     "  Paused:  \(.edge_services.paused)",
+    "  Audit window: \(.edge_services.discovery.audit_window_days // "?")d; activation scan truncated=\(.edge_services.discovery.activation_scan_truncated // false)",
     "",
     "NGWAF",
     "  Workspaces: \(.ngwaf.workspace_count)"
@@ -946,6 +1096,10 @@ cmd_inventory() {
     )
     | @tsv
   ' <<<"$payload" | human_table
+
+  if jq -e '.edge_services.discovery.activation_scan_truncated == true' >/dev/null <<<"$payload"; then
+    printf '\nWARNING: service discovery hit the audit-event page cap; service and product counts are based on an incomplete observed-service set.\n' >&2
+  fi
 
   if jq -e '[.service_products.products[].unknown_check_count] | add > 0' >/dev/null <<<"$payload"; then
     printf '\nWARNING: Some product checks were inconclusive. Run `ngwaf inventory --json` for exact HTTP statuses.\n' >&2
@@ -2901,15 +3055,19 @@ Notes:
     calendar month such as Aug 1 -> Sep 1 can be reproduced.
   - intl-bot-stats and intl-bot-types are intentionally scoped to the 11
     international production service names used by the current Costco QBR slide.
-  - services enumerates Fastly edge services for the selected customer and maps
-    service type vcl -> CDN and wasm -> Compute.
+  - services discovers selected-customer service IDs from customer-scoped audit
+    events, verifies each by direct service lookup, and maps vcl -> CDN and
+    wasm -> Compute. This is an audit-observed inventory, not a guaranteed
+    complete all-time service list.
   - products inventories known public service-level product enablement APIs and
-    maps enabled products back to selected-customer services. NGWAF, Bot Management,
-    and DDoS Protection include configuration when the API returns it.
-  - inventory combines service counts, product enablement, and NGWAF workspace
-    inventory. Product enablement does not prove meaningful production traffic.
+    maps enabled products back to the audit-observed selected-customer service
+    set. NGWAF, Bot Management, and DDoS Protection include configuration when
+    the API returns it.
+  - inventory combines audit-observed service counts, product enablement, and
+    NGWAF workspace inventory. Product enablement does not prove meaningful
+    production traffic.
   - account-level products without a service mapping are intentionally not included
-    in the v19 product matrix.
+    in the v20 product matrix.
   - posture includes workspace rule types/actions, standard attack thresholds,
     signal thresholds, account-level rules whose scope applies to the workspace,
     and account/workspace list inventory. List presence is inventory context only;
