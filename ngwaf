@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="13.0"
+VERSION="14.0"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -1616,6 +1616,7 @@ cmd_attack_origins() {
 
       body="$(
         get "/ngwaf/v1/workspaces/$workspace_id/top-attacks" \
+          --data-urlencode "customer_id=$cid" \
           --data-urlencode "field=remote_country_code" \
           --data-urlencode "from=$chunk_from" \
           --data-urlencode "to=$chunk_to" \
@@ -1734,7 +1735,7 @@ cmd_attack_origins() {
         to_is_exclusive: true,
         span_days: $span_days,
         workspace_count: $workspace_count,
-        source: "GET /ngwaf/v1/workspaces/{workspace_id}/top-attacks?field=remote_country_code",
+        source: "GET /ngwaf/v1/workspaces/{workspace_id}/top-attacks?customer_id={customer_id}&field=remote_country_code",
         per_workspace_limit_per_chunk: $per_workspace_limit,
         max_days_per_top_attacks_query: $chunk_days,
         chunks_per_workspace: $chunks_per_workspace,
@@ -1751,7 +1752,7 @@ cmd_attack_origins() {
           share_of_attack_requests: $other_share
         },
         countries: $countries,
-        methodology: "Resolve workspaces from the selected customer ID, split the requested reporting period into contiguous intervals of 7 days or less, query each workspace top-attacks endpoint with field=remote_country_code for every interval, aggregate country counts across intervals and workspaces, and reconcile the returned country counts against customer-scoped requests_attack timeseries."
+        methodology: "Resolve workspaces from the selected customer ID, split the requested reporting period into contiguous intervals of 7 days or less, query each workspace top-attacks endpoint with customer_id and field=remote_country_code for every interval, aggregate country counts across intervals and workspaces, and reconcile the returned country counts against customer-scoped requests_attack timeseries."
       }'
     return
   fi
@@ -1884,7 +1885,7 @@ Notes:
     TO is exclusive.
   - attack-origins is intentionally limited to 30 days for this workflow. It
     resolves the selected customer workspace list first, queries each workspace
-    top-attacks endpoint with field=remote_country_code, aggregates country counts, and
+    top-attacks endpoint with customer_id + field=remote_country_code, aggregates country counts, and
     reconciles them against customer-scoped requests_attack timeseries.
   - bot-stats uses Fastly Historical Stats for one Fastly service and is
     intentionally limited to a rolling 1-30 day window for this workflow.
