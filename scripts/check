@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+printf 'Syntax checks...\n'
+while IFS= read -r file; do
+  bash -n "$file"
+done < <(find "$ROOT" -type f \( -name 'ngwaf' -o -name 'ngwaf-update' -o -name '*.sh' \) -print | sort)
+
+if command -v shellcheck >/dev/null 2>&1; then
+  printf 'ShellCheck...\n'
+  shellcheck "$ROOT/ngwaf" "$ROOT/ngwaf-update" "$ROOT"/lib/*.sh "$ROOT"/customer/*.sh
+else
+  printf 'ShellCheck not installed; skipped.\n'
+fi
+
+printf 'CLI smoke tests...\n'
+[[ "$($ROOT/ngwaf version)" == 'ngwaf 21.0' ]]
+$ROOT/ngwaf help >/dev/null
+
+printf 'OK\n'
