@@ -55,6 +55,54 @@ cmd_workspace() {
     }' <<<"$body"
 }
 
+cmd_rule() {
+  [[ $# -eq 2 ]] || die 'usage: ngwaf rule <workspace> <rule_id>'
+
+  local cid input rule_id encoded_rule_id resolved w ws_id body actual_rule_id
+  local NGWAF_PROGRESS_LABEL
+  cid="$(current_cid)"
+  input="$1"
+  rule_id="$2"
+  [[ -n "$rule_id" ]] || die 'rule ID must not be empty'
+
+  resolved="$(resolve_workspace_json "$input")"
+  w="$(jq -r '.name' <<<"$resolved")"
+  ws_id="$(jq -r '.id' <<<"$resolved")"
+  encoded_rule_id="$(urlencode "$rule_id")"
+  NGWAF_PROGRESS_LABEL="retrieving rule $rule_id from $w"
+
+  body="$(
+    get "$(workspace_path "$ws_id")/rules/$encoded_rule_id" \
+      --data-urlencode "customer_id=$cid"
+  )"
+
+  actual_rule_id="$(jq -r '.id // empty' <<<"$body")"
+  [[ -n "$actual_rule_id" ]] ||
+    die "rule response did not contain an ID: $rule_id"
+  [[ "$actual_rule_id" == "$rule_id" ]] ||
+    die "rule response ID did not match requested rule: expected $rule_id, received $actual_rule_id"
+
+  jq \
+    --arg workspace "$w" \
+    --arg workspace_id "$ws_id" \
+    --arg workspace_input "$input" \
+    --arg rule_id "$rule_id" \
+    '. + {
+      context: {
+        workspace: $workspace,
+        workspace_id: $workspace_id,
+        workspace_input: $workspace_input,
+        rule_id: $rule_id
+      },
+      provenance: {
+        endpoint: "GET /ngwaf/v1/workspaces/{workspace_id}/rules/{rule_id}",
+        data_class: "configuration_snapshot",
+        customer_scoped: true,
+        pagination: "not_applicable"
+      }
+    }' <<<"$body"
+}
+
 cmd_rules() {
   [[ $# -ge 1 ]] || die 'usage: ngwaf rules <workspace> [--list|--json]'
 

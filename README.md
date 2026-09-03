@@ -1,8 +1,8 @@
-# ngwaf-helper v23.0
+# ngwaf-helper v23.1
 
-v23 adds non-destructive diagnostics, protected configuration snapshots,
-semantic snapshot comparisons, and a more readable terminal interface. It
-retains v22's explicit scope, missing-data, window, and provenance contracts.
+v23.1 adds direct, customer-scoped retrieval of a single workspace rule. It
+retains v23's non-destructive diagnostics, protected configuration snapshots,
+semantic snapshot comparisons, and readable terminal interface.
 
 ## Layout
 
@@ -143,11 +143,22 @@ Because scope messages go to stderr, JSON pipelines remain safe:
 ngwaf rules Production --json | jq '.data | length'
 ```
 
+Retrieve one workspace rule directly by ID without downloading the complete
+rule collection:
+
+```bash
+ngwaf rule Production 6047e66c33e0b901e666e36a
+```
+
+The response preserves the rule object at the top level and adds `context` and
+`provenance`. The command verifies that the API response contains the requested
+rule ID; missing rules, malformed responses, and mismatched IDs fail closed.
+
 ### Data and output contracts
 
 | Command family | Primary source | Data class | Important interpretation |
 |---|---|---|---|
-| `workspace`, `rules`, `thresholds`, `lists`, `posture` | NGWAF configuration APIs | Point-in-time configuration | Pagination completes or the command fails; rule summaries do not simulate rule precedence. |
+| `workspace`, `rule`, `rules`, `thresholds`, `lists`, `posture` | NGWAF configuration APIs | Point-in-time configuration | Single-rule responses are identity-checked; paginated collections complete or fail; rule summaries do not simulate rule precedence. |
 | `overview`, `timeseries`, `metrics`, `attack-profile` | NGWAF timeseries API | Aggregated timeseries | Uses complete UTC days; `to` is exclusive; every requested metric must be present and numeric in every returned row. |
 | `count`, `signal-count` | NGWAF request-search API | Retained searchable request records | Uses a rolling window ending five minutes before execution; `meta.total` may reflect sampled or mixed-storage records and is not raw traffic. |
 | `bot-stats` | Fastly Historical Stats | Daily service statistics | Bot metrics are sampled and scaled estimates; they are not directly comparable to unsampled `edge_requests`. |
@@ -191,7 +202,7 @@ ngwaf-update ./ngwaf
 
 ## Refactor history
 
-v21 deliberately did **not** change API semantics. Existing functions were moved intact from v20 into modules so behavioral regressions could be distinguished from the refactor. v21.1 was the first post-refactor behavioral release, v21.2 fixed the zero-retry test path on macOS Bash 3.2, and v21.3 made request-search sampling semantics explicit in every count result. v22 added explicit scope resolution and data-quality contracts. v23 adds diagnostics, protected configuration snapshots, local semantic diffs, and TTY-aware presentation.
+v21 deliberately did **not** change API semantics. Existing functions were moved intact from v20 into modules so behavioral regressions could be distinguished from the refactor. v21.1 was the first post-refactor behavioral release, v21.2 fixed the zero-retry test path on macOS Bash 3.2, and v21.3 made request-search sampling semantics explicit in every count result. v22 added explicit scope resolution and data-quality contracts. v23 adds diagnostics, protected configuration snapshots, local semantic diffs, and TTY-aware presentation. v23.1 adds direct single-rule retrieval with response identity validation.
 
 ### Known scope caveat retained from v20
 

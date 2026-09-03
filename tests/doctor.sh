@@ -59,7 +59,7 @@ export NGWAF_CURL_RETRIES=0
 output="$($ROOT/ngwaf doctor --json)"
 jq -e '
   .command == "doctor"
-  and .tool_version == "23.0"
+  and .tool_version == "23.1"
   and .status != "fail"
   and any(.checks[]; .check == "token API access" and .status == "pass")
   and any(.checks[]; .check == "customer scope" and .status == "pass")

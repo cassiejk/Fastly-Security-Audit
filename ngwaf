@@ -3,7 +3,7 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-VERSION="23.0"
+VERSION="23.1"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -161,6 +161,10 @@ case "${1:-help}" in
   rules)
     shift
     cmd_rules "$@"
+    ;;
+  rule)
+    shift
+    cmd_rule "$@"
     ;;
   thresholds)
     shift

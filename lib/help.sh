@@ -37,6 +37,7 @@ Account / workspace configuration:
   ngwaf account-rules [--list|--json]
   ngwaf workspace <workspace>
   ngwaf posture <workspace>
+  ngwaf rule <workspace> <rule_id>
   ngwaf rules <workspace> [--list|--json]
   ngwaf thresholds <workspace> [--json]
   ngwaf lists <workspace> [--json]
@@ -85,6 +86,7 @@ Examples:
   ngwaf inventory
   ngwaf account-rules
   ngwaf posture production
+  ngwaf rule Production 6047e66c33e0b901e666e36a
   ngwaf lists production
   ngwaf bot-rules production
   ngwaf signal-count production SUSPECTED-BAD-BOT 7
@@ -140,6 +142,8 @@ Notes:
     it does not prove that a rule references a list.
   - account-rules reads the separate account-level NGWAF rule layer and preserves
     rule type, action, and scope details.
+  - rule retrieves one workspace rule directly by ID and verifies that the API
+    response ID matches the requested ID. It does not fetch the full rule list.
   - bot-rules scans the complete paginated workspace rule set for bot signal
     families, client-challenge signals/actions, and DATACENTER as bot-adjacent
     evidence. DATACENTER is not treated as a bot verdict.
