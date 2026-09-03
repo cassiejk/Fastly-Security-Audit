@@ -24,5 +24,6 @@ $ROOT/tests/metrics.sh
 $ROOT/tests/doctor.sh
 $ROOT/tests/rules.sh
 $ROOT/tests/snapshots.sh
+$ROOT/tests/json-transport.sh
 
 printf 'OK\n'

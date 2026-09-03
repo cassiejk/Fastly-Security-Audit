@@ -370,20 +370,27 @@ cmd_posture() {
     ' <<<"$thresholds"
   )"
 
-  jq -n \
+  json_stream \
+    "$ws" \
+    "$rules_summary" \
+    "$account_summary" \
+    "$threshold_summary" \
+    "$workspace_lists_summary" \
+    "$account_lists_summary" |
+    jq -s \
     --arg workspace "$w" \
     --arg workspace_id "$ws_id" \
     --arg workspace_input "$input" \
     --arg customer_id "$cid" \
-    --argjson ws "$ws" \
-    --argjson rules "$rules_summary" \
-    --argjson account_rules "$account_summary" \
     --argjson account_global "$(jq '[.data[] | select(((.scope.applies_to // []) | index("*")) != null)] | length' <<<"$account_applying")" \
     --argjson account_specific "$(jq --arg wsid "$ws_id" '[.data[] | select(((.scope.applies_to // []) | index("*")) == null and ((.scope.applies_to // []) | index($wsid)) != null)] | length' <<<"$account_applying")" \
-    --argjson thresholds "$threshold_summary" \
-    --argjson workspace_lists "$workspace_lists_summary" \
-    --argjson account_lists "$account_lists_summary" \
-    '{
+    '.[0] as $ws
+    | .[1] as $rules
+    | .[2] as $account_rules
+    | .[3] as $thresholds
+    | .[4] as $workspace_lists
+    | .[5] as $account_lists
+    | {
       workspace: $workspace,
       workspace_id: $workspace_id,
       workspace_input: $workspace_input,
@@ -442,13 +449,14 @@ cmd_lists() {
   )"
 
   if [[ "$mode" == "--json" ]]; then
-    jq -n \
+    json_stream "$workspace_lists" "$account_lists" |
+      jq -s \
       --arg workspace "$w" \
       --arg workspace_id "$ws_id" \
-      --arg workspace_input "$input" \
-      --argjson workspace_lists "$workspace_lists" \
-      --argjson account_lists "$account_lists" \
-      '{
+      --arg workspace_input "$input" '
+      .[0] as $workspace_lists
+      | .[1] as $account_lists
+      | {
         workspace: $workspace,
         workspace_id: $workspace_id,
         workspace_input: $workspace_input,
@@ -467,13 +475,14 @@ cmd_lists() {
   workspace_summary="$(summarize_lists_json <<<"$workspace_lists")"
   account_summary="$(summarize_lists_json <<<"$account_lists")"
 
-  jq -n \
+  json_stream "$workspace_summary" "$account_summary" |
+    jq -s \
     --arg workspace "$w" \
     --arg workspace_id "$ws_id" \
-    --arg workspace_input "$input" \
-    --argjson workspace_lists "$workspace_summary" \
-    --argjson account_lists "$account_summary" \
-    '{
+    --arg workspace_input "$input" '
+    .[0] as $workspace_lists
+    | .[1] as $account_lists
+    | {
       workspace: $workspace,
       workspace_id: $workspace_id,
       workspace_input: $workspace_input,

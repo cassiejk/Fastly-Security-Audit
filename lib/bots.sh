@@ -85,14 +85,15 @@ cmd_bot_rules() {
   )"
 
   if [[ "$format" == "--json" ]]; then
-    jq -n \
+    json_stream "$matches" |
+      jq -s \
       --arg workspace "$w" \
       --arg workspace_id "$ws_id" \
       --arg workspace_input "$input" \
       --argjson total_rules "$(jq '.data | length' <<<"$body")" \
-      --argjson pages_fetched "$(jq '.meta.pages_fetched // 1' <<<"$body")" \
-      --argjson matched_rules "$matches" \
-      '{
+      --argjson pages_fetched "$(jq '.meta.pages_fetched // 1' <<<"$body")" '
+      .[0] as $matched_rules
+      | {
         workspace: $workspace,
         workspace_id: $workspace_id,
         workspace_input: $workspace_input,
@@ -167,15 +168,16 @@ historical_bot_summary_json() {
     "edge_requests,bot_edge_requests_analyzed_count,bot_edge_requests_detected_count,bot_edge_requests_verified_count,bot_edge_requests_headless_count,bot_edge_requests_ai_crawler_count,bot_edge_requests_search_engine_crawler_count" \
     "Historical Stats for service $service_id"
 
-  jq -n \
+  jq '.data // []' <<<"$body" |
+    jq -s \
     --arg service_id "$service_id" \
     --arg service_name "$service_name" \
     --arg customer_id "$cid" \
     --arg customer "$customer" \
     --arg from "$HIST_FROM" \
-    --arg to "$HIST_TO" \
-    --argjson rows "$(jq '.data // []' <<<"$body")" \
-    '
+    --arg to "$HIST_TO" '
+    .[0] as $rows
+    |
     def n:
       if . == null then 0
       elif type == "number" then .
@@ -318,15 +320,16 @@ historical_bot_summary_known_service_json() {
     "$BOT_HIST_FIELDS" \
     "Historical Stats for service $service_id"
 
-  jq -n \
+  jq '.data // []' <<<"$body" |
+    jq -s \
     --arg service_id "$service_id" \
     --arg service_name "$service_name" \
     --arg customer_id "$cid" \
     --arg customer "$customer" \
     --arg from "$HIST_FROM" \
-    --arg to "$HIST_TO" \
-    --argjson rows "$(jq '.data // []' <<<"$body")" \
-    '
+    --arg to "$HIST_TO" '
+    .[0] as $rows
+    |
     def n:
       if . == null then 0
       elif type == "number" then .

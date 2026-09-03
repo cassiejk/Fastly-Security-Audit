@@ -65,7 +65,8 @@ cmd_intl_bot_stats() {
 
     summary="$(historical_bot_summary_known_service_json "$service_id" "$service_name")"
 
-    jq --argjson item "$summary" '. + [$item]' "$tmp" > "${tmp}.new"
+    json_stream "$summary" "$(cat "$tmp")" |
+      jq -s '.[0] as $item | .[1] + [$item]' > "${tmp}.new"
     mv "${tmp}.new" "$tmp"
   done < <(
     jq -r '.[] | [.name, .id] | @tsv' <<<"$services"
@@ -227,7 +228,8 @@ cmd_intl_bot_types() {
   while IFS=$'\t' read -r service_name service_id; do
     [[ -n "$service_name" && -n "$service_id" ]] || continue
     summary="$(historical_bot_summary_known_service_json "$service_id" "$service_name")"
-    jq --argjson item "$summary" '. + [$item]' "$tmp" > "${tmp}.new"
+    json_stream "$summary" "$(cat "$tmp")" |
+      jq -s '.[0] as $item | .[1] + [$item]' > "${tmp}.new"
     mv "${tmp}.new" "$tmp"
   done < <(jq -r '.[] | [.name, .id] | @tsv' <<<"$services")
 

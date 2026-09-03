@@ -138,7 +138,10 @@ get_selected_services() {
   unknown_checks="$(jq -s '.' "$unknown_tmp")"
   rm -f "$ids_tmp" "$recent_tmp" "$services_tmp" "$unknown_tmp"
 
-  jq -n \
+  # Structured payloads can exceed macOS ARG_MAX when passed through
+  # `jq --argjson`. Stream them as JSON documents instead.
+  printf '%s\n%s\n%s\n' "$observed_ids" "$unknown_checks" "$selected" |
+    jq -s \
     --arg method "customer-audit-events" \
     --arg from "$from_ts" \
     --argjson audit_days "$SERVICE_AUDIT_DAYS" \
@@ -146,10 +149,10 @@ get_selected_services() {
     --argjson activation_events "$activation_events" \
     --argjson recent_events "$(jq '.data | length' <<<"$body")" \
     --argjson truncated "$truncated" \
-    --argjson observed_ids "$observed_ids" \
-    --argjson unknown_checks "$unknown_checks" \
-    --argjson data "$selected" \
-    '{
+    '.[0] as $observed_ids
+    | .[1] as $unknown_checks
+    | .[2] as $data
+    | {
       meta: {
         discovery_method: $method,
         audit_window_days: $audit_days,
@@ -216,10 +219,14 @@ discover_product_json() {
     returned_cid="$(jq -r '.customer.id // empty' "$list_tmp")"
     if [[ -n "$returned_cid" && "$returned_cid" == "$cid" ]]; then
       enabled_ids="$(
-        jq --argjson services "$(jq '.data' <<<"$services_body")" '
-          (.services // []) as $enabled
+        {
+          jq '.data' <<<"$services_body"
+          cat "$list_tmp"
+        } | jq -s '
+          .[0] as $services
+          | (.[1].services // []) as $enabled
           | [$services[] | select(.id as $id | $enabled | index($id) != null) | .id]
-        ' "$list_tmp"
+        '
       )"
     else
       method='per-service-probe'
@@ -263,10 +270,11 @@ discover_product_json() {
       probe_tmp="$(mktemp)"
       probe_code="$(http_get_to_file "/enabled-products/v1/$product_id/services/$sid/configuration" "$probe_tmp")"
       if [[ "$probe_code" == 2* ]] && jq -e 'type == "object"' >/dev/null 2>&1 <"$probe_tmp"; then
-        jq -n \
-          --arg service_id "$sid" \
-          --argjson configuration "$(jq '.configuration // {}' "$probe_tmp")" \
-          '{service_id: $service_id, configuration: $configuration, configuration_http_status: 200}' >>"$configs_tmp"
+        jq '.configuration // {}' "$probe_tmp" |
+          jq -s \
+            --arg service_id "$sid" \
+            '.[0] as $configuration
+             | {service_id: $service_id, configuration: $configuration, configuration_http_status: 200}' >>"$configs_tmp"
       else
         jq -n \
           --arg service_id "$sid" \
@@ -279,16 +287,15 @@ discover_product_json() {
   configs="$(jq -s '.' "$configs_tmp")"
   rm -f "$configs_tmp"
 
-  jq -n \
+  {
+    jq '.data' <<<"$services_body"
+    printf '%s\n%s\n%s\n' "$enabled_ids" "$configs" "$unknown_checks"
+  } | jq -s \
     --arg id "$product_id" \
     --arg label "$label" \
     --arg category "$category" \
     --arg discovery_method "$method" \
-    --arg list_customer_id "$returned_cid" \
-    --argjson all_services "$(jq '.data' <<<"$services_body")" \
-    --argjson enabled_ids "$enabled_ids" \
-    --argjson configs "$configs" \
-    --argjson unknown_checks "$unknown_checks" '
+    --arg list_customer_id "$returned_cid" '
       def platform:
         if (.type // "") == "vcl" then "CDN"
         elif (.type // "") == "wasm" then "Compute"
@@ -302,7 +309,11 @@ discover_product_json() {
           (([.environments[] | select((.name // "") == "production") | .active_version] | .[0]) // .version // null)
         else (.version // null)
         end;
-      {
+      .[0] as $all_services
+      | .[1] as $enabled_ids
+      | .[2] as $configs
+      | .[3] as $unknown_checks
+      | {
         id: $id,
         label: $label,
         category: $category,
@@ -360,9 +371,8 @@ cmd_services() {
   services_body="$(get_selected_services)"
 
   normalized="$(
-    jq -n \
-      --argjson customer "$customer" \
-      --argjson body "$services_body" '
+    printf '%s\n%s\n' "$customer" "$services_body" |
+      jq -s '
         def platform:
           if (.type // "") == "vcl" then "CDN"
           elif (.type // "") == "wasm" then "Compute"
@@ -376,7 +386,9 @@ cmd_services() {
             (([.environments[] | select((.name // "") == "production") | .active_version] | .[0]) // .version // null)
           else (.version // null)
           end;
-        ($body.data // []) as $services
+        .[0] as $customer
+        | .[1] as $body
+        | ($body.data // []) as $services
         | {
             customer: {id: ($customer.id // null), name: ($customer.name // null)},
             summary: {
@@ -461,11 +473,12 @@ cmd_products() {
   products="$(collect_products_json "$services_body")"
 
   payload="$(
-    jq -n \
-      --argjson customer "$customer" \
-      --argjson services_body "$services_body" \
-      --argjson products "$products" '
-        {
+    printf '%s\n%s\n%s\n' "$customer" "$services_body" "$products" |
+      jq -s '
+        .[0] as $customer
+        | .[1] as $services_body
+        | .[2] as $products
+        | {
           customer: {id: ($customer.id // null), name: ($customer.name // null)},
           services_scanned: ($services_body.data | length),
           service_discovery: ($services_body.meta // {}),
@@ -553,12 +566,13 @@ cmd_inventory() {
   )"
 
   payload="$(
-    jq -n \
-      --argjson customer "$customer" \
-      --argjson services_body "$services_body" \
-      --argjson products "$products" \
-      --argjson workspaces "$workspaces" '
-        ($services_body.data // []) as $services
+    printf '%s\n%s\n%s\n%s\n' "$customer" "$services_body" "$products" "$workspaces" |
+      jq -s '
+        .[0] as $customer
+        | .[1] as $services_body
+        | .[2] as $products
+        | .[3] as $workspaces
+        | ($services_body.data // []) as $services
         | {
             customer: {id: ($customer.id // null), name: ($customer.name // null)},
             edge_services: {

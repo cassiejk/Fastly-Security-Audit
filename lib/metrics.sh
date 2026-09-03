@@ -53,14 +53,15 @@ cmd_overview() {
   )"
 
   if [[ "$format" == "--json" ]]; then
-    jq -n \
+    json_stream "$summary" |
+      jq -s \
       --arg customer "$customer" \
       --arg customer_id "$cid" \
       --arg from "$TS_FROM" \
       --arg to "$TS_TO" \
-      --argjson days "$days" \
-      --argjson workspaces "$summary" \
-      '{
+      --argjson days "$days" '
+      .[0] as $workspaces
+      | {
         customer: $customer,
         customer_id: $customer_id,
         days: $days,
@@ -147,7 +148,8 @@ cmd_timeseries() {
   validate_timeseries_response "$body" "$CORE_METRICS" "timeseries for workspace $w"
 
   if [[ "$format" == "--json" ]]; then
-    jq -n \
+    json_stream "$body" |
+      jq -s \
       --arg workspace "$w" \
       --arg workspace_id "$ws_id" \
       --arg workspace_input "$input" \
@@ -155,9 +157,9 @@ cmd_timeseries() {
       --arg customer_id "$cid" \
       --arg from "$TS_FROM" \
       --arg to "$TS_TO" \
-      --argjson days "$days" \
-      --argjson response "$body" \
-      '{
+      --argjson days "$days" '
+      .[0] as $response
+      | {
         customer: $customer,
         customer_id: $customer_id,
         workspace: $workspace,
@@ -264,15 +266,16 @@ cmd_metrics() {
   )"
 
   if [[ "$format" == "--json" ]]; then
-    jq -n \
+    json_stream "$summary" |
+      jq -s \
       --arg from "$TS_FROM" \
       --arg to "$TS_TO" \
       --arg metrics "$metrics" \
       --arg customer "$customer" \
       --arg customer_id "$cid" \
-      --argjson days "$days" \
-      --argjson data "$summary" \
-      '{
+      --argjson days "$days" '
+      .[0] as $data
+      | {
         customer: $customer,
         customer_id: $customer_id,
         days: $days,
@@ -333,7 +336,8 @@ cmd_count() {
   # as an explicit, visible alias rather than returning a misleading count.
   if [[ "$query" =~ (^|[[:space:]])rule: ]]; then
     query="$(sed -E 's/(^|[[:space:]])rule:/\1ruleid:/g' <<<"$query")"
-    printf 'ngwaf: note: normalized search key rule: to ruleid:\n' >&2
+    printf '%s: note: normalized search key rule: to ruleid:\n' \
+      "${PROGRAM_NAME:-:-ngwaf}" >&2
   fi
 
   # Five-minute buffer for the request-search ingestion pipeline.
@@ -531,18 +535,19 @@ cmd_attack_profile() {
   )"
 
   if [[ "$format" == "--json" ]]; then
-    jq -n \
+    json_stream "$workspace_summary" "$top_workspace_names" "$signal_summary" |
+      jq -s \
       --arg customer "$customer" \
       --arg customer_id "$cid" \
       --arg from "$TS_FROM" \
       --arg to "$TS_TO" \
       --argjson span_days "$span_days" \
       --argjson top_n "$top_n" \
-      --arg production_workspace_filter "$prod_regex" \
-      --argjson production_workspaces "$workspace_summary" \
-      --argjson selected_workspaces "$top_workspace_names" \
-      --argjson attack_signals "$signal_summary" \
-      '{
+      --arg production_workspace_filter "$prod_regex" '
+      .[0] as $production_workspaces
+      | .[1] as $selected_workspaces
+      | .[2] as $attack_signals
+      | {
         customer: $customer,
         customer_id: $customer_id,
         from: $from,
@@ -886,14 +891,14 @@ cmd_attack_origins() {
   fi
 
   if [[ "$format" == "--json" ]]; then
-    jq -n \
+    json_stream "$production_workspace_names" "$source_summary" |
+      jq -s \
       --arg customer "$customer" \
       --arg customer_id "$cid" \
       --arg from "$TS_FROM" \
       --arg to "$TS_TO" \
       --argjson span_days "$span_days" \
       --arg production_workspace_filter "$prod_regex" \
-      --argjson production_workspaces "$production_workspace_names" \
       --argjson workspace_count "$workspace_count" \
       --argjson per_workspace_limit "$top_limit" \
       --argjson chunk_days "$chunk_days" \
@@ -905,9 +910,10 @@ cmd_attack_origins() {
       --argjson top_five_share "$top_five_share" \
       --argjson top_five_share_of_returned_sources "$returned_top_five_share" \
       --argjson other_requests "$other_total" \
-      --argjson other_share "$other_share" \
-      --argjson countries "$source_summary" \
-      '{
+      --argjson other_share "$other_share" '
+      .[0] as $production_workspaces
+      | .[1] as $countries
+      | {
         customer: $customer,
         customer_id: $customer_id,
         from: $from,

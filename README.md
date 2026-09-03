@@ -175,6 +175,21 @@ aggregation, and missing-data policy inspectable downstream.
 Missing requested metrics or non-numeric values are errors. The helper does not silently
 replace those values with zero. A literal zero returned by the API remains zero.
 
+### Large JSON transport safety
+
+Structured JSON such as API responses, rule collections, signal summaries,
+service inventories, and snapshots is streamed to `jq` through standard input.
+It is not passed as a process argument using `--argjson`.
+
+This avoids operating-system argument-size failures when inspecting customers
+with large configurations, request datasets, or service inventories. Bounded
+scalar numbers, booleans, and deliberately small selector arrays may continue
+to use `--argjson`.
+
+The `tests/json-transport.sh` regression test validates this contract using a
+multi-megabyte JSON document and rejects known structured-payload variables
+passed through `--argjson`.
+
 ### Request-search count semantics
 
 `count` and `signal-count` return Fastly's request-search `meta.total` value.

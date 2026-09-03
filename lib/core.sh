@@ -4,12 +4,21 @@
 # Sourced by the ngwaf entry point; do not execute directly.
 
 die() {
-  printf 'ngwaf: %s\n' "$*" >&2
+  printf '%s: %s\n' "${PROGRAM_NAME:-ngwaf}" "$*" >&2
   exit 1
 }
 
 require() {
   command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"
+}
+
+# Stream structured JSON to jq through stdin. Large JSON values passed through
+# --argjson contribute to the operating system's process-argument limit.
+json_stream() {
+  local document
+  for document in "$@"; do
+    printf '%s\n' "$document"
+  done
 }
 
 urlencode() {
@@ -120,7 +129,7 @@ progress_start() {
 
   progress_enabled || return 0
 
-  printf '\rngwaf: %s %s (0s)' "${frames:0:1}" "$label" >&2
+  printf '\r%s: %s %s (0s)' "${PROGRAM_NAME:-ngwaf}" "${frames:0:1}" "$label" >&2
   (
     local i=1 now elapsed frame
     trap 'exit 0' INT TERM HUP
@@ -129,7 +138,7 @@ progress_start() {
       now="$(date +%s)"
       elapsed=$((now - _ngwaf_progress_started))
       frame="${frames:$((i % 3)):1}"
-      printf '\rngwaf: %s %s (%ss)' "$frame" "$label" "$elapsed" >&2
+      printf '\r%s: %s %s (%ss)' "${PROGRAM_NAME:-ngwaf}" "$frame" "$label" "$elapsed" >&2
       i=$((i + 1))
     done
   ) &
@@ -156,7 +165,8 @@ progress_stop() {
   fi
 
   if [[ "$outcome" == "success" && "$elapsed" -ge 2 ]]; then
-    printf 'ngwaf: %s %s in %ss\n' \
+    printf '%s: %s %s in %ss\n' \
+      "${PROGRAM_NAME:-ngwaf}" \
       "$(ui_paint '1;32' 'completed')" \
       "$_ngwaf_progress_label" \
       "$elapsed" >&2
@@ -170,15 +180,15 @@ debug_get_request() {
   shift
   local arg expect_value=false
 
-  printf 'ngwaf: debug: GET %s%s\n' "$API_BASE" "$path" >&2
+  printf '%s: debug: GET %s%s\n' "${PROGRAM_NAME:-ngwaf}" "$API_BASE" "$path" >&2
   for arg in "$@"; do
     if [[ "$expect_value" == "true" ]]; then
-      printf 'ngwaf: debug: query parameter: %s\n' "$arg" >&2
+      printf '%s: debug: query parameter: %s\n' "${PROGRAM_NAME:-ngwaf}" "$arg" >&2
       expect_value=false
     elif [[ "$arg" == "--data-urlencode" ]]; then
       expect_value=true
     elif [[ "$arg" == --data-urlencode=* ]]; then
-      printf 'ngwaf: debug: query parameter: %s\n' "${arg#--data-urlencode=}" >&2
+      printf '%s: debug: query parameter: %s\n' "${PROGRAM_NAME:-ngwaf}" "${arg#--data-urlencode=}" >&2
     fi
   done
 }
@@ -201,21 +211,21 @@ print_curl_failure() {
 
   case "$rc" in
     28)
-      printf 'ngwaf: Fastly API request timed out: GET %s\n' "$path" >&2
-      printf 'ngwaf: timeout limits: connect=%ss, transfer=%ss, retry-window=%ss\n' \
-        "$CURL_CONNECT_TIMEOUT" "$CURL_MAX_TIME" "$CURL_RETRY_MAX_TIME" >&2
+      printf '%s: Fastly API request timed out: GET %s\n' "${PROGRAM_NAME:-ngwaf}" "$path" >&2
+      printf '%s: timeout limits: connect=%ss, transfer=%ss, retry-window=%ss\n' \
+        "${PROGRAM_NAME:-ngwaf}" "$CURL_CONNECT_TIMEOUT" "$CURL_MAX_TIME" "$CURL_RETRY_MAX_TIME" >&2
       ;;
     130)
-      printf 'ngwaf: Fastly API request interrupted: GET %s\n' "$path" >&2
+      printf '%s: Fastly API request interrupted: GET %s\n' "${PROGRAM_NAME:-ngwaf}" "$path" >&2
       ;;
     *)
-      printf 'ngwaf: Fastly API transport failed (curl exit %s): GET %s\n' \
-        "$rc" "$path" >&2
+      printf '%s: Fastly API transport failed (curl exit %s): GET %s\n' \
+        "${PROGRAM_NAME:-ngwaf}" "$rc" "$path" >&2
       ;;
   esac
 
   if [[ -s "$errfile" ]]; then
-    sed 's/^/ngwaf: curl: /' "$errfile" >&2
+    sed "s/^/${PROGRAM_NAME:-ngwaf}: curl: /" "$errfile" >&2
   fi
 }
 
@@ -272,9 +282,9 @@ get() {
     2*)
       progress_stop success
       if ! jq -e . "$tmp" >/dev/null 2>&1; then
-        printf 'ngwaf: Fastly API returned invalid JSON: GET %s\n' "$path" >&2
+        printf '%s: Fastly API returned invalid JSON: GET %s\n' "${PROGRAM_NAME:-ngwaf}" "$path" >&2
         if [[ "${NGWAF_DEBUG:-0}" == "1" ]]; then
-          printf 'ngwaf: debug: response preview follows\n' >&2
+          printf '%s: debug: response preview follows\n' "${PROGRAM_NAME:-ngwaf}" >&2
           sed -n '1,20p' "$tmp" >&2
         fi
         rm -f "$tmp" "$err_tmp"
@@ -284,7 +294,7 @@ get() {
       ;;
     *)
       progress_stop error
-      printf 'ngwaf: Fastly API returned HTTP %s: GET %s\n' "$code" "$path" >&2
+      printf '%s: Fastly API returned HTTP %s: GET %s\n' "${PROGRAM_NAME:-ngwaf}" "$code" "$path" >&2
       jq . "$tmp" >&2 2>/dev/null || cat "$tmp" >&2
       rm -f "$tmp" "$err_tmp"
       exit 1
@@ -517,7 +527,8 @@ load_customer_context() {
 
 confirm_customer_scope() {
   load_customer_context
-  printf 'ngwaf: %s: %s (%s; source=%s)\n' \
+  printf '%s: %s: %s (%s; source=%s)\n' \
+    "${PROGRAM_NAME:-ngwaf}" \
     "$(ui_paint '1;36' 'customer scope')" \
     "$(jq -r '.name' <<<"$NGWAF_CUSTOMER_CONTEXT_JSON")" \
     "$(jq -r '.id' <<<"$NGWAF_CUSTOMER_CONTEXT_JSON")" \
@@ -582,7 +593,8 @@ resolve_workspace_json() {
   [[ -n "$resolved" ]] ||
     die "workspace resolution returned an incomplete object for: $input"
 
-  printf 'ngwaf: %s: %s (%s; resolved_by=%s)\n' \
+  printf '%s: %s: %s (%s; resolved_by=%s)\n' \
+    "${PROGRAM_NAME:-ngwaf}" \
     "$(ui_paint '1;36' 'workspace scope')" \
     "$(jq -r '.name' <<<"$resolved")" \
     "$(jq -r '.id' <<<"$resolved")" \

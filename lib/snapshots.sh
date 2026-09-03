@@ -144,7 +144,14 @@ cmd_snapshot() {
   ui_phase 5 5 'Writing protected snapshot'
   umask 077
   temp_file="$(mktemp "$parent/.ngwaf-snapshot.XXXXXX")"
-  if ! jq -n \
+  if ! json_stream \
+    "$ws" \
+    "$(jq '.data | sort_by(.id // .reference_id // .description // "")' <<<"$rules")" \
+    "$(jq '.data' <<<"$account_applying")" \
+    "$(jq '.data | sort_by(.id // .reference_id // .name // "")' <<<"$thresholds")" \
+    "$(jq '.data' <<<"$prepared_workspace_lists")" \
+    "$(jq '.data' <<<"$prepared_account_lists")" |
+    jq -s \
     --arg schema_version "1.0" \
     --arg tool_version "$VERSION" \
     --arg captured_at "$captured_at" \
@@ -153,14 +160,14 @@ cmd_snapshot() {
     --arg workspace "$workspace" \
     --arg workspace_id "$workspace_id" \
     --arg workspace_input "$input" \
-    --argjson include_list_entries "$include_entries" \
-    --argjson ws "$ws" \
-    --argjson rules "$(jq '.data | sort_by(.id // .reference_id // .description // "")' <<<"$rules")" \
-    --argjson account_rules "$(jq '.data' <<<"$account_applying")" \
-    --argjson thresholds "$(jq '.data | sort_by(.id // .reference_id // .name // "")' <<<"$thresholds")" \
-    --argjson workspace_lists "$(jq '.data' <<<"$prepared_workspace_lists")" \
-    --argjson account_lists "$(jq '.data' <<<"$prepared_account_lists")" \
-    '{
+    --argjson include_list_entries "$include_entries" '
+    .[0] as $ws
+    | .[1] as $rules
+    | .[2] as $account_rules
+    | .[3] as $thresholds
+    | .[4] as $workspace_lists
+    | .[5] as $account_lists
+    | {
       snapshot_schema_version: $schema_version,
       tool_version: $tool_version,
       captured_at: $captured_at,
