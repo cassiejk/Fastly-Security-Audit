@@ -2,7 +2,7 @@
 # Sourced by the ngwaf entry point; do not execute directly.
 
 cmd_version() {
-  printf 'ngwaf %s\n' "$VERSION"
+  printf '%s %s\n' "${PROGRAM_NAME:-ngwaf}" "$VERSION"
 }
 
 cmd_whoami() {

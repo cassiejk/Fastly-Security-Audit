@@ -69,6 +69,8 @@ cmd_rule() {
   w="$(jq -r '.name' <<<"$resolved")"
   ws_id="$(jq -r '.id' <<<"$resolved")"
   encoded_rule_id="$(urlencode "$rule_id")"
+  # Dynamically scoped and consumed by get() in lib/core.sh.
+  # shellcheck disable=SC2034
   NGWAF_PROGRESS_LABEL="retrieving rule $rule_id from $w"
 
   body="$(
