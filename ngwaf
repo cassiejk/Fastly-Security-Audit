@@ -3,7 +3,7 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-VERSION="22.0"
+VERSION="23.0"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -30,11 +30,13 @@ unset _ngwaf_source _ngwaf_dir
 
 for _ngwaf_module in \
   lib/core.sh \
+  lib/doctor.sh \
   lib/account.sh \
   lib/services.sh \
   lib/ngwaf.sh \
   lib/bots.sh \
   lib/metrics.sh \
+  lib/snapshots.sh \
   customer/costco.sh \
   lib/help.sh; do
   [[ -r "$NGWAF_ROOT/$_ngwaf_module" ]] || {
@@ -46,11 +48,20 @@ for _ngwaf_module in \
 done
 unset _ngwaf_module
 
-require curl
-require jq
+case "${1:-help}" in
+  help|-h|--help|version|doctor)
+    ;;
+  diff)
+    require jq
+    ;;
+  *)
+    require curl
+    require jq
+    ;;
+esac
 
 case "${1:-help}" in
-  help|-h|--help|version)
+  help|-h|--help|version|doctor|diff)
     ;;
   *)
     [[ -n "${FASTLY_API_TOKEN:-}" ]] ||
@@ -59,7 +70,7 @@ case "${1:-help}" in
 esac
 
 case "${1:-help}" in
-  help|-h|--help|version|whoami|use)
+  help|-h|--help|version|whoami|use|doctor|diff)
     ;;
   *)
     confirm_customer_scope
@@ -70,6 +81,10 @@ case "${1:-help}" in
   version)
     shift
     cmd_version "$@"
+    ;;
+  doctor)
+    shift
+    cmd_doctor "$@"
     ;;
   whoami)
     shift
@@ -166,6 +181,14 @@ case "${1:-help}" in
   signal-count)
     shift
     cmd_signal_count "$@"
+    ;;
+  snapshot)
+    shift
+    cmd_snapshot "$@"
+    ;;
+  diff)
+    shift
+    cmd_diff "$@"
     ;;
   help|-h|--help)
     usage

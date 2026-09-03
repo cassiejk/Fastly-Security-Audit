@@ -1,9 +1,8 @@
-# ngwaf-helper v22.0
+# ngwaf-helper v23.0
 
-v22 makes the CLI's scope and data contracts explicit. It confirms the selected
-customer, resolves workspace names to IDs, fails closed when requested metrics
-are absent, reports exact analytical windows, and labels the source and data
-class of structured analytical output.
+v23 adds non-destructive diagnostics, protected configuration snapshots,
+semantic snapshot comparisons, and a more readable terminal interface. It
+retains v22's explicit scope, missing-data, window, and provenance contracts.
 
 ## Layout
 
@@ -13,11 +12,13 @@ ngwaf-helper/
 ├── ngwaf-update          # package-aware installer
 ├── lib/
 │   ├── core.sh            # HTTP, pagination, dates, shared JSON helpers
+│   ├── doctor.sh          # dependency, authentication, and scope diagnostics
 │   ├── account.sh         # version, auth identity, customer selection
 │   ├── services.sh        # CDN/Compute + product inventory
 │   ├── ngwaf.sh           # workspaces, rules, thresholds, posture, lists
 │   ├── bots.sh            # bot rules + Bot Management historical stats
 │   ├── metrics.sh         # timeseries, request counts, attack analysis
+│   ├── snapshots.sh       # protected snapshots + local semantic diffs
 │   └── help.sh            # CLI help
 ├── customer/
 │   └── costco.sh          # Costco-specific international QBR commands
@@ -26,7 +27,9 @@ ngwaf-helper/
 └── tests/
     ├── smoke.sh
     ├── count.sh
-    └── metrics.sh
+    ├── metrics.sh
+    ├── doctor.sh
+    └── snapshots.sh
 ```
 
 ## Development
@@ -55,6 +58,72 @@ NGWAF_CURL_CONNECT_TIMEOUT=5 NGWAF_CURL_MAX_TIME=60 ngwaf workspaces
 
 The default transport policy performs one retry, with a 90-second retry window.
 Override it with `NGWAF_CURL_RETRIES` and `NGWAF_CURL_RETRY_MAX_TIME`.
+
+Human output uses color only when stdout is a terminal. Disable it with either
+`NGWAF_COLOR=never` or the conventional `NO_COLOR=1`; force it with
+`NGWAF_COLOR=always`. Progress and scope messages stay on stderr, so stdout
+remains suitable for JSON pipelines.
+
+### Diagnostics
+
+`doctor` collects diagnostics instead of exiting on the first failure:
+
+```bash
+ngwaf doctor
+ngwaf doctor --json
+```
+
+It checks Bash and command dependencies, HTTP policy values, token presence and
+API access, customer selection and identity, complete workspace enumeration,
+and case-insensitive workspace-name collisions. It never prints the API token.
+Failures produce a non-zero exit status after the report is emitted; warnings
+do not.
+
+### Protected configuration snapshots
+
+Create a point-in-time configuration snapshot using read-only API requests:
+
+```bash
+ngwaf snapshot Production
+ngwaf snapshot Production --output before.json
+```
+
+Snapshots include workspace settings, complete workspace rules, applicable
+account rules, thresholds, and workspace/account list metadata. The command:
+
+- refuses to overwrite an existing path;
+- writes the file with mode `0600`;
+- excludes API credentials;
+- redacts list entries by default while retaining entry counts when the list
+  endpoint supplies entries; and
+- records schema, tool version, capture time, scope, and endpoint provenance.
+
+Default `ngwaf-snapshot-*.json` filenames are ignored by the repository's
+`.gitignore` to reduce the chance of committing customer configuration.
+
+List values can be included deliberately when required:
+
+```bash
+ngwaf snapshot Production \
+  --output sensitive-snapshot.json \
+  --include-list-entries
+```
+
+Treat that file as customer-sensitive.
+
+Compare two snapshots without making API requests:
+
+```bash
+ngwaf diff before.json after.json
+ngwaf diff before.json after.json --json
+ngwaf diff before.json after.json --check
+```
+
+The comparison reports workspace-setting changes plus added, removed, and
+modified workspace rules, applicable account rules, thresholds, and lists. It
+rejects cross-customer and cross-workspace comparisons. Valid differences are
+normally informational and exit `0`; `--check` exits `1` when drift exists for
+CI or scripted checks.
 
 ### Customer and workspace scope
 
@@ -92,7 +161,7 @@ JSON also reports `workspace`, `workspace_id`, and the original
 `workspace_input`. These fields make the exact query interval, endpoint family,
 aggregation, and missing-data policy inspectable downstream.
 
-Missing requested metrics or non-numeric values are errors. v22 does not silently
+Missing requested metrics or non-numeric values are errors. The helper does not silently
 replace those values with zero. A literal zero returned by the API remains zero.
 
 ### Request-search count semantics
@@ -122,7 +191,7 @@ ngwaf-update ./ngwaf
 
 ## Refactor history
 
-v21 deliberately did **not** change API semantics. Existing functions were moved intact from v20 into modules so behavioral regressions could be distinguished from the refactor. v21.1 was the first post-refactor behavioral release, v21.2 fixed the zero-retry test path on macOS Bash 3.2, and v21.3 made request-search sampling semantics explicit in every count result. v22 adds explicit scope resolution and data-quality contracts; consumers of `metrics --json` and `timeseries --json` should account for their new metadata wrappers.
+v21 deliberately did **not** change API semantics. Existing functions were moved intact from v20 into modules so behavioral regressions could be distinguished from the refactor. v21.1 was the first post-refactor behavioral release, v21.2 fixed the zero-retry test path on macOS Bash 3.2, and v21.3 made request-search sampling semantics explicit in every count result. v22 added explicit scope resolution and data-quality contracts. v23 adds diagnostics, protected configuration snapshots, local semantic diffs, and TTY-aware presentation.
 
 ### Known scope caveat retained from v20
 

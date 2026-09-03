@@ -7,6 +7,7 @@ Fastly NGWAF read-only helper
 
 Customer / auth and account inventory:
   ngwaf version
+  ngwaf doctor [--json]
   ngwaf whoami
   ngwaf use <customer_id>
   ngwaf customer
@@ -41,11 +42,17 @@ Account / workspace configuration:
   ngwaf lists <workspace> [--json]
   ngwaf bot-rules <workspace> [--json]
 
+Safe local configuration snapshots:
+  ngwaf snapshot <workspace> [--output FILE] [--include-list-entries] [--json]
+  ngwaf diff <before.json> <after.json> [--json] [--check]
+
 Recent request search (1-7 days):
   ngwaf count <workspace> '<Fastly Search query>' [days]
   ngwaf signal-count <workspace> <signal> [days]
 
 Examples:
+  ngwaf doctor
+  ngwaf doctor --json
   ngwaf use 6C07TtEzfBKdmffwdcdHLD
   ngwaf overview
   ngwaf overview 30 --json
@@ -83,7 +90,16 @@ Examples:
   ngwaf signal-count production SUSPECTED-BAD-BOT 7
   ngwaf count production 'ruleid:6047e66d33e0b901e666e424' 7
 
+  # Snapshots use mode 0600 and redact list entries unless explicitly included:
+  ngwaf snapshot Production
+  ngwaf snapshot Production --output before.json
+  ngwaf diff before.json after.json
+  ngwaf diff before.json after.json --check --json
+
 Notes:
+  - doctor is non-destructive and does not require the normal command preflight.
+    It collects dependency, token, customer, workspace, and HTTP-policy results;
+    failures produce a non-zero exit status after the complete report is shown.
   - Customer-scoped commands validate and print the selected customer name, ID,
     and selection source on stderr. FASTLY_CUSTOMER_ID overrides the saved ID.
   - Workspace arguments may be IDs or case-insensitive exact names. Exact IDs
@@ -145,6 +161,14 @@ Notes:
   - API calls show an interactive progress indicator on stderr. Set
     NGWAF_PROGRESS=never to disable it, or NGWAF_PROGRESS=always to force it.
     Set NGWAF_DEBUG=1 to show request paths and query parameters (never tokens).
+  - Human output uses TTY-only color and status badges. Set NGWAF_COLOR=never
+    or NO_COLOR=1 to disable color, or NGWAF_COLOR=always to force it.
+  - snapshot performs read-only API requests, refuses to overwrite files, writes
+    mode 0600, and redacts list entries by default. --include-list-entries may
+    expose customer-sensitive values and must be used deliberately.
+  - diff is entirely local and rejects snapshots with different customer or
+    workspace IDs. --check exits 1 when valid snapshots contain changes, which
+    is useful for CI; ordinary diff exits 0 after reporting valid changes.
   - 'metrics' passes metric names directly to Fastly; invalid metrics return
     the Fastly API error instead of silently changing the query.
 HELP

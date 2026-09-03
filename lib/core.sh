@@ -12,20 +12,81 @@ require() {
   command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"
 }
 
-require curl
-require jq
-
-case "${1:-help}" in
-  help|-h|--help|version)
-    ;;
-  *)
-    [[ -n "${FASTLY_API_TOKEN:-}" ]] ||
-      die 'FASTLY_API_TOKEN is not set'
-    ;;
-esac
-
 urlencode() {
   jq -rn --arg v "$1" '$v | @uri'
+}
+
+color_enabled() {
+  [[ -z "${NO_COLOR+x}" ]] || return 1
+
+  case "${NGWAF_COLOR:-auto}" in
+    always|1|true|yes)
+      return 0
+      ;;
+    never|0|false|no)
+      return 1
+      ;;
+    auto|'')
+      [[ -t 1 ]]
+      ;;
+    *)
+      die 'NGWAF_COLOR must be auto, always, or never'
+      ;;
+  esac
+}
+
+ui_paint() {
+  local code="$1"
+  shift
+  if color_enabled; then
+    printf '\033[%sm%s\033[0m' "$code" "$*"
+  else
+    printf '%s' "$*"
+  fi
+}
+
+ui_heading() {
+  ui_paint '1;36' "$*"
+  printf '\n'
+}
+
+ui_phase() {
+  local current="$1"
+  local total="$2"
+  shift 2
+  printf '%s %s\n' "$(ui_paint '1;36' "[$current/$total]")" "$*" >&2
+}
+
+ui_status() {
+  local status="$1"
+  local label="$2"
+  local detail="${3:-}"
+  local badge color
+
+  case "$status" in
+    pass)
+      badge='PASS'
+      color='1;32'
+      ;;
+    warn)
+      badge='WARN'
+      color='1;33'
+      ;;
+    fail)
+      badge='FAIL'
+      color='1;31'
+      ;;
+    info)
+      badge='INFO'
+      color='1;36'
+      ;;
+    *)
+      badge="$status"
+      color='0'
+      ;;
+  esac
+
+  printf '%s  %-24s %s\n' "$(ui_paint "$color" "[$badge]")" "$label" "$detail"
 }
 
 progress_enabled() {
@@ -95,7 +156,10 @@ progress_stop() {
   fi
 
   if [[ "$outcome" == "success" && "$elapsed" -ge 2 ]]; then
-    printf 'ngwaf: completed %s in %ss\n' "$_ngwaf_progress_label" "$elapsed" >&2
+    printf 'ngwaf: %s %s in %ss\n' \
+      "$(ui_paint '1;32' 'completed')" \
+      "$_ngwaf_progress_label" \
+      "$elapsed" >&2
   fi
 }
 
@@ -433,7 +497,7 @@ load_customer_context() {
 
   cid="$(current_cid)"
   source="$(customer_context_source)"
-  body="$(NGWAF_PROGRESS_LABEL="confirming customer scope" get "/customer/$cid")"
+  body="$(NGWAF_PROGRESS_LABEL="confirming customer scope" get "/customer/$(urlencode "$cid")")"
   returned_id="$(jq -r '.id // empty' <<<"$body")"
   name="$(jq -r '.name // empty' <<<"$body")"
 
@@ -453,7 +517,8 @@ load_customer_context() {
 
 confirm_customer_scope() {
   load_customer_context
-  printf 'ngwaf: customer scope: %s (%s; source=%s)\n' \
+  printf 'ngwaf: %s: %s (%s; source=%s)\n' \
+    "$(ui_paint '1;36' 'customer scope')" \
     "$(jq -r '.name' <<<"$NGWAF_CUSTOMER_CONTEXT_JSON")" \
     "$(jq -r '.id' <<<"$NGWAF_CUSTOMER_CONTEXT_JSON")" \
     "$(jq -r '.source' <<<"$NGWAF_CUSTOMER_CONTEXT_JSON")" >&2
@@ -517,7 +582,8 @@ resolve_workspace_json() {
   [[ -n "$resolved" ]] ||
     die "workspace resolution returned an incomplete object for: $input"
 
-  printf 'ngwaf: workspace scope: %s (%s; resolved_by=%s)\n' \
+  printf 'ngwaf: %s: %s (%s; resolved_by=%s)\n' \
+    "$(ui_paint '1;36' 'workspace scope')" \
     "$(jq -r '.name' <<<"$resolved")" \
     "$(jq -r '.id' <<<"$resolved")" \
     "$(jq -r '.resolved_by' <<<"$resolved")" >&2

@@ -16,7 +16,7 @@ cmd_use() {
   local cid="$1"
   local body
 
-  body="$(get "/customer/$cid")"
+  body="$(get "/customer/$(urlencode "$cid")")"
 
   mkdir -p "$CONFIG_DIR"
   printf '%s\n' "$cid" > "$CID_FILE"
