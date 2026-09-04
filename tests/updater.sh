@@ -33,13 +33,13 @@ INSTALL_ROOT="$TEST_DATA/fastly-audit"
 [[ "$(readlink "$PRIMARY")" == "$INSTALL_ROOT/fastly-audit" ]]
 [[ "$(readlink "$LEGACY")" == "$INSTALL_ROOT/ngwaf" ]]
 
-[[ "$("$PRIMARY" version)" == "fastly-audit 23.2" ]]
-[[ "$("$LEGACY" version)" == "ngwaf 23.2" ]]
+[[ "$("$PRIMARY" version)" == "fastly-audit 24.0" ]]
+[[ "$("$LEGACY" version)" == "ngwaf 24.0" ]]
 
 grep -F "Installed package:" "$TEST_TMP/updater-output" >/dev/null
 grep -F "Primary command:" "$TEST_TMP/updater-output" >/dev/null
 grep -F "Compatibility command:" "$TEST_TMP/updater-output" >/dev/null
-grep -F "fastly-audit 23.2" "$TEST_TMP/updater-output" >/dev/null
-grep -F "ngwaf 23.2" "$TEST_TMP/updater-output" >/dev/null
+grep -F "fastly-audit 24.0" "$TEST_TMP/updater-output" >/dev/null
+grep -F "ngwaf 24.0" "$TEST_TMP/updater-output" >/dev/null
 
 printf 'updater: OK\n'

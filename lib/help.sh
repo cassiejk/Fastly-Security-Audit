@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Sourced by the ngwaf entry point; do not execute directly.
 
-usage() {
+legacy_usage() {
   cat <<'HELP'
 Fastly NGWAF read-only helper
 
@@ -176,4 +176,133 @@ Notes:
   - 'metrics' passes metric names directly to Fastly; invalid metrics return
     the Fastly API error instead of silently changing the query.
 HELP
+}
+
+fastly_audit_usage() {
+  cat <<'HELP'
+fastly-audit — read-only Fastly configuration and security inspection
+
+Core:
+  fastly-audit version
+  fastly-audit doctor [--json]
+  fastly-audit customer [show]
+  fastly-audit customer use <customer_id>
+  fastly-audit customer whoami
+  fastly-audit inventory [--json]
+
+Service inventory:
+  fastly-audit service list [--json]
+  fastly-audit service products [--json]
+  fastly-audit service inventory [--json]
+
+Next-Gen WAF:
+  fastly-audit ngwaf workspaces
+  fastly-audit ngwaf workspace <workspace>
+  fastly-audit ngwaf posture <workspace>
+  fastly-audit ngwaf rule <workspace> <rule_id>
+  fastly-audit ngwaf rules <workspace> [--list|--json]
+  fastly-audit ngwaf account-rules [--list|--json]
+  fastly-audit ngwaf thresholds <workspace> [--json]
+  fastly-audit ngwaf lists <workspace> [--json]
+  fastly-audit ngwaf count <workspace> '<query>' [days]
+  fastly-audit ngwaf signal-count <workspace> <signal> [days]
+  fastly-audit ngwaf overview [days] [--json]
+  fastly-audit ngwaf timeseries <workspace> [days] [--json]
+  fastly-audit ngwaf metrics <metrics> [days] [--json]
+  fastly-audit ngwaf attack-profile [days|FROM TO] [--json]
+  fastly-audit ngwaf attack-origins [days|FROM TO] [--json]
+
+Bot Management:
+  fastly-audit bot stats <service_id> [days|FROM TO] [--json]
+  fastly-audit bot rules <workspace> [--json]
+
+Protected snapshots:
+  fastly-audit snapshot ngwaf <workspace> [--output FILE] [--include-list-entries] [--json]
+  fastly-audit diff <before.json> <after.json> [--json] [--check]
+
+Compatibility:
+  The ngwaf command and all original flat commands remain supported.
+  Run `ngwaf help` for the complete legacy command reference.
+  Run `fastly-audit help legacy` to display it through this command.
+
+Safety contract:
+  API operations are read-only. Customer scope is confirmed before scoped
+  requests, ambiguous names fail closed, JSON remains pipeline-safe, and
+  analytical results retain window and provenance metadata.
+HELP
+}
+
+ngwaf_namespace_usage() {
+  cat <<'HELP'
+fastly-audit ngwaf — Next-Gen WAF inspection
+
+  workspaces
+  workspace <workspace>
+  posture <workspace>
+  rule <workspace> <rule_id>
+  rules <workspace> [--list|--json]
+  account-rules [--list|--json]
+  thresholds <workspace> [--json]
+  lists <workspace> [--json]
+  bot-rules <workspace> [--json]
+  count <workspace> '<query>' [days]
+  signal-count <workspace> <signal> [days]
+  overview [days] [--json]
+  timeseries <workspace> [days] [--json]
+  metrics <metrics> [days] [--json]
+  attack-profile [days|FROM TO] [--json]
+  attack-origins [days|FROM TO] [--json]
+  snapshot <workspace> [--output FILE] [--include-list-entries] [--json]
+HELP
+}
+
+service_namespace_usage() {
+  cat <<'HELP'
+fastly-audit service — selected-customer edge-service inspection
+
+  list [--json]       Audit-observed CDN and Compute service inventory
+  products [--json]   Service-level product enablement and configuration
+  inventory [--json] Combined service, product, and NGWAF inventory
+HELP
+}
+
+bot_namespace_usage() {
+  cat <<'HELP'
+fastly-audit bot — Bot Management inspection
+
+  stats <service_id> [days|FROM TO] [--json]
+  rules <workspace> [--json]
+
+Customer extensions, when installed:
+  intl-stats [days|FROM TO] [--json]
+  intl-types [days|FROM TO] [--json]
+HELP
+}
+
+customer_namespace_usage() {
+  cat <<'HELP'
+fastly-audit customer — authentication and customer selection
+
+  show
+  use <customer_id>
+  whoami
+HELP
+}
+
+snapshot_namespace_usage() {
+  cat <<'HELP'
+fastly-audit snapshot — protected local configuration snapshots
+
+  ngwaf <workspace> [--output FILE] [--include-list-entries] [--json]
+
+Use `fastly-audit diff <before.json> <after.json>` to compare snapshots.
+HELP
+}
+
+usage() {
+  if [[ "${PROGRAM_NAME:-ngwaf}" == "ngwaf" ]]; then
+    legacy_usage
+  else
+    fastly_audit_usage
+  fi
 }

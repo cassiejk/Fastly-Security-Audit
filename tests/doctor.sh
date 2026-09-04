@@ -48,6 +48,8 @@ esac
 printf '200'
 FAKE_CURL
 chmod +x "$TEST_TMP/bin/curl"
+ln -s "$ROOT/fastly-audit" "$TEST_TMP/bin/fastly-audit"
+ln -s "$ROOT/ngwaf" "$TEST_TMP/bin/ngwaf"
 
 export PATH="$TEST_TMP/bin:$PATH"
 export FASTLY_API_TOKEN="test-token"
@@ -59,7 +61,7 @@ export NGWAF_CURL_RETRIES=0
 output="$($ROOT/ngwaf doctor --json)"
 jq -e '
   .command == "doctor"
-  and .tool_version == "23.2"
+  and .tool_version == "24.0"
   and .status != "fail"
   and any(.checks[]; .check == "token API access" and .status == "pass")
   and any(.checks[]; .check == "customer scope" and .status == "pass")
@@ -70,6 +72,21 @@ jq -e '
 $ROOT/ngwaf doctor >"$TEST_TMP/human"
 grep -F '[PASS]' "$TEST_TMP/human" >/dev/null
 grep -F 'Overall:' "$TEST_TMP/human" >/dev/null
+
+$ROOT/fastly-audit doctor >"$TEST_TMP/fastly-human"
+grep -F 'fastly-audit doctor' "$TEST_TMP/fastly-human" >/dev/null
+
+fastly_output="$($ROOT/fastly-audit doctor --json)"
+jq -e '
+  .command == "doctor"
+  and .status != "fail"
+  and any(
+    .checks[];
+    .check == "installed command"
+    and .status == "pass"
+    and (.detail | endswith("/fastly-audit"))
+  )
+' >/dev/null <<<"$fastly_output"
 
 (
   unset NO_COLOR

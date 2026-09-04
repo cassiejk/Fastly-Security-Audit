@@ -29,7 +29,7 @@ doctor_render_human() {
   local summary="$1"
   local status check detail
 
-  ui_heading 'ngwaf doctor'
+  ui_heading "${PROGRAM_NAME:-ngwaf} doctor"
   printf 'Version %s · read-only diagnostics\n\n' "$VERSION"
 
   while IFS=$'\t' read -r status check detail; do
@@ -50,7 +50,8 @@ cmd_doctor() {
     die 'usage: ngwaf doctor [--json]'
 
   if ! command -v jq >/dev/null 2>&1; then
-    printf 'ngwaf doctor: FAIL: jq is not installed; JSON diagnostics cannot run\n' >&2
+    printf '%s doctor: FAIL: jq is not installed; JSON diagnostics cannot run\n' \
+      "${PROGRAM_NAME:-ngwaf}" >&2
     return 1
   fi
 
@@ -82,11 +83,12 @@ cmd_doctor() {
     doctor_record "$results" warn "column" "not installed; tables will use tab-separated fallback"
   fi
 
-  install_path="$(command -v ngwaf 2>/dev/null || true)"
+  install_path="$(command -v "${PROGRAM_NAME:-ngwaf}" 2>/dev/null || true)"
   if [[ -n "$install_path" ]]; then
     doctor_record "$results" pass "installed command" "$install_path"
   else
-    doctor_record "$results" warn "installed command" "ngwaf is not discoverable through PATH"
+    doctor_record "$results" warn "installed command" \
+      "${PROGRAM_NAME:-ngwaf} is not discoverable through PATH"
   fi
 
   if [[ "$CURL_CONNECT_TIMEOUT" =~ ^[0-9]+$ \
@@ -117,7 +119,13 @@ cmd_doctor() {
     config_mode="$(doctor_file_mode "$CID_FILE")"
     doctor_record "$results" pass "customer selection" "$cid from $CID_FILE (mode $config_mode)"
   else
-    doctor_record "$results" fail "customer selection" "none; run ngwaf use <customer_id>"
+    if [[ "${PROGRAM_NAME:-ngwaf}" == "fastly-audit" ]]; then
+      doctor_record "$results" fail "customer selection" \
+        "none; run fastly-audit customer use <customer_id>"
+    else
+      doctor_record "$results" fail "customer selection" \
+        "none; run ngwaf use <customer_id>"
+    fi
   fi
 
   if [[ "$token_present" == "true" && "$http_policy_ready" == "true" && -x "$(command -v curl 2>/dev/null || true)" ]]; then

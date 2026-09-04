@@ -5,18 +5,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 printf 'Syntax checks...\n'
 while IFS= read -r file; do
   bash -n "$file"
-done < <(find "$ROOT" -type f \( -name 'ngwaf' -o -name 'ngwaf-update' -o -name '*.sh' \) -print | sort)
+done < <(find "$ROOT" -type f \( -name 'fastly-audit' -o -name 'ngwaf' -o -name 'ngwaf-update' -o -name '*.sh' \) -print | sort)
 
 if command -v shellcheck >/dev/null 2>&1; then
   printf 'ShellCheck...\n'
-  shellcheck "$ROOT/ngwaf" "$ROOT/ngwaf-update" "$ROOT"/lib/*.sh "$ROOT"/customer/*.sh
+  shellcheck "$ROOT/fastly-audit" "$ROOT/ngwaf" "$ROOT/ngwaf-update" "$ROOT"/lib/*.sh "$ROOT"/customer/*.sh
 else
   printf 'ShellCheck not installed; skipped.\n'
 fi
 
 printf 'CLI smoke tests...\n'
-[[ "$($ROOT/fastly-audit version)" == 'fastly-audit 23.2' ]]
-[[ "$($ROOT/ngwaf version)" == 'ngwaf 23.2' ]]
+[[ "$($ROOT/fastly-audit version)" == 'fastly-audit 24.0' ]]
+[[ "$($ROOT/ngwaf version)" == 'ngwaf 24.0' ]]
 $ROOT/fastly-audit help >/dev/null
 $ROOT/ngwaf help >/dev/null
 
@@ -26,6 +26,7 @@ $ROOT/tests/metrics.sh
 $ROOT/tests/doctor.sh
 $ROOT/tests/rules.sh
 $ROOT/tests/snapshots.sh
+$ROOT/tests/namespaces.sh
 $ROOT/tests/json-transport.sh
 $ROOT/tests/updater.sh
 

@@ -3,8 +3,9 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-VERSION="23.2"
+VERSION="24.0"
 PROGRAM_NAME="${FASTLY_AUDIT_INVOKED_AS:-fastly-audit}"
+USAGE_PROGRAM="$PROGRAM_NAME"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"
 CID_FILE="$CONFIG_DIR/customer_id"
@@ -39,7 +40,8 @@ for _ngwaf_module in \
   lib/metrics.sh \
   lib/snapshots.sh \
   customer/costco.sh \
-  lib/help.sh; do
+  lib/help.sh \
+  lib/dispatch.sh; do
   [[ -r "$NGWAF_ROOT/$_ngwaf_module" ]] || {
     printf '%s: missing module: %s\n' \
       "$PROGRAM_NAME" "$NGWAF_ROOT/$_ngwaf_module" >&2
@@ -50,156 +52,4 @@ for _ngwaf_module in \
 done
 unset _ngwaf_module
 
-case "${1:-help}" in
-  help|-h|--help|version|doctor)
-    ;;
-  diff)
-    require jq
-    ;;
-  *)
-    require curl
-    require jq
-    ;;
-esac
-
-case "${1:-help}" in
-  help|-h|--help|version|doctor|diff)
-    ;;
-  *)
-    [[ -n "${FASTLY_API_TOKEN:-}" ]] ||
-      die 'FASTLY_API_TOKEN is not set'
-    ;;
-esac
-
-case "${1:-help}" in
-  help|-h|--help|version|whoami|use|doctor|diff)
-    ;;
-  *)
-    confirm_customer_scope
-    ;;
-esac
-
-case "${1:-help}" in
-  version)
-    shift
-    cmd_version "$@"
-    ;;
-  doctor)
-    shift
-    cmd_doctor "$@"
-    ;;
-  whoami)
-    shift
-    cmd_whoami "$@"
-    ;;
-  use)
-    shift
-    cmd_use "$@"
-    ;;
-  customer)
-    shift
-    cmd_customer "$@"
-    ;;
-  services)
-    shift
-    cmd_services "$@"
-    ;;
-  products)
-    shift
-    cmd_products "$@"
-    ;;
-  inventory)
-    shift
-    cmd_inventory "$@"
-    ;;
-  workspaces)
-    shift
-    cmd_workspaces "$@"
-    ;;
-  overview)
-    shift
-    cmd_overview "$@"
-    ;;
-  timeseries)
-    shift
-    cmd_timeseries "$@"
-    ;;
-  metrics)
-    shift
-    cmd_metrics "$@"
-    ;;
-  attack-profile)
-    shift
-    cmd_attack_profile "$@"
-    ;;
-  attack-origins)
-    shift
-    cmd_attack_origins "$@"
-    ;;
-  bot-stats)
-    shift
-    cmd_bot_stats "$@"
-    ;;
-  intl-bot-stats)
-    shift
-    cmd_intl_bot_stats "$@"
-    ;;
-  intl-bot-types)
-    shift
-    cmd_intl_bot_types "$@"
-    ;;
-  account-rules)
-    shift
-    cmd_account_rules "$@"
-    ;;
-  workspace)
-    shift
-    cmd_workspace "$@"
-    ;;
-  posture)
-    shift
-    cmd_posture "$@"
-    ;;
-  rules)
-    shift
-    cmd_rules "$@"
-    ;;
-  rule)
-    shift
-    cmd_rule "$@"
-    ;;
-  thresholds)
-    shift
-    cmd_thresholds "$@"
-    ;;
-  lists)
-    shift
-    cmd_lists "$@"
-    ;;
-  bot-rules)
-    shift
-    cmd_bot_rules "$@"
-    ;;
-  count)
-    shift
-    cmd_count "$@"
-    ;;
-  signal-count)
-    shift
-    cmd_signal_count "$@"
-    ;;
-  snapshot)
-    shift
-    cmd_snapshot "$@"
-    ;;
-  diff)
-    shift
-    cmd_diff "$@"
-    ;;
-  help|-h|--help)
-    usage
-    ;;
-  *)
-    die "unknown command: $1; run: $PROGRAM_NAME help"
-    ;;
-esac
+dispatch_cli "$@"

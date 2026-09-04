@@ -4,7 +4,14 @@
 # Sourced by the ngwaf entry point; do not execute directly.
 
 die() {
-  printf '%s: %s\n' "${PROGRAM_NAME:-ngwaf}" "$*" >&2
+  local message="$*"
+  local program="${PROGRAM_NAME:-ngwaf}"
+  local usage_program="${USAGE_PROGRAM:-$program}"
+
+  if [[ "$message" == *'usage: ngwaf'* ]]; then
+    message="${message/usage: ngwaf/usage: $usage_program}"
+  fi
+  printf '%s: %s\n' "$program" "$message" >&2
   exit 1
 }
 

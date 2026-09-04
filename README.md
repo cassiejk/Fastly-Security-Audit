@@ -1,17 +1,23 @@
-# fastly-audit v23.2
+# fastly-audit v24.0
 
-v23.2 hardens structured JSON transport for large customer datasets and adds dual-launcher package installation. It
-retains v23's non-destructive diagnostics, protected configuration snapshots,
-semantic snapshot comparisons, and readable terminal interface.
+v24 promotes the project from an NGWAF-specific helper to a modular, read-only
+Fastly audit CLI. The primary `fastly-audit` command now groups operations by
+customer, service, NGWAF, Bot Management, and snapshot namespaces. The `ngwaf`
+compatibility command and every original flat command remain supported.
 
+This release changes command dispatch and presentation only. It does not
+change API endpoints, customer scoping, query semantics, pagination contracts,
+or the interpretation of security and request-search data.
 ## Layout
 
 ```text
 ngwaf-helper/
-├── ngwaf                 # CLI bootstrap + command dispatch
+├── fastly-audit          # primary CLI bootstrap
+├── ngwaf                 # backward-compatible entry point
 ├── ngwaf-update          # package-aware installer
 ├── lib/
 │   ├── core.sh            # HTTP, pagination, dates, shared JSON helpers
+│   ├── dispatch.sh        # flat compatibility + namespaced routing
 │   ├── doctor.sh          # dependency, authentication, and scope diagnostics
 │   ├── account.sh         # version, auth identity, customer selection
 │   ├── services.sh        # CDN/Compute + product inventory
@@ -222,3 +228,25 @@ v21 deliberately did **not** change API semantics. Existing functions were moved
 ### Known scope caveat retained from v20
 
 `customer/costco.sh` contains the customer-specific `intl-bot-stats` and `intl-bot-types` commands. They remain behaviorally unchanged in v21. They should not be generalized to other customers without explicit refactoring and validation.
+
+
+## Namespaced command structure
+
+`fastly-audit` groups commands by product or resource while the `ngwaf`
+compatibility command and all original flat commands continue to work:
+
+```text
+fastly-audit customer show
+fastly-audit service list --json
+fastly-audit service products --json
+fastly-audit ngwaf rule Production RULE_ID
+fastly-audit ngwaf rules Production --json
+fastly-audit bot stats SERVICE_ID 30 --json
+fastly-audit bot rules Production --json
+fastly-audit snapshot ngwaf Production --output before.json
+fastly-audit diff before.json after.json --check --json
+```
+
+Use `fastly-audit <namespace> help` for focused help. Existing commands such as
+`ngwaf rule`, `ngwaf count`, and `fastly-audit services` remain compatibility
+paths; namespacing does not alter API endpoints, scope validation, or JSON data.

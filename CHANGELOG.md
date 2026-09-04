@@ -3,6 +3,19 @@
 All notable changes to `fastly-audit` and its `ngwaf` compatibility command are
 documented here.
 
+
+## [24.0] - 2026-09-04
+
+- Promotes `fastly-audit` as the primary modular CLI while preserving `ngwaf`
+  as a complete compatibility launcher.
+- Adds `customer`, `service`, `ngwaf`, `bot`, and `snapshot` command namespaces
+  with focused help for each namespace.
+- Extracts command routing and preflight behavior into `lib/dispatch.sh`.
+- Preserves all original flat commands and verifies that legacy and namespaced
+  Weedmaps rule retrieval return identical output.
+- Makes `doctor` report and validate the launcher that actually invoked it.
+- Adds namespace and dual-launcher diagnostic regression coverage.
+
 ## [23.2] - 2026-09-04
 
 ### Added
@@ -28,4 +41,5 @@ documented here.
 - Preserved customer scope, data provenance, pagination, and output contracts
   while converting large JSON payload transport.
 
+[24.0]: https://github.com/cassiejk/ngwaf-helper/releases/tag/v24.0
 [23.2]: https://github.com/cassiejk/ngwaf-helper/releases/tag/v23.2
