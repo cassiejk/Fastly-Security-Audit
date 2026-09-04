@@ -15,7 +15,9 @@ else
 fi
 
 printf 'CLI smoke tests...\n'
-[[ "$($ROOT/ngwaf version)" == 'ngwaf 23.1' ]]
+[[ "$($ROOT/fastly-audit version)" == 'fastly-audit 23.2' ]]
+[[ "$($ROOT/ngwaf version)" == 'ngwaf 23.2' ]]
+$ROOT/fastly-audit help >/dev/null
 $ROOT/ngwaf help >/dev/null
 
 printf 'Behavior tests...\n'
@@ -25,5 +27,6 @@ $ROOT/tests/doctor.sh
 $ROOT/tests/rules.sh
 $ROOT/tests/snapshots.sh
 $ROOT/tests/json-transport.sh
+$ROOT/tests/updater.sh
 
 printf 'OK\n'

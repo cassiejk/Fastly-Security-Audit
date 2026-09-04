@@ -3,7 +3,7 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-VERSION="23.1"
+VERSION="23.2"
 PROGRAM_NAME="${FASTLY_AUDIT_INVOKED_AS:-fastly-audit}"
 API_BASE="https://api.fastly.com"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastly-ngwaf"

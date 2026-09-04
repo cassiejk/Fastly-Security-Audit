@@ -1,6 +1,6 @@
-# ngwaf-helper v23.1
+# fastly-audit v23.2
 
-v23.1 adds direct, customer-scoped retrieval of a single workspace rule. It
+v23.2 hardens structured JSON transport for large customer datasets and adds dual-launcher package installation. It
 retains v23's non-destructive diagnostics, protected configuration snapshots,
 semantic snapshot comparisons, and readable terminal interface.
 
@@ -217,7 +217,7 @@ ngwaf-update ./ngwaf
 
 ## Refactor history
 
-v21 deliberately did **not** change API semantics. Existing functions were moved intact from v20 into modules so behavioral regressions could be distinguished from the refactor. v21.1 was the first post-refactor behavioral release, v21.2 fixed the zero-retry test path on macOS Bash 3.2, and v21.3 made request-search sampling semantics explicit in every count result. v22 added explicit scope resolution and data-quality contracts. v23 adds diagnostics, protected configuration snapshots, local semantic diffs, and TTY-aware presentation. v23.1 adds direct single-rule retrieval with response identity validation.
+v21 deliberately did **not** change API semantics. Existing functions were moved intact from v20 into modules so behavioral regressions could be distinguished from the refactor. v21.1 was the first post-refactor behavioral release, v21.2 fixed the zero-retry test path on macOS Bash 3.2, and v21.3 made request-search sampling semantics explicit in every count result. v22 added explicit scope resolution and data-quality contracts. v23 adds diagnostics, protected configuration snapshots, local semantic diffs, and TTY-aware presentation. v23.1 adds direct single-rule retrieval with response identity validation. v23.2 hardens structured JSON transport for large customer datasets and adds dual-launcher installation validation.
 
 ### Known scope caveat retained from v20
 

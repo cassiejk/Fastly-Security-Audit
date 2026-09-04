@@ -2,13 +2,15 @@
 set -euo pipefail
 
 BIN_DIR="$HOME/bin"
-TARGET="$BIN_DIR/ngwaf"
-INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/ngwaf"
+PRIMARY_TARGET="$BIN_DIR/fastly-audit"
+LEGACY_TARGET="$BIN_DIR/ngwaf"
+INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/fastly-audit"
 
 candidate="${1:-.}"
 
-# Preserve the old workflow: `ngwaf-update ./ngwaf` infers the package root
-# from the entry point. A directory may also be supplied directly.
+# Preserve the legacy workflow: `ngwaf-update ./ngwaf` infers the package root
+# from the compatibility entry point. A directory or fastly-audit executable
+# may also be supplied directly.
 if [[ -d "$candidate" ]]; then
   SOURCE_ROOT="$(cd "$candidate" && pwd -P)"
 elif [[ -f "$candidate" ]]; then
@@ -18,45 +20,92 @@ else
   exit 1
 fi
 
-[[ -f "$SOURCE_ROOT/ngwaf" && -d "$SOURCE_ROOT/lib" ]] || {
-  printf 'ngwaf-update: %s is not a modular ngwaf package\n' "$SOURCE_ROOT" >&2
+[[ -f "$SOURCE_ROOT/fastly-audit" \
+  && -f "$SOURCE_ROOT/ngwaf" \
+  && -d "$SOURCE_ROOT/lib" \
+  && -d "$SOURCE_ROOT/customer" ]] || {
+  printf 'ngwaf-update: %s is not a modular fastly-audit package\n' \
+    "$SOURCE_ROOT" >&2
   exit 1
 }
 
 # Validate every Bash source before touching the current installation.
 while IFS= read -r file; do
   bash -n "$file"
-done < <(find "$SOURCE_ROOT" -type f \( -name 'ngwaf' -o -name '*.sh' \) -print | sort)
+done < <(
+  find "$SOURCE_ROOT" -type f \
+    \( \
+      -name 'fastly-audit' \
+      -o -name 'ngwaf' \
+      -o -name 'ngwaf-update' \
+      -o -name '*.sh' \
+    \) \
+    -print |
+  sort
+)
 
-stage="$(mktemp -d "${TMPDIR:-/tmp}/ngwaf-install.XXXXXX")"
-trap 'rm -rf "$stage"' EXIT
+stage="$(mktemp -d "${TMPDIR:-/tmp}/fastly-audit-install.XXXXXX")"
+
+cleanup_stage() {
+  rm -rf "$stage"
+}
+
+trap cleanup_stage EXIT
+
 mkdir -p "$stage/lib" "$stage/customer"
+
+install -m 755 "$SOURCE_ROOT/fastly-audit" "$stage/fastly-audit"
+
 install -m 755 "$SOURCE_ROOT/ngwaf" "$stage/ngwaf"
+
 cp -R "$SOURCE_ROOT/lib/." "$stage/lib/"
 cp -R "$SOURCE_ROOT/customer/." "$stage/customer/"
 
 mkdir -p "$(dirname "$INSTALL_ROOT")" "$BIN_DIR"
+
 if [[ -d "$INSTALL_ROOT" ]]; then
   backup="${INSTALL_ROOT}.backup-$(date +%Y%m%d-%H%M%S)"
   mv "$INSTALL_ROOT" "$backup"
   printf 'Backup: %s\n' "$backup"
 fi
+
 mv "$stage" "$INSTALL_ROOT"
 trap - EXIT
 
-# Replace the old single-file installation (or prior symlink) with a symlink
-# to the packaged entry point. Modules remain beside the executable.
-if [[ -e "$TARGET" || -L "$TARGET" ]]; then
-  if [[ ! -L "$TARGET" ]]; then
-    backup_bin="$TARGET.backup-$(date +%Y%m%d-%H%M%S)"
-    mv "$TARGET" "$backup_bin"
-    printf 'Backup: %s\n' "$backup_bin"
-  else
-    rm -f "$TARGET"
-  fi
-fi
-ln -s "$INSTALL_ROOT/ngwaf" "$TARGET"
+replace_command_link() {
+  local target="$1"
+  local source="$2"
 
-printf 'Installed package: %s -> %s\n' "$SOURCE_ROOT" "$INSTALL_ROOT"
-printf 'Command: %s -> %s\n' "$TARGET" "$INSTALL_ROOT/ngwaf"
-"$TARGET" version
+  if [[ -e "$target" || -L "$target" ]]; then
+    if [[ ! -L "$target" ]]; then
+      local backup_bin
+      backup_bin="${target}.backup-$(date +%Y%m%d-%H%M%S)"
+      mv "$target" "$backup_bin"
+      printf 'Backup: %s\n' "$backup_bin"
+    else
+      rm -f "$target"
+    fi
+  fi
+
+  ln -s "$source" "$target"
+}
+
+replace_command_link \
+  "$PRIMARY_TARGET" \
+  "$INSTALL_ROOT/fastly-audit"
+
+replace_command_link \
+  "$LEGACY_TARGET" \
+  "$INSTALL_ROOT/ngwaf"
+
+printf 'Installed package: %s -> %s\n' \
+  "$SOURCE_ROOT" "$INSTALL_ROOT"
+
+printf 'Primary command: %s -> %s\n' \
+  "$PRIMARY_TARGET" "$INSTALL_ROOT/fastly-audit"
+
+printf 'Compatibility command: %s -> %s\n' \
+  "$LEGACY_TARGET" "$INSTALL_ROOT/ngwaf"
+
+"$PRIMARY_TARGET" version
+"$LEGACY_TARGET" version
