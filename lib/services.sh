@@ -209,7 +209,10 @@ discover_product_json() {
 
   cid="$(current_cid)"
   list_tmp="$(mktemp)"
-  list_code="$(http_get_to_file "/enabled-products/v1/$product_id/services" "$list_tmp")"
+  list_code="$(
+    http_get_to_file "/enabled-products/v1/$product_id/services" "$list_tmp" \
+      --data-urlencode "customer_id=$cid"
+  )"
   enabled_ids='[]'
   unknown_checks='[]'
   returned_cid=''

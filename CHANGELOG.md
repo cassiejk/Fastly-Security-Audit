@@ -4,6 +4,24 @@ All notable changes to `fastly-audit` and its `ngwaf` compatibility command are
 documented here.
 
 
+## [24.1] - 2026-09-04
+
+### Added
+
+- Added `fastly-audit security summary [--json]` for selected-customer API
+  Discovery, Bot Management, DDoS Protection, Next-Gen WAF, and NGWAF
+  workspace inventory.
+- Added human-readable cross-product coverage and service-mapping tables with
+  machine-readable provenance, completeness, and limitation metadata.
+- Added security namespace regression coverage, including fail-closed unknown
+  handling and customer-scope verification.
+
+### Fixed
+
+- Scoped security-product service-list requests with `customer_id` and retained
+  response customer-identity validation. This prevents a root-read token's
+  default customer from contaminating another selected customer's inventory.
+
 ## [24.0] - 2026-09-04
 
 - Promotes `fastly-audit` as the primary modular CLI while preserving `ngwaf`
@@ -41,5 +59,6 @@ documented here.
 - Preserved customer scope, data provenance, pagination, and output contracts
   while converting large JSON payload transport.
 
+[24.1]: https://github.com/cassiejk/ngwaf-helper/compare/v24.0...v24.1
 [24.0]: https://github.com/cassiejk/ngwaf-helper/releases/tag/v24.0
 [23.2]: https://github.com/cassiejk/ngwaf-helper/releases/tag/v23.2

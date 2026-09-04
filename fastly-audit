@@ -3,7 +3,7 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-VERSION="24.0"
+VERSION="24.1"
 PROGRAM_NAME="${FASTLY_AUDIT_INVOKED_AS:-fastly-audit}"
 USAGE_PROGRAM="$PROGRAM_NAME"
 API_BASE="https://api.fastly.com"
@@ -35,6 +35,7 @@ for _ngwaf_module in \
   lib/doctor.sh \
   lib/account.sh \
   lib/services.sh \
+  lib/security.sh \
   lib/ngwaf.sh \
   lib/bots.sh \
   lib/metrics.sh \

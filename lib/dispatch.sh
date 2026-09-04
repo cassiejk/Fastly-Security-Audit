@@ -111,6 +111,21 @@ dispatch_service_namespace() {
   esac
 }
 
+dispatch_security_namespace() {
+  local subcommand="${1:-help}"
+  (( $# == 0 )) || shift
+  USAGE_PROGRAM="$PROGRAM_NAME security"
+
+  case "$subcommand" in
+    help|-h|--help) security_namespace_usage ;;
+    summary)
+      dispatch_preflight security-summary
+      cmd_security_summary "$@"
+      ;;
+    *) die "unknown security command: $subcommand; run: $PROGRAM_NAME security help" ;;
+  esac
+}
+
 dispatch_bot_namespace() {
   local subcommand="${1:-help}"
   (( $# == 0 )) || shift
@@ -159,6 +174,7 @@ dispatch_cli() {
   case "$command" in
     ngwaf) dispatch_ngwaf_namespace "$@" ;;
     service) dispatch_service_namespace "$@" ;;
+    security) dispatch_security_namespace "$@" ;;
     bot) dispatch_bot_namespace "$@" ;;
     customer)
       if [[ "$PROGRAM_NAME" == "fastly-audit" && $# -gt 0 ]]; then

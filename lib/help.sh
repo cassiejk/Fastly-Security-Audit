@@ -195,6 +195,9 @@ Service inventory:
   fastly-audit service products [--json]
   fastly-audit service inventory [--json]
 
+Security products:
+  fastly-audit security summary [--json]
+
 Next-Gen WAF:
   fastly-audit ngwaf workspaces
   fastly-audit ngwaf workspace <workspace>
@@ -263,6 +266,19 @@ fastly-audit service — selected-customer edge-service inspection
   list [--json]       Audit-observed CDN and Compute service inventory
   products [--json]   Service-level product enablement and configuration
   inventory [--json] Combined service, product, and NGWAF inventory
+HELP
+}
+
+security_namespace_usage() {
+  cat <<'HELP'
+fastly-audit security — selected-customer security-product inspection
+
+  summary [--json]   API Discovery, Bot Management, DDoS Protection,
+                     Next-Gen WAF, and NGWAF workspace coverage
+
+Enablement is configuration inventory; it does not prove traffic,
+effective enforcement, or security efficacy. Unknown checks are never
+silently counted as disabled.
 HELP
 }
 

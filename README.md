@@ -1,13 +1,16 @@
-# fastly-audit v24.0
+# fastly-audit v24.1
 
-v24 promotes the project from an NGWAF-specific helper to a modular, read-only
-Fastly audit CLI. The primary `fastly-audit` command now groups operations by
-customer, service, NGWAF, Bot Management, and snapshot namespaces. The `ngwaf`
-compatibility command and every original flat command remain supported.
+v24.1 adds a customer-scoped security-product inventory spanning API
+Discovery, Bot Management, DDoS Protection, Next-Gen WAF service mappings,
+and the complete NGWAF workspace collection. Product-list queries explicitly
+carry the selected customer ID and validate the response customer before data
+is accepted.
 
-This release changes command dispatch and presentation only. It does not
-change API endpoints, customer scoping, query semantics, pagination contracts,
-or the interpretation of security and request-search data.
+The summary distinguishes configuration enablement from observed traffic or
+security efficacy, preserves inconclusive results as unknown, and retains the
+audit-window limitation of the observed service inventory. All v24.0
+namespaces and the complete `ngwaf` compatibility interface remain supported.
+
 ## Layout
 
 ```text
@@ -21,6 +24,7 @@ ngwaf-helper/
 │   ├── doctor.sh          # dependency, authentication, and scope diagnostics
 │   ├── account.sh         # version, auth identity, customer selection
 │   ├── services.sh        # CDN/Compute + product inventory
+│   ├── security.sh        # cross-product security coverage summary
 │   ├── ngwaf.sh           # workspaces, rules, thresholds, posture, lists
 │   ├── bots.sh            # bot rules + Bot Management historical stats
 │   ├── metrics.sh         # timeseries, request counts, attack analysis
@@ -160,6 +164,29 @@ The response preserves the rule object at the top level and adds `context` and
 `provenance`. The command verifies that the API response contains the requested
 rule ID; missing rules, malformed responses, and mismatched IDs fail closed.
 
+### Security product summary
+
+Inspect selected-customer security-product coverage without querying unrelated
+delivery and observability products:
+
+```bash
+fastly-audit security summary
+fastly-audit security summary --json
+```
+
+The summary checks API Discovery, Bot Management, DDoS Protection, and
+Next-Gen WAF enablement against the audit-observed service set. Where the
+public product API supplies configuration, it also reports fields such as
+DDoS mode, Bot Management ContentGuard state, and NGWAF workspace/traffic-ramp
+mapping. The complete NGWAF workspace collection is included as separate
+context.
+
+An enabled mapping means the product is attached in Fastly configuration. It
+does not prove that the service carries current production traffic, that a
+specific enforcement path is active, or that the control is effective. A
+non-2xx enablement probe other than 404 is reported as unknown rather than
+silently counted as disabled.
+
 ### Data and output contracts
 
 | Command family | Primary source | Data class | Important interpretation |
@@ -169,6 +196,7 @@ rule ID; missing rules, malformed responses, and mismatched IDs fail closed.
 | `count`, `signal-count` | NGWAF request-search API | Retained searchable request records | Uses a rolling window ending five minutes before execution; `meta.total` may reflect sampled or mixed-storage records and is not raw traffic. |
 | `bot-stats` | Fastly Historical Stats | Daily service statistics | Bot metrics are sampled and scaled estimates; they are not directly comparable to unsampled `edge_requests`. |
 | `services`, `products`, `inventory` | Customer audit events plus service/product APIs | Observed inventory | The service set is audit-window-derived, not a guaranteed all-time inventory. |
+| `security summary` | Customer audit events, security-product enablement/configuration APIs, and NGWAF workspaces | Cross-product configuration inventory | Enabled does not prove traffic or enforcement; inconclusive probes remain unknown. |
 | `attack-origins` | Per-workspace top-attacks plus NGWAF timeseries | Ranked/truncated attack dimensions | Production workspaces are selected by a documented name regex and country rows are reconciled to `requests_attack`. |
 
 Analytical JSON includes a `window` object and a `provenance` object. Request
