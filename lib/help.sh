@@ -49,7 +49,7 @@ Safe local configuration snapshots:
 
 Recent request search (1-7 days):
   ngwaf count <workspace> '<Fastly Search query>' [days]
-  ngwaf requests <workspace> '<Fastly Search query>' [days] [--limit N] [--format json|csv] [--output FILE]
+  ngwaf requests <workspace> '<Fastly Search query>' [days] [--limit N] [--format auto|json|csv] [--output FILE]
   ngwaf rule-audit <workspace> <rule_id> [<rule_id> ...] [--days N] [--signals CSV] [--json]
   ngwaf signal-count <workspace> <signal> [days]
 
@@ -168,8 +168,10 @@ Notes:
     ratios derived from it describe searchable matches rather than all traffic.
   - requests retrieves a bounded set of actual retained request-search records.
     It reports total_matches separately from rows_returned, defaults to --limit
-    25, preserves raw nested request data in JSON, and supports CSV only as a
-    flattened export of common request fields.
+    25 and --format auto, preserves raw nested request data in JSON, and supports
+    CSV only as a flattened export of common request fields. auto prints human
+    output to a terminal, JSON to non-TTY stdout, and infers JSON/CSV from
+    --output .json/.csv extensions when no concrete format is supplied.
   - rule-audit retrieves live rule configuration, counts retained matches for
     ruleid:<id> and selected ruleid:<id> tag:<signal> intersections, and
     calculates percentages. Signal cohorts can overlap and must not be summed
@@ -221,7 +223,7 @@ Next-Gen WAF:
   fastly-audit ngwaf thresholds <workspace> [--json]
   fastly-audit ngwaf lists <workspace> [--json]
   fastly-audit ngwaf count <workspace> '<query>' [days]
-  fastly-audit ngwaf requests <workspace> '<query>' [days] [--limit N] [--format json|csv] [--output FILE]
+  fastly-audit ngwaf requests <workspace> '<query>' [days] [--limit N] [--format auto|json|csv] [--output FILE]
   fastly-audit ngwaf rule-audit <workspace> <rule_id> [<rule_id> ...] [--days N] [--signals CSV] [--json]
   fastly-audit ngwaf signal-count <workspace> <signal> [days]
   fastly-audit ngwaf overview [days] [--json]
@@ -264,7 +266,7 @@ fastly-audit ngwaf — Next-Gen WAF inspection
   lists <workspace> [--json]
   bot-rules <workspace> [--json]
   count <workspace> '<query>' [days]
-  requests <workspace> '<query>' [days] [--limit N] [--format json|csv] [--output FILE]
+  requests <workspace> '<query>' [days] [--limit N] [--format auto|json|csv] [--output FILE]
   rule-audit <workspace> <rule_id> [<rule_id> ...] [--days N] [--signals CSV] [--json]
   signal-count <workspace> <signal> [days]
   overview [days] [--json]

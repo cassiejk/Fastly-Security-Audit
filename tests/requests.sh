@@ -180,6 +180,7 @@ export NGWAF_TEST_CURL_ARGS="$TEST_TMP/curl-args"
 
 "$ROOT/fastly-audit" ngwaf help >"$TEST_TMP/help"
 grep -F "requests <workspace> '<query>' [days]" "$TEST_TMP/help" >/dev/null
+grep -F "[--format auto|json|csv]" "$TEST_TMP/help" >/dev/null
 
 output="$(
   "$ROOT/fastly-audit" ngwaf requests \
@@ -238,6 +239,15 @@ grep -F 'customer_id=test-customer' "$NGWAF_TEST_CURL_ARGS" >/dev/null
 grep -F 'limit=2' "$NGWAF_TEST_CURL_ARGS" >/dev/null
 grep -E '^q=from:[0-9]+ until:[0-9]+ ruleid:abc123 tag:SQLI$' "$NGWAF_TEST_CURL_ARGS" >/dev/null
 
+: >"$NGWAF_TEST_CURL_ARGS"
+auto_output="$("$ROOT/ngwaf" requests Production 'tag:SQLI' 2>"$TEST_TMP/auto-err")"
+jq -e '
+  .limit == 25
+  and .rows_returned == 3
+  and .requests[2].request_id == "req-3"
+' >/dev/null <<<"$auto_output"
+grep -F 'limit=25' "$NGWAF_TEST_CURL_ARGS" >/dev/null
+
 csv="$("$ROOT/ngwaf" requests Production 'tag:SQLI' --limit 1 --format csv 2>"$TEST_TMP/csv-err")"
 printf '%s\n' "$csv" | sed -n '1p' | grep -F '"customer","customer_id","workspace","workspace_id"' >/dev/null
 printf '%s\n' "$csv" | sed -n '2p' | grep -F '"Test Customer","test-customer","Production","production"' >/dev/null
@@ -253,7 +263,30 @@ output_file="$TEST_TMP/requests.json"
 [[ -r "$output_file" ]]
 [[ "$(stat -c '%a' "$output_file" 2>/dev/null || stat -f '%Lp' "$output_file")" == "600" ]]
 jq -e '.rows_returned == 1 and .requests[0].request_id == "req-1"' >/dev/null "$output_file"
-grep -F 'wrote requests output:' "$TEST_TMP/output-stderr" >/dev/null
+grep -F 'wrote 1 request record to' "$TEST_TMP/output-stderr" >/dev/null
+
+csv_output_file="$TEST_TMP/requests.CSV"
+"$ROOT/ngwaf" requests production 'tag:SQLI' \
+  --limit 1 \
+  --format auto \
+  --output "$csv_output_file" \
+  >"$TEST_TMP/csv-output-stdout" \
+  2>"$TEST_TMP/csv-output-stderr"
+[[ ! -s "$TEST_TMP/csv-output-stdout" ]]
+printf '%s\n' "$(sed -n '1p' "$csv_output_file")" | grep -F '"customer","customer_id","workspace","workspace_id"' >/dev/null
+printf '%s\n' "$(sed -n '2p' "$csv_output_file")" | grep -F '"Test Customer","test-customer","Production","production"' >/dev/null
+grep -F 'wrote 1 request record to' "$TEST_TMP/csv-output-stderr" >/dev/null
+
+conflict_output_file="$TEST_TMP/conflict.csv"
+"$ROOT/ngwaf" requests production 'tag:XSS' \
+  --limit 1 \
+  --format json \
+  --output "$conflict_output_file" \
+  >"$TEST_TMP/conflict-stdout" \
+  2>"$TEST_TMP/conflict-stderr"
+[[ ! -s "$TEST_TMP/conflict-stdout" ]]
+jq -e '.rows_returned == 1 and .requests[0].request_id == "req-1"' >/dev/null "$conflict_output_file"
+grep -F 'warning: --format json overrides .csv output extension' "$TEST_TMP/conflict-stderr" >/dev/null
 
 if "$ROOT/ngwaf" requests production 'tag:XSS' --limit 1 --output "$output_file" >"$TEST_TMP/out" 2>"$TEST_TMP/overwrite-err"; then
   printf 'requests test: existing output file was overwritten\n' >&2
@@ -266,6 +299,24 @@ if "$ROOT/ngwaf" requests Production 'tag:SQLI' --limit 0 >"$TEST_TMP/out" 2>"$T
   exit 1
 fi
 grep -F 'request limit must be at least 1' "$TEST_TMP/limit-err" >/dev/null
+
+if "$ROOT/ngwaf" requests Production 'tag:SQLI' --limit -5 >"$TEST_TMP/out" 2>"$TEST_TMP/negative-limit-err"; then
+  printf 'requests test: negative limit unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -F 'request limit must be at least 1' "$TEST_TMP/negative-limit-err" >/dev/null
+
+if "$ROOT/ngwaf" requests Production 'tag:SQLI' --limit abc >"$TEST_TMP/out" 2>"$TEST_TMP/string-limit-err"; then
+  printf 'requests test: string limit unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -F 'request limit must be a positive integer' "$TEST_TMP/string-limit-err" >/dev/null
+
+if "$ROOT/ngwaf" requests Production 'tag:SQLI' --format yaml >"$TEST_TMP/out" 2>"$TEST_TMP/format-err"; then
+  printf 'requests test: invalid format unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -F 'requests format must be auto, json, or csv' "$TEST_TMP/format-err" >/dev/null
 
 export NGWAF_TEST_REQUEST_MODE=malformed
 if "$ROOT/ngwaf" requests Production 'tag:SQLI' --limit 2 >"$TEST_TMP/out" 2>"$TEST_TMP/malformed-err"; then

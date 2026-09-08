@@ -27,7 +27,10 @@ ngwaf-helper/
 │   ├── security.sh        # cross-product security coverage summary
 │   ├── ngwaf.sh           # workspaces, rules, thresholds, posture, lists
 │   ├── bots.sh            # bot rules + Bot Management historical stats
-│   ├── metrics.sh         # timeseries, request search, attack analysis
+│   ├── metrics.sh         # timeseries and metric summaries
+│   ├── request_search.sh  # request-search counts and drill-down rows
+│   ├── rule_audit.sh      # rule configuration plus retained-match analysis
+│   ├── attack_analysis.sh # attack-profile and request-origin reports
 │   ├── snapshots.sh       # protected snapshots + local semantic diffs
 │   └── help.sh            # CLI help
 ├── customer/
@@ -247,10 +250,16 @@ fastly-audit ngwaf requests production \
 
 The command uses the same workspace resolution, `rule:` to `ruleid:`
 normalization, 1-7 day rolling window, and five-minute ingestion buffer as
-`count`. JSON is the default format and preserves each raw request object under
-`requests[].raw` while also exposing common fields such as timestamp, request
-ID, host, path, method, source IP, user-agent, signal names, and response code
-when those fields exist in the API response.
+`count`. Output defaults to `--format auto`: human-readable results when stdout
+is a terminal, JSON when stdout is piped or redirected, and `.json`/`.csv`
+format inference for `--output` paths when no concrete format is supplied. A
+concrete `--format json` or `--format csv` overrides the file extension with a
+warning when they conflict.
+
+JSON preserves each raw request object under `requests[].raw` while also
+exposing common fields such as timestamp, request ID, host, path, method, source
+IP, user-agent, signal names, and response code when those fields exist in the
+API response.
 
 `total_matches` reports the request-search `meta.total` cohort size when the
 API supplies it. `rows_returned` reports only the bounded rows actually
@@ -259,12 +268,15 @@ retrieved. The default limit is 25 and the safety cap is controlled by
 
 ```bash
 fastly-audit ngwaf requests production 'tag:SUSPECTED-BAD-BOT' \
-  --limit 100 --format json --output bad-bot-requests.json
-fastly-audit ngwaf requests production 'tag:SQLI' --limit 25 --format csv
+  --limit 100 --output bad-bot-requests.json
+fastly-audit ngwaf requests production 'tag:SQLI' \
+  --limit 25 --format csv --output sqli-requests.csv
 ```
 
 Files written with `--output` use mode `0600` and refuse to overwrite an
-existing path because request rows can contain customer-sensitive details.
+existing path because request rows can contain customer-sensitive details. The
+success message reports the row count, for example:
+`fastly-audit: wrote 25 request records to requests.json`.
 
 ### Rule audit
 
