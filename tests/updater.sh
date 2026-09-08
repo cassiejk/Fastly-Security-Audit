@@ -1,16 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-TEST_TMP="$(mktemp -d)"
-
-cleanup() {
-  local rc=$?
-  rm -rf "$TEST_TMP"
-  exit "$rc"
-}
-
-trap cleanup EXIT
+# shellcheck source=tests/helpers.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/helpers.sh"
+test_init
 
 TEST_HOME="$TEST_TMP/home"
 TEST_DATA="$TEST_TMP/data"

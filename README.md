@@ -44,6 +44,7 @@ ngwaf-helper/
     ├── rule-audit.sh
     ├── metrics.sh
     ├── doctor.sh
+    ├── helpers.sh
     └── snapshots.sh
 ```
 

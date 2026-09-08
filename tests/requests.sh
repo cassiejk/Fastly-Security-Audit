@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-TEST_TMP="$(mktemp -d)"
-cleanup() {
-  local rc=$?
-  rm -rf "$TEST_TMP"
-  exit "$rc"
-}
-trap cleanup EXIT
+# shellcheck source=tests/helpers.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/helpers.sh"
+test_init
 
 mkdir -p "$TEST_TMP/bin"
 
@@ -261,7 +256,7 @@ output_file="$TEST_TMP/requests.json"
   2>"$TEST_TMP/output-stderr"
 [[ ! -s "$TEST_TMP/output-stdout" ]]
 [[ -r "$output_file" ]]
-[[ "$(stat -c '%a' "$output_file" 2>/dev/null || stat -f '%Lp' "$output_file")" == "600" ]]
+[[ "$(test_file_mode "$output_file")" == "600" ]]
 jq -e '.rows_returned == 1 and .requests[0].request_id == "req-1"' >/dev/null "$output_file"
 grep -F 'wrote 1 request record to' "$TEST_TMP/output-stderr" >/dev/null
 

@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-TEST_TMP="$(mktemp -d)"
-cleanup() {
-  local rc=$?
-  rm -rf "$TEST_TMP"
-  exit "$rc"
-}
-trap cleanup EXIT
+# shellcheck source=tests/helpers.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/helpers.sh"
+test_init
 
 mkdir -p "$TEST_TMP/bin"
 
@@ -84,7 +79,7 @@ jq -e '
   and .configuration.lists.workspace[0].snapshot_entry_count == 2
   and (.configuration.lists.workspace[0] | has("entries") | not)
 ' >/dev/null "$before"
-[[ "$(stat -c '%a' "$before" 2>/dev/null || stat -f '%Lp' "$before")" == "600" ]]
+[[ "$(test_file_mode "$before")" == "600" ]]
 
 if $ROOT/ngwaf snapshot Production --output "$before" --json >"$TEST_TMP/out" 2>"$TEST_TMP/overwrite-err"; then
   printf 'snapshot test: existing file was overwritten\n' >&2
