@@ -38,6 +38,7 @@ ngwaf-helper/
     ├── smoke.sh
     ├── count.sh
     ├── requests.sh
+    ├── rule-audit.sh
     ├── metrics.sh
     ├── doctor.sh
     └── snapshots.sh
@@ -195,6 +196,7 @@ silently counted as disabled.
 | `workspace`, `rule`, `rules`, `thresholds`, `lists`, `posture` | NGWAF configuration APIs | Point-in-time configuration | Single-rule responses are identity-checked; paginated collections complete or fail; rule summaries do not simulate rule precedence. |
 | `overview`, `timeseries`, `metrics`, `attack-profile` | NGWAF timeseries API | Aggregated timeseries | Uses complete UTC days; `to` is exclusive; every requested metric must be present and numeric in every returned row. |
 | `count`, `signal-count`, `requests` | NGWAF request-search API | Retained searchable request records | Uses a rolling window ending five minutes before execution; `meta.total` may reflect sampled or mixed-storage records and is not raw traffic. `requests` returns a bounded set of actual rows separately from the total cohort size. |
+| `rule-audit` | NGWAF rule API plus request-search API | Rule configuration plus retained-search cohort counts | Retrieves live rule configuration, counts `ruleid:<id>` and selected `ruleid:<id> tag:<signal>` intersections over one shared rolling window, and emits deterministic review indicators without treating overlapping signal cohorts as additive. |
 | `bot-stats` | Fastly Historical Stats | Daily service statistics | Bot metrics are sampled and scaled estimates; they are not directly comparable to unsampled `edge_requests`. |
 | `services`, `products`, `inventory` | Customer audit events plus service/product APIs | Observed inventory | The service set is audit-window-derived, not a guaranteed all-time inventory. |
 | `security summary` | Customer audit events, security-product enablement/configuration APIs, and NGWAF workspaces | Cross-product configuration inventory | Enabled does not prove traffic or enforcement; inconclusive probes remain unknown. |
@@ -264,6 +266,34 @@ fastly-audit ngwaf requests production 'tag:SQLI' --limit 25 --format csv
 Files written with `--output` use mode `0600` and refuse to overwrite an
 existing path because request rows can contain customer-sensitive details.
 
+### Rule audit
+
+Automate the manual rule-analysis workflow for one or more rule IDs:
+
+```bash
+fastly-audit ngwaf rule-audit production \
+  6047e66c33e0b901e666e368 \
+  --days 7
+```
+
+The command retrieves each rule's live configuration, counts retained matches
+for `ruleid:<rule_id>`, counts selected signal intersections such as
+`ruleid:<rule_id> tag:SQLI`, and reports the signal count as a percentage of
+that rule's retained match count. The default signals are `SQLI`, `XSS`,
+`CMDEXE`, `TRAVERSAL`, `SCANNER`, `SUSPECTED-BAD-BOT`, and `DATACENTER`.
+Override them with:
+
+```bash
+fastly-audit ngwaf rule-audit production RULE_ID \
+  --signals SQLI,XSS,SUSPECTED-BAD-BOT --json
+```
+
+The audit uses one shared request-search window per command invocation, with
+the same 1-7 day limit and five-minute ingestion buffer as `count`. Signal
+cohorts can overlap and must not be summed as unique requests. Review
+indicators are deterministic observations for human review; they are not
+automatic remediation advice and do not assert that traffic is malicious.
+
 ## Installation
 
 The old `ngwaf-update ./ngwaf` workflow is preserved, but the updater now installs the whole package under `~/.local/share/ngwaf` and symlinks `~/bin/ngwaf` to its entry point.
@@ -303,6 +333,7 @@ fastly-audit ngwaf rules Production --json
 fastly-audit bot stats SERVICE_ID 30 --json
 fastly-audit bot rules Production --json
 fastly-audit ngwaf requests Production 'tag:SQLI' 7 --limit 25
+fastly-audit ngwaf rule-audit Production RULE_ID --days 7
 fastly-audit snapshot ngwaf Production --output before.json
 fastly-audit diff before.json after.json --check --json
 ```

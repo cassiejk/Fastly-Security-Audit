@@ -69,6 +69,7 @@ dispatch_flat() {
     bot-rules) cmd_bot_rules "$@" ;;
     count) cmd_count "$@" ;;
     requests) cmd_requests "$@" ;;
+    rule-audit) cmd_rule_audit "$@" ;;
     signal-count) cmd_signal_count "$@" ;;
     snapshot) cmd_snapshot "$@" ;;
     diff) cmd_diff "$@" ;;
@@ -90,7 +91,7 @@ dispatch_ngwaf_namespace() {
 
   case "$subcommand" in
     help|-h|--help) ngwaf_namespace_usage ;;
-    workspaces|workspace|posture|rule|rules|account-rules|thresholds|lists|bot-rules|count|requests|signal-count|overview|timeseries|metrics|attack-profile|attack-origins)
+    workspaces|workspace|posture|rule|rules|account-rules|thresholds|lists|bot-rules|count|requests|rule-audit|signal-count|overview|timeseries|metrics|attack-profile|attack-origins)
       dispatch_flat "$subcommand" "$@"
       ;;
     snapshot) dispatch_flat snapshot "$@" ;;

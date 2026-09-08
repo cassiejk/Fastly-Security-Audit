@@ -55,23 +55,23 @@ cmd_workspace() {
     }' <<<"$body"
 }
 
-cmd_rule() {
-  [[ $# -eq 2 ]] || die 'usage: ngwaf rule <workspace> <rule_id>'
+get_workspace_rule_json() {
+  [[ $# -eq 4 ]] ||
+    die 'get_workspace_rule_json requires <customer-id> <workspace-id> <workspace-name> <rule-id>'
 
-  local cid input rule_id encoded_rule_id resolved w ws_id body actual_rule_id
+  local cid="$1"
+  local ws_id="$2"
+  local workspace="$3"
+  local rule_id="$4"
+  local encoded_rule_id body actual_rule_id
   local NGWAF_PROGRESS_LABEL
-  cid="$(current_cid)"
-  input="$1"
-  rule_id="$2"
+
   [[ -n "$rule_id" ]] || die 'rule ID must not be empty'
 
-  resolved="$(resolve_workspace_json "$input")"
-  w="$(jq -r '.name' <<<"$resolved")"
-  ws_id="$(jq -r '.id' <<<"$resolved")"
   encoded_rule_id="$(urlencode "$rule_id")"
   # Dynamically scoped and consumed by get() in lib/core.sh.
   # shellcheck disable=SC2034
-  NGWAF_PROGRESS_LABEL="retrieving rule $rule_id from $w"
+  NGWAF_PROGRESS_LABEL="retrieving rule $rule_id from $workspace"
 
   body="$(
     get "$(workspace_path "$ws_id")/rules/$encoded_rule_id" \
@@ -83,6 +83,22 @@ cmd_rule() {
     die "rule response did not contain an ID: $rule_id"
   [[ "$actual_rule_id" == "$rule_id" ]] ||
     die "rule response ID did not match requested rule: expected $rule_id, received $actual_rule_id"
+
+  printf '%s\n' "$body"
+}
+
+cmd_rule() {
+  [[ $# -eq 2 ]] || die 'usage: ngwaf rule <workspace> <rule_id>'
+
+  local cid input rule_id resolved w ws_id body
+  cid="$(current_cid)"
+  input="$1"
+  rule_id="$2"
+
+  resolved="$(resolve_workspace_json "$input")"
+  w="$(jq -r '.name' <<<"$resolved")"
+  ws_id="$(jq -r '.id' <<<"$resolved")"
+  body="$(get_workspace_rule_json "$cid" "$ws_id" "$w" "$rule_id")"
 
   jq \
     --arg workspace "$w" \
