@@ -49,6 +49,7 @@ Safe local configuration snapshots:
 
 Recent request search (1-7 days):
   ngwaf count <workspace> '<Fastly Search query>' [days]
+  ngwaf requests <workspace> '<Fastly Search query>' [days] [--limit N] [--format json|csv] [--output FILE]
   ngwaf signal-count <workspace> <signal> [days]
 
 Examples:
@@ -91,6 +92,7 @@ Examples:
   ngwaf bot-rules production
   ngwaf signal-count production SUSPECTED-BAD-BOT 7
   ngwaf count production 'ruleid:6047e66d33e0b901e666e424' 7
+  ngwaf requests production 'ruleid:6047e66d33e0b901e666e424 tag:SQLI' 7 --limit 25
 
   # Snapshots use mode 0600 and redact list entries unless explicitly included:
   ngwaf snapshot Production
@@ -162,6 +164,10 @@ Notes:
     records. Depending on storage category, those records may be sampled or
     mixed-storage data. The result is not raw traffic or a scaled estimate, and
     ratios derived from it describe searchable matches rather than all traffic.
+  - requests retrieves a bounded set of actual retained request-search records.
+    It reports total_matches separately from rows_returned, defaults to --limit
+    25, preserves raw nested request data in JSON, and supports CSV only as a
+    flattened export of common request fields.
   - API calls show an interactive progress indicator on stderr. Set
     NGWAF_PROGRESS=never to disable it, or NGWAF_PROGRESS=always to force it.
     Set NGWAF_DEBUG=1 to show request paths and query parameters (never tokens).
@@ -208,6 +214,7 @@ Next-Gen WAF:
   fastly-audit ngwaf thresholds <workspace> [--json]
   fastly-audit ngwaf lists <workspace> [--json]
   fastly-audit ngwaf count <workspace> '<query>' [days]
+  fastly-audit ngwaf requests <workspace> '<query>' [days] [--limit N] [--format json|csv] [--output FILE]
   fastly-audit ngwaf signal-count <workspace> <signal> [days]
   fastly-audit ngwaf overview [days] [--json]
   fastly-audit ngwaf timeseries <workspace> [days] [--json]
@@ -249,6 +256,7 @@ fastly-audit ngwaf — Next-Gen WAF inspection
   lists <workspace> [--json]
   bot-rules <workspace> [--json]
   count <workspace> '<query>' [days]
+  requests <workspace> '<query>' [days] [--limit N] [--format json|csv] [--output FILE]
   signal-count <workspace> <signal> [days]
   overview [days] [--json]
   timeseries <workspace> [days] [--json]

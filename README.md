@@ -27,7 +27,7 @@ ngwaf-helper/
 │   ├── security.sh        # cross-product security coverage summary
 │   ├── ngwaf.sh           # workspaces, rules, thresholds, posture, lists
 │   ├── bots.sh            # bot rules + Bot Management historical stats
-│   ├── metrics.sh         # timeseries, request counts, attack analysis
+│   ├── metrics.sh         # timeseries, request search, attack analysis
 │   ├── snapshots.sh       # protected snapshots + local semantic diffs
 │   └── help.sh            # CLI help
 ├── customer/
@@ -37,6 +37,7 @@ ngwaf-helper/
 └── tests/
     ├── smoke.sh
     ├── count.sh
+    ├── requests.sh
     ├── metrics.sh
     ├── doctor.sh
     └── snapshots.sh
@@ -193,7 +194,7 @@ silently counted as disabled.
 |---|---|---|---|
 | `workspace`, `rule`, `rules`, `thresholds`, `lists`, `posture` | NGWAF configuration APIs | Point-in-time configuration | Single-rule responses are identity-checked; paginated collections complete or fail; rule summaries do not simulate rule precedence. |
 | `overview`, `timeseries`, `metrics`, `attack-profile` | NGWAF timeseries API | Aggregated timeseries | Uses complete UTC days; `to` is exclusive; every requested metric must be present and numeric in every returned row. |
-| `count`, `signal-count` | NGWAF request-search API | Retained searchable request records | Uses a rolling window ending five minutes before execution; `meta.total` may reflect sampled or mixed-storage records and is not raw traffic. |
+| `count`, `signal-count`, `requests` | NGWAF request-search API | Retained searchable request records | Uses a rolling window ending five minutes before execution; `meta.total` may reflect sampled or mixed-storage records and is not raw traffic. `requests` returns a bounded set of actual rows separately from the total cohort size. |
 | `bot-stats` | Fastly Historical Stats | Daily service statistics | Bot metrics are sampled and scaled estimates; they are not directly comparable to unsampled `edge_requests`. |
 | `services`, `products`, `inventory` | Customer audit events plus service/product APIs | Observed inventory | The service set is audit-window-derived, not a guaranteed all-time inventory. |
 | `security summary` | Customer audit events, security-product enablement/configuration APIs, and NGWAF workspaces | Cross-product configuration inventory | Enabled does not prove traffic or enforcement; inconclusive probes remain unknown. |
@@ -233,6 +234,36 @@ category. It is not raw traffic and the helper does not scale it into an
 estimated traffic total. Ratios calculated from these values describe shares
 of searchable matches, not exact shares of all production traffic.
 
+### Request-search drill-down
+
+Retrieve actual retained request-search rows for a bounded cohort:
+
+```bash
+fastly-audit ngwaf requests production \
+  'ruleid:6047e66c33e0b901e666e368 tag:SQLI' 7 --limit 25
+```
+
+The command uses the same workspace resolution, `rule:` to `ruleid:`
+normalization, 1-7 day rolling window, and five-minute ingestion buffer as
+`count`. JSON is the default format and preserves each raw request object under
+`requests[].raw` while also exposing common fields such as timestamp, request
+ID, host, path, method, source IP, user-agent, signal names, and response code
+when those fields exist in the API response.
+
+`total_matches` reports the request-search `meta.total` cohort size when the
+API supplies it. `rows_returned` reports only the bounded rows actually
+retrieved. The default limit is 25 and the safety cap is controlled by
+`NGWAF_REQUEST_SEARCH_MAX_LIMIT` (default 1000).
+
+```bash
+fastly-audit ngwaf requests production 'tag:SUSPECTED-BAD-BOT' \
+  --limit 100 --format json --output bad-bot-requests.json
+fastly-audit ngwaf requests production 'tag:SQLI' --limit 25 --format csv
+```
+
+Files written with `--output` use mode `0600` and refuse to overwrite an
+existing path because request rows can contain customer-sensitive details.
+
 ## Installation
 
 The old `ngwaf-update ./ngwaf` workflow is preserved, but the updater now installs the whole package under `~/.local/share/ngwaf` and symlinks `~/bin/ngwaf` to its entry point.
@@ -271,6 +302,7 @@ fastly-audit ngwaf rule Production RULE_ID
 fastly-audit ngwaf rules Production --json
 fastly-audit bot stats SERVICE_ID 30 --json
 fastly-audit bot rules Production --json
+fastly-audit ngwaf requests Production 'tag:SQLI' 7 --limit 25
 fastly-audit snapshot ngwaf Production --output before.json
 fastly-audit diff before.json after.json --check --json
 ```
