@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+# shellcheck disable=SC1091
+source "$ROOT/lib/runtime.sh"
+ngwaf_require_bash_runtime scripts/package-release
+
+usage() {
+  cat <<'HELP'
+usage: scripts/package-release [--dist DIR] [--tag TAG]
+
+Builds GitHub Release assets:
+  fastly-audit.tar.gz
+  fastly-audit.tar.gz.sha256
+  fastly-audit-installer.sh
+HELP
+}
+
+dist_dir="$ROOT/dist"
+expected_tag=""
+
+while (( $# > 0 )); do
+  case "$1" in
+    --dist)
+      [[ $# -ge 2 && -n "${2:-}" ]] || {
+        usage >&2
+        exit 1
+      }
+      dist_dir="$2"
+      shift 2
+      ;;
+    --tag)
+      [[ $# -ge 2 && -n "${2:-}" ]] || {
+        usage >&2
+        exit 1
+      }
+      expected_tag="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+version="$("$ROOT/fastly-audit" version | awk '{print $2}')"
+[[ -n "$version" ]] || {
+  printf 'scripts/package-release: could not determine fastly-audit version\n' >&2
+  exit 1
+}
+
+if [[ -n "$expected_tag" && "$expected_tag" != "v$version" ]]; then
+  printf 'scripts/package-release: release tag %s does not match fastly-audit version %s\n' \
+    "$expected_tag" "$version" >&2
+  exit 1
+fi
+
+workdir="$(mktemp -d "${TMPDIR:-/tmp}/fastly-audit-package.XXXXXX")"
+
+cleanup() {
+  rm -rf "$workdir"
+}
+
+trap cleanup EXIT
+
+package_root="$workdir/fastly-audit"
+mkdir -p "$package_root/lib" "$package_root/customer" "$dist_dir"
+
+install -m 755 "$ROOT/fastly-audit" "$package_root/fastly-audit"
+install -m 755 "$ROOT/ngwaf" "$package_root/ngwaf"
+install -m 755 "$ROOT/ngwaf-update" "$package_root/ngwaf-update"
+install -m 644 "$ROOT/README.md" "$package_root/README.md"
+install -m 644 "$ROOT/CHANGELOG.md" "$package_root/CHANGELOG.md"
+cp -R "$ROOT/lib/." "$package_root/lib/"
+cp -R "$ROOT/customer/." "$package_root/customer/"
+
+tar -C "$workdir" -czf "$dist_dir/fastly-audit.tar.gz" fastly-audit
+
+if command -v sha256sum >/dev/null 2>&1; then
+  (
+    cd "$dist_dir"
+    sha256sum fastly-audit.tar.gz >fastly-audit.tar.gz.sha256
+  )
+elif command -v shasum >/dev/null 2>&1; then
+  (
+    cd "$dist_dir"
+    shasum -a 256 fastly-audit.tar.gz >fastly-audit.tar.gz.sha256
+  )
+else
+  printf 'scripts/package-release: missing dependency: sha256sum or shasum\n' >&2
+  exit 1
+fi
+
+install -m 755 "$ROOT/install.sh" "$dist_dir/fastly-audit-installer.sh"
+
+printf 'Release assets written to %s\n' "$dist_dir"
+printf '  fastly-audit.tar.gz\n'
+printf '  fastly-audit.tar.gz.sha256\n'
+printf '  fastly-audit-installer.sh\n'

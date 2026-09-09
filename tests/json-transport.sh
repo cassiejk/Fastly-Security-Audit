@@ -3,6 +3,10 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
+# shellcheck source=../lib/runtime.sh
+source "$ROOT/lib/runtime.sh"
+ngwaf_require_bash_runtime json-transport.sh
+
 # shellcheck source=../lib/core.sh
 source "$ROOT/lib/core.sh"
 

@@ -7,7 +7,8 @@ Fastly NGWAF read-only helper
 
 Customer / auth and account inventory:
   ngwaf version
-  ngwaf doctor [--json]
+  ngwaf setup [--customer-id CUSTOMER_ID] [--json]
+  ngwaf doctor [--json] [--verbose]
   ngwaf whoami
   ngwaf use <customer_id>
   ngwaf customer
@@ -55,7 +56,9 @@ Recent request search (1-7 days):
 
 Examples:
   ngwaf doctor
+  ngwaf setup --customer-id CUSTOMER_ID
   ngwaf doctor --json
+  ngwaf doctor --verbose
   ngwaf use 6C07TtEzfBKdmffwdcdHLD
   ngwaf overview
   ngwaf overview 30 --json
@@ -106,6 +109,13 @@ Notes:
   - doctor is non-destructive and does not require the normal command preflight.
     It collects dependency, token, customer, workspace, and HTTP-policy results;
     failures produce a non-zero exit status after the complete report is shown.
+    Add --verbose for sanitized command paths, config paths, versions, and API
+    probe status details.
+  - setup is a guided first-run check for colleagues. It verifies the local
+    runtime, dependencies, FASTLY_API_TOKEN presence, token API access, and
+    selected customer scope. With --customer-id, a validated customer selection
+    is saved locally with mode 0600. The API probes are read-only and the token
+    value is never printed.
   - Customer-scoped commands validate and print the selected customer name, ID,
     and selection source on stderr. FASTLY_CUSTOMER_ID overrides the saved ID.
   - Workspace arguments may be IDs or case-insensitive exact names. Exact IDs
@@ -199,8 +209,10 @@ fastly-audit — read-only Fastly configuration and security inspection
 
 Core:
   fastly-audit version
-  fastly-audit doctor [--json]
+  fastly-audit setup [--customer-id CUSTOMER_ID] [--json]
+  fastly-audit doctor [--json] [--verbose]
   fastly-audit customer [show]
+  fastly-audit customer setup [--customer-id CUSTOMER_ID] [--json]
   fastly-audit customer use <customer_id>
   fastly-audit customer whoami
   fastly-audit inventory [--json]
@@ -319,6 +331,7 @@ customer_namespace_usage() {
 fastly-audit customer — authentication and customer selection
 
   show
+  setup [--customer-id CUSTOMER_ID] [--json]
   use <customer_id>
   whoami
 HELP

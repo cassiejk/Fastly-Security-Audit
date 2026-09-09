@@ -40,9 +40,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y shellcheck
 
-      - name: Install ShellCheck on macOS
+      - name: Install Bash and ShellCheck on macOS
         if: runner.os == 'macOS'
-        run: brew install shellcheck
+        run: |
+          brew install bash shellcheck
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Bash runtime
+        run: |
+          echo "bash path: $(command -v bash)"
+          bash --version
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            expected="$(brew --prefix)/bin/bash"
+            actual="$(command -v bash)"
+            [[ "$actual" == "$expected" ]]
+          fi
+          bash -c 'source ./lib/runtime.sh; ngwaf_require_bash_runtime github-actions'
 
       - name: Run checks
         run: ./scripts/check

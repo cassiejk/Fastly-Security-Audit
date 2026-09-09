@@ -15,13 +15,19 @@ namespaces and the complete `ngwaf` compatibility interface remain supported.
 
 ```text
 ngwaf-helper/
+├── install.sh             # GitHub Release installer for first-time users
 ├── fastly-audit          # primary CLI bootstrap
 ├── ngwaf                 # backward-compatible entry point
 ├── ngwaf-update          # package-aware installer
+├── .github/workflows/
+│   ├── check.yml          # Ubuntu/macOS validation
+│   └── release.yml        # GitHub Release asset packaging/upload
 ├── lib/
+│   ├── runtime.sh         # Bash runtime requirement and version checks
 │   ├── core.sh            # HTTP, pagination, dates, shared JSON helpers
 │   ├── dispatch.sh        # flat compatibility + namespaced routing
 │   ├── doctor.sh          # dependency, authentication, and scope diagnostics
+│   ├── setup.sh           # first-run onboarding and customer selection
 │   ├── account.sh         # version, auth identity, customer selection
 │   ├── services.sh        # CDN/Compute + product inventory
 │   ├── security.sh        # cross-product security coverage summary
@@ -36,7 +42,8 @@ ngwaf-helper/
 ├── customer/
 │   └── costco.sh          # Costco-specific international QBR commands
 ├── scripts/
-│   └── check              # syntax + optional ShellCheck + smoke tests
+│   ├── check              # syntax + optional ShellCheck + smoke tests
+│   └── package-release    # builds GitHub Release assets
 └── tests/
     ├── smoke.sh
     ├── count.sh
@@ -44,11 +51,30 @@ ngwaf-helper/
     ├── rule-audit.sh
     ├── metrics.sh
     ├── doctor.sh
+    ├── setup.sh
+    ├── package-release.sh
+    ├── install.sh
     ├── helpers.sh
+    ├── runtime.sh
     └── snapshots.sh
 ```
 
 ## Development
+
+`fastly-audit` requires Bash 5.2 or newer. On macOS, `/bin/bash` is the
+system Bash 3.2 build and is unsupported. Install a modern Bash with Homebrew:
+
+```bash
+brew install bash
+```
+
+The launchers use `#!/usr/bin/env bash`, which selects the first `bash` found
+in `PATH`. Ensure Homebrew's bin directory appears before `/bin`, then verify:
+
+```bash
+command -v bash
+bash --version
+```
 
 Run directly from the repository:
 
@@ -57,6 +83,40 @@ Run directly from the repository:
 ./ngwaf posture production
 ```
 
+### Colleague Quickstart
+
+For a first-time user, the preferred path is the latest GitHub Release:
+
+```bash
+curl -fsSLO https://github.com/cassiejk/ngwaf-helper/releases/latest/download/fastly-audit-installer.sh
+bash fastly-audit-installer.sh
+export FASTLY_API_TOKEN=YOUR_FASTLY_TOKEN
+fastly-audit setup --customer-id CUSTOMER_ID
+```
+
+The installer downloads `fastly-audit.tar.gz` and
+`fastly-audit.tar.gz.sha256` from the same release, verifies the checksum,
+installs `fastly-audit`, `ngwaf`, and `ngwaf-update`, and prints the setup
+command to run next. It does not edit shell startup files.
+
+For development from a local checkout:
+
+```bash
+mkdir -p ~/bin
+install -m 755 ./ngwaf-update ~/bin/ngwaf-update
+~/bin/ngwaf-update ./ngwaf
+export PATH="$HOME/bin:$PATH"
+export FASTLY_API_TOKEN=YOUR_FASTLY_TOKEN
+fastly-audit setup --customer-id CUSTOMER_ID
+fastly-audit doctor --verbose
+```
+
+`setup` is read-only against the Fastly API. It verifies the selected Bash,
+required local commands, token presence, token API access, and customer scope.
+When `--customer-id` validates successfully, the customer selection is saved to
+`~/.config/fastly-ngwaf/customer_id` with owner-only permissions. The token
+value is never printed or stored.
+
 Before committing:
 
 ```bash
@@ -64,7 +124,8 @@ Before committing:
 ```
 
 API requests show an interactive spinner and elapsed time on stderr, leaving
-stdout safe for JSON pipelines. Useful controls:
+stdout safe for JSON pipelines. Failures include status-specific hints and
+point to `doctor` or debug mode when those would help. Useful controls:
 
 ```bash
 NGWAF_PROGRESS=never ngwaf count production 'tag:XSS' 7
@@ -85,13 +146,17 @@ remains suitable for JSON pipelines.
 `doctor` collects diagnostics instead of exiting on the first failure:
 
 ```bash
+ngwaf setup --customer-id CUSTOMER_ID
 ngwaf doctor
 ngwaf doctor --json
+ngwaf doctor --verbose
 ```
 
 It checks Bash and command dependencies, HTTP policy values, token presence and
 API access, customer selection and identity, complete workspace enumeration,
 and case-insensitive workspace-name collisions. It never prints the API token.
+Add `--verbose` to include sanitized command paths, versions, config paths, HTTP
+settings, and API probe statuses for troubleshooting.
 Failures produce a non-zero exit status after the report is emitted; warnings
 do not.
 
@@ -309,19 +374,105 @@ automatic remediation advice and do not assert that traffic is malicious.
 
 ## Installation
 
-The old `ngwaf-update ./ngwaf` workflow is preserved, but the updater now installs the whole package under `~/.local/share/ngwaf` and symlinks `~/bin/ngwaf` to its entry point.
+`fastly-audit`, `ngwaf`, and `ngwaf-update` require Bash 5.2 or newer.
+On macOS, install Bash through Homebrew:
+
+```bash
+brew install bash
+```
+
+The launchers use `#!/usr/bin/env bash`, which selects the first `bash` found
+in `PATH`. `/bin/bash` on macOS is Bash 3.2 and is unsupported, so ensure
+Homebrew's bin directory precedes `/bin`. Verify the selected interpreter with:
+
+```bash
+command -v bash
+bash --version
+```
+
+### Install From A GitHub Release
+
+Download and run the Release installer:
+
+```bash
+curl -fsSLO https://github.com/cassiejk/ngwaf-helper/releases/latest/download/fastly-audit-installer.sh
+bash fastly-audit-installer.sh
+```
+
+The Release must contain these three assets:
+
+```text
+fastly-audit-installer.sh
+fastly-audit.tar.gz
+fastly-audit.tar.gz.sha256
+```
+
+To install a specific release tag:
+
+```bash
+bash fastly-audit-installer.sh --version v24.1
+```
+
+To carry the first setup command into the installer output:
+
+```bash
+bash fastly-audit-installer.sh --customer-id CUSTOMER_ID
+```
+
+If `FASTLY_API_TOKEN` is already set, the installer runs the read-only setup
+check for that customer. Otherwise it prints the exact command to run after the
+token is available.
+
+### Publish Release Assets
+
+When you publish a GitHub Release for a tag that matches the script version
+such as `v24.1`, the Release workflow runs the full check suite and uploads:
+
+```text
+fastly-audit-installer.sh
+fastly-audit.tar.gz
+fastly-audit.tar.gz.sha256
+```
+
+You can build the same assets locally without publishing anything:
+
+```bash
+./scripts/package-release --dist dist --tag v24.1
+```
+
+The packaging script refuses a tag that does not match `fastly-audit version`.
+
+### Install From A Local Checkout
+
+The old `ngwaf-update ./ngwaf` workflow is preserved, but the updater installs
+the whole package under `~/.local/share/fastly-audit` and symlinks
+`~/bin/fastly-audit`, `~/bin/ngwaf`, and `~/bin/ngwaf-update` to its entry
+points.
 
 Install the new updater once:
 
 ```bash
+mkdir -p ~/bin
 install -m 755 ./ngwaf-update ~/bin/ngwaf-update
 ```
 
 Then future updates remain:
 
 ```bash
-ngwaf-update ./ngwaf
+~/bin/ngwaf-update ./ngwaf
 ```
+
+After installation, a colleague can validate their own machine and account
+access with:
+
+```bash
+fastly-audit setup --customer-id CUSTOMER_ID
+fastly-audit doctor --verbose
+```
+
+If `fastly-audit` is not found after installation, add `~/bin` to `PATH` and
+open a new terminal. The updater prints this reminder when needed, but it does
+not rewrite shell startup files.
 
 ## Refactor history
 

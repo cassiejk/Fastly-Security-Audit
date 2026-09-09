@@ -66,6 +66,10 @@ case "$url" in
         printf '%s\n' '{"error":"upstream unavailable"}' >"$outfile"
         printf '503'
         ;;
+      auth_error)
+        printf '%s\n' '{"error":"invalid token"}' >"$outfile"
+        printf '401'
+        ;;
       slow)
         sleep 2
         printf '%s\n' '{"meta":{"limit":1,"total":7},"data":[]}' >"$outfile"
@@ -138,6 +142,8 @@ if $ROOT/ngwaf count production 'tag:XSS' 1 >"$TEST_TMP/out" 2>"$TEST_TMP/malfor
   exit 1
 fi
 grep -F 'returned invalid JSON' "$TEST_TMP/malformed-err" >/dev/null
+grep -F 'response body was not valid JSON' "$TEST_TMP/malformed-err" >/dev/null
+grep -F 'rerun with NGWAF_DEBUG=1' "$TEST_TMP/malformed-err" >/dev/null
 
 export NGWAF_TEST_CURL_MODE=timeout
 if $ROOT/ngwaf count production 'tag:XSS' 1 >"$TEST_TMP/out" 2>"$TEST_TMP/timeout-err"; then
@@ -147,6 +153,8 @@ fi
 grep -F 'Fastly API request timed out' "$TEST_TMP/timeout-err" >/dev/null
 grep -F 'connect=5s, transfer=60s, retry-window=90s' "$TEST_TMP/timeout-err" >/dev/null
 grep -F 'curl: (28) Operation timed out' "$TEST_TMP/timeout-err" >/dev/null
+grep -F 'request exceeded the configured timeout policy' "$TEST_TMP/timeout-err" >/dev/null
+grep -F 'run ngwaf doctor' "$TEST_TMP/timeout-err" >/dev/null
 
 export NGWAF_TEST_CURL_MODE=http_error
 if $ROOT/ngwaf count production 'tag:XSS' 1 >"$TEST_TMP/out" 2>"$TEST_TMP/http-err"; then
@@ -154,7 +162,17 @@ if $ROOT/ngwaf count production 'tag:XSS' 1 >"$TEST_TMP/out" 2>"$TEST_TMP/http-e
   exit 1
 fi
 grep -F 'Fastly API returned HTTP 503' "$TEST_TMP/http-err" >/dev/null
+grep -F 'Fastly or an upstream service returned a server error' "$TEST_TMP/http-err" >/dev/null
+grep -F 'response body:' "$TEST_TMP/http-err" >/dev/null
 grep -F 'upstream unavailable' "$TEST_TMP/http-err" >/dev/null
+
+export NGWAF_TEST_CURL_MODE=auth_error
+if $ROOT/ngwaf count production 'tag:XSS' 1 >"$TEST_TMP/out" 2>"$TEST_TMP/auth-err"; then
+  printf 'count test: HTTP 401 unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -F 'Fastly API returned HTTP 401' "$TEST_TMP/auth-err" >/dev/null
+grep -F 'token authentication failed' "$TEST_TMP/auth-err" >/dev/null
 
 export NGWAF_TEST_CURL_MODE=success
 export NGWAF_DEBUG=1

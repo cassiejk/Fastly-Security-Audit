@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to package, for example v24.1
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package Release Assets
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Verify Bash runtime
+        run: |
+          echo "bash path: $(command -v bash)"
+          bash --version
+          bash -c 'source ./lib/runtime.sh; ngwaf_require_bash_runtime github-actions'
+
+      - name: Run checks
+        run: ./scripts/check
+
+      - name: Package release assets
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          ./scripts/package-release --tag "$tag" --dist dist
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          gh release upload "$tag" \
+            dist/fastly-audit.tar.gz \
+            dist/fastly-audit.tar.gz.sha256 \
+            dist/fastly-audit-installer.sh \
+            --clobber

@@ -10,6 +10,15 @@ while [[ -h "$_ngwaf_source" ]]; do
 done
 _ngwaf_root="$(cd -P "$(dirname "$_ngwaf_source")" >/dev/null 2>&1 && pwd)"
 
+[[ -r "$_ngwaf_root/lib/runtime.sh" ]] || {
+  printf 'ngwaf: missing module: %s\n' \
+    "$_ngwaf_root/lib/runtime.sh" >&2
+  exit 1
+}
+# shellcheck source=lib/runtime.sh
+source "$_ngwaf_root/lib/runtime.sh"
+ngwaf_require_bash_runtime ngwaf
+
 [[ -x "$_ngwaf_root/fastly-audit" ]] || {
   printf 'ngwaf: missing executable: %s\n' \
     "$_ngwaf_root/fastly-audit" >&2

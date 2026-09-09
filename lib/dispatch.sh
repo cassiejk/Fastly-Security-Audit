@@ -7,7 +7,7 @@ dispatch_preflight() {
   local command="${1:-help}"
 
   case "$command" in
-    help|-h|--help|version|doctor)
+    help|-h|--help|version|doctor|setup)
       ;;
     diff)
       require jq
@@ -19,7 +19,7 @@ dispatch_preflight() {
   esac
 
   case "$command" in
-    help|-h|--help|version|doctor|diff)
+    help|-h|--help|version|doctor|setup|diff)
       ;;
     *)
       [[ -n "${FASTLY_API_TOKEN:-}" ]] || die 'FASTLY_API_TOKEN is not set'
@@ -27,7 +27,7 @@ dispatch_preflight() {
   esac
 
   case "$command" in
-    help|-h|--help|version|whoami|use|doctor|diff)
+    help|-h|--help|version|whoami|use|doctor|setup|diff)
       ;;
     *)
       confirm_customer_scope
@@ -44,6 +44,7 @@ dispatch_flat() {
   case "$command" in
     version) cmd_version "$@" ;;
     doctor) cmd_doctor "$@" ;;
+    setup) cmd_setup "$@" ;;
     whoami) cmd_whoami "$@" ;;
     use) cmd_use "$@" ;;
     customer) cmd_customer "$@" ;;
@@ -150,6 +151,7 @@ dispatch_customer_namespace() {
 
   case "$subcommand" in
     show) dispatch_flat customer "$@" ;;
+    setup) dispatch_flat setup "$@" ;;
     use) dispatch_flat use "$@" ;;
     whoami) dispatch_flat whoami "$@" ;;
     help|-h|--help) customer_namespace_usage ;;

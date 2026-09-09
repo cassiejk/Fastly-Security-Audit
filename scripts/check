@@ -2,35 +2,73 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
+# shellcheck disable=SC1091
+source "$ROOT/lib/runtime.sh"
+ngwaf_require_bash_runtime scripts/check
+
+printf 'Bash runtime...\n'
+printf '  %s\n' "$(ngwaf_current_bash_executable)"
+"$BASH" --version | sed -n '1p'
+
 printf 'Syntax checks...\n'
 while IFS= read -r file; do
-  bash -n "$file"
-done < <(find "$ROOT" -type f \( -name 'fastly-audit' -o -name 'ngwaf' -o -name 'ngwaf-update' -o -name '*.sh' \) -print | sort)
+  "$BASH" -n "$file"
+done < <(
+  find "$ROOT" -type f \
+    \( \
+      -name 'fastly-audit' \
+      -o -name 'ngwaf' \
+      -o -name 'ngwaf-update' \
+      -o -name '*.sh' \
+      -o -path "$ROOT/scripts/*" \
+    \) \
+    -print |
+  sort
+)
 
 if command -v shellcheck >/dev/null 2>&1; then
   printf 'ShellCheck...\n'
-  shellcheck "$ROOT/fastly-audit" "$ROOT/ngwaf" "$ROOT/ngwaf-update" "$ROOT"/lib/*.sh "$ROOT"/customer/*.sh
+  shellcheck \
+    "$ROOT/fastly-audit" \
+    "$ROOT/ngwaf" \
+    "$ROOT/ngwaf-update" \
+    "$ROOT/install.sh" \
+    "$ROOT/scripts/check" \
+    "$ROOT/scripts/package-release" \
+    "$ROOT"/lib/*.sh \
+    "$ROOT"/customer/*.sh
 else
   printf 'ShellCheck not installed; skipped.\n'
 fi
 
+if command -v ruby >/dev/null 2>&1; then
+  printf 'Workflow YAML syntax...\n'
+  ruby -ryaml -e 'ARGV.each { |path| YAML.load_file(path) }' "$ROOT"/.github/workflows/*.yml
+else
+  printf 'Ruby not installed; workflow YAML syntax check skipped.\n'
+fi
+
 printf 'CLI smoke tests...\n'
-[[ "$($ROOT/fastly-audit version)" == 'fastly-audit 24.1' ]]
-[[ "$($ROOT/ngwaf version)" == 'ngwaf 24.1' ]]
-$ROOT/fastly-audit help >/dev/null
-$ROOT/ngwaf help >/dev/null
+[[ "$("$ROOT/fastly-audit" version)" == 'fastly-audit 24.1' ]]
+[[ "$("$ROOT/ngwaf" version)" == 'ngwaf 24.1' ]]
+"$ROOT/fastly-audit" help >/dev/null
+"$ROOT/ngwaf" help >/dev/null
 
 printf 'Behavior tests...\n'
-$ROOT/tests/count.sh
-$ROOT/tests/metrics.sh
-$ROOT/tests/doctor.sh
-$ROOT/tests/rules.sh
-$ROOT/tests/requests.sh
-$ROOT/tests/rule-audit.sh
-$ROOT/tests/snapshots.sh
-$ROOT/tests/namespaces.sh
-$ROOT/tests/security.sh
-$ROOT/tests/json-transport.sh
-$ROOT/tests/updater.sh
+"$ROOT/tests/runtime.sh"
+"$ROOT/tests/setup.sh"
+"$ROOT/tests/package-release.sh"
+"$ROOT/tests/install.sh"
+"$ROOT/tests/count.sh"
+"$ROOT/tests/metrics.sh"
+"$ROOT/tests/doctor.sh"
+"$ROOT/tests/rules.sh"
+"$ROOT/tests/requests.sh"
+"$ROOT/tests/rule-audit.sh"
+"$ROOT/tests/snapshots.sh"
+"$ROOT/tests/namespaces.sh"
+"$ROOT/tests/security.sh"
+"$ROOT/tests/json-transport.sh"
+"$ROOT/tests/updater.sh"
 
 printf 'OK\n'

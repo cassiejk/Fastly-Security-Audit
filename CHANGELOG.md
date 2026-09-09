@@ -3,6 +3,16 @@
 All notable changes to `fastly-audit` and its `ngwaf` compatibility command are
 documented here.
 
+## Unreleased
+
+### Added
+
+- Added GitHub Release packaging for `fastly-audit.tar.gz`, checksum, and
+  `fastly-audit-installer.sh` assets.
+- Added a standalone Release installer that downloads, verifies, and installs
+  the CLI package from the latest or a specified GitHub Release.
+- Added release packaging and release-install regression coverage.
+
 
 ## [24.1] - 2026-09-04
 

@@ -32,6 +32,13 @@ urlencode() {
   jq -rn --arg v "$1" '$v | @uri'
 }
 
+# Centralize the debug flag so helper functions all agree on what "debug mode"
+# means. Debug output must stay sanitized: paths and query parameters are useful,
+# but authentication headers should never be printed.
+debug_enabled() {
+  [[ "${NGWAF_DEBUG:-0}" == "1" ]]
+}
+
 color_enabled() {
   [[ -z "${NO_COLOR+x}" ]] || return 1
 
@@ -180,8 +187,11 @@ progress_stop() {
   fi
 }
 
+# Print request metadata only when the caller opts in with NGWAF_DEBUG=1.
+# Curl receives the token header separately, and this function intentionally
+# ignores headers so debug logs are safe to share.
 debug_get_request() {
-  [[ "${NGWAF_DEBUG:-0}" == "1" ]] || return 0
+  debug_enabled || return 0
 
   local path="$1"
   shift
@@ -211,36 +221,168 @@ validate_http_settings() {
     die 'NGWAF_CURL_RETRY_MAX_TIME must be a non-negative integer'
 }
 
+# Common curl exit codes are much easier to troubleshoot when translated from
+# numbers into likely local-network, proxy, TLS, or timeout causes.
+print_curl_failure_hint() {
+  local rc="$1"
+
+  case "$rc" in
+    6)
+      printf '%s: hint: DNS lookup failed; check network, VPN, proxy, or api.fastly.com resolution\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+    7)
+      printf '%s: hint: connection failed; check network, firewall, proxy, or VPN access to api.fastly.com\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+    28)
+      printf '%s: hint: request exceeded the configured timeout policy; try again later or raise NGWAF_CURL_MAX_TIME\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+    35|51|58|60|77)
+      printf '%s: hint: TLS/certificate validation failed; check local certificates or corporate proxy settings\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+    52|56)
+      printf '%s: hint: connection was interrupted while reading the response; retrying later may succeed\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+    130)
+      printf '%s: hint: request was interrupted locally\n' "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+    *)
+      printf '%s: hint: curl reported a transport error before an HTTP response was available\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+  esac
+}
+
+# HTTP status codes tell us whether troubleshooting should focus on request
+# shape, token permissions, resource identity, rate limits, or Fastly-side
+# availability. Keep this generic so every API-backed command can reuse it.
+print_http_status_hint() {
+  local code="$1"
+
+  case "$code" in
+    400)
+      printf '%s: hint: Fastly rejected the request; check command options, date ranges, and search syntax\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+    401)
+      printf '%s: hint: token authentication failed; check FASTLY_API_TOKEN or run %s doctor\n' \
+        "${PROGRAM_NAME:-ngwaf}" "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+    403)
+      printf '%s: hint: token lacks permission for this resource or customer; run %s doctor to verify scope\n' \
+        "${PROGRAM_NAME:-ngwaf}" "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+    404)
+      printf '%s: hint: Fastly could not find this endpoint or resource; check the selected customer and resource ID\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+    408|409|425|429)
+      printf '%s: hint: Fastly asked the client to slow down or retry; try again after a short wait\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+    5??)
+      printf '%s: hint: Fastly or an upstream service returned a server error; retry later or inspect status pages\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+    *)
+      printf '%s: hint: inspect the response body below for Fastly-specific error details\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      ;;
+  esac
+}
+
+# Give every failed API request the same next steps. This keeps normal output
+# short while pointing users toward the two best troubleshooting tools.
+print_troubleshooting_hint() {
+  if debug_enabled; then
+    printf '%s: debug: request path and query parameters were printed above\n' \
+      "${PROGRAM_NAME:-ngwaf}" >&2
+  else
+    printf '%s: tip: rerun with NGWAF_DEBUG=1 to show sanitized request details\n' \
+      "${PROGRAM_NAME:-ngwaf}" >&2
+  fi
+
+  printf '%s: tip: run %s doctor to check dependencies, token access, and selected customer scope\n' \
+    "${PROGRAM_NAME:-ngwaf}" "${PROGRAM_NAME:-ngwaf}" >&2
+}
+
+# Show a response body without making callers know whether Fastly returned JSON.
+# Non-JSON previews stay debug-only for 2xx responses because they may be large
+# or surprising, but explicit HTTP errors keep the historical behavior of showing
+# the server response.
+print_response_body() {
+  local file="$1"
+
+  if [[ ! -s "$file" ]]; then
+    printf '%s: response body was empty\n' "${PROGRAM_NAME:-ngwaf}" >&2
+    return
+  fi
+
+  jq . "$file" >&2 2>/dev/null || cat "$file" >&2
+}
+
+print_invalid_json_preview() {
+  local file="$1"
+
+  if [[ ! -s "$file" ]]; then
+    printf '%s: response body was empty\n' "${PROGRAM_NAME:-ngwaf}" >&2
+    return
+  fi
+
+  if debug_enabled; then
+    printf '%s: debug: response preview follows\n' "${PROGRAM_NAME:-ngwaf}" >&2
+    sed -n '1,20p' "$file" >&2
+  else
+    printf '%s: response body was not valid JSON; set NGWAF_DEBUG=1 to print a short preview\n' \
+      "${PROGRAM_NAME:-ngwaf}" >&2
+  fi
+}
+
 print_curl_failure() {
   local rc="$1"
   local path="$2"
   local errfile="$3"
+  local elapsed="${4:-}"
+  local elapsed_text=""
+
+  [[ -n "$elapsed" ]] && elapsed_text=" after ${elapsed}s"
 
   case "$rc" in
     28)
-      printf '%s: Fastly API request timed out: GET %s\n' "${PROGRAM_NAME:-ngwaf}" "$path" >&2
+      printf '%s: Fastly API request timed out%s: GET %s\n' \
+        "${PROGRAM_NAME:-ngwaf}" "$elapsed_text" "$path" >&2
       printf '%s: timeout limits: connect=%ss, transfer=%ss, retry-window=%ss\n' \
         "${PROGRAM_NAME:-ngwaf}" "$CURL_CONNECT_TIMEOUT" "$CURL_MAX_TIME" "$CURL_RETRY_MAX_TIME" >&2
       ;;
     130)
-      printf '%s: Fastly API request interrupted: GET %s\n' "${PROGRAM_NAME:-ngwaf}" "$path" >&2
+      printf '%s: Fastly API request interrupted%s: GET %s\n' \
+        "${PROGRAM_NAME:-ngwaf}" "$elapsed_text" "$path" >&2
       ;;
     *)
-      printf '%s: Fastly API transport failed (curl exit %s): GET %s\n' \
-        "${PROGRAM_NAME:-ngwaf}" "$rc" "$path" >&2
+      printf '%s: Fastly API transport failed%s (curl exit %s): GET %s\n' \
+        "${PROGRAM_NAME:-ngwaf}" "$elapsed_text" "$rc" "$path" >&2
       ;;
   esac
 
   if [[ -s "$errfile" ]]; then
     sed "s/^/${PROGRAM_NAME:-ngwaf}: curl: /" "$errfile" >&2
   fi
+
+  print_curl_failure_hint "$rc"
+  print_troubleshooting_hint
 }
 
+# Perform a GET request and return parsed JSON on stdout. All progress and
+# diagnostics stay on stderr so callers can safely pipe stdout into jq.
 get() {
   local path="$1"
   shift
 
-  local tmp err_tmp code curl_rc=0
+  local tmp err_tmp code curl_rc=0 started_at elapsed elapsed_text
   # Keep the array non-empty for macOS Bash 3.2 with `set -u`. Expanding an
   # empty array under nounset exits on that shell. curl accepts --retry 0, so
   # including the base option unconditionally is safe.
@@ -259,6 +401,7 @@ get() {
   fi
 
   progress_start "${NGWAF_PROGRESS_LABEL:-querying Fastly API: $path}"
+  started_at="$(date +%s)"
 
   if code="$(
     curl -sS -G \
@@ -277,10 +420,12 @@ get() {
   else
     curl_rc=$?
   fi
+  elapsed=$(( $(date +%s) - started_at ))
+  elapsed_text=" after ${elapsed}s"
 
   if (( curl_rc != 0 )); then
     progress_stop error
-    print_curl_failure "$curl_rc" "$path" "$err_tmp"
+    print_curl_failure "$curl_rc" "$path" "$err_tmp" "$elapsed"
     rm -f "$tmp" "$err_tmp"
     exit 1
   fi
@@ -289,11 +434,10 @@ get() {
     2*)
       progress_stop success
       if ! jq -e . "$tmp" >/dev/null 2>&1; then
-        printf '%s: Fastly API returned invalid JSON: GET %s\n' "${PROGRAM_NAME:-ngwaf}" "$path" >&2
-        if [[ "${NGWAF_DEBUG:-0}" == "1" ]]; then
-          printf '%s: debug: response preview follows\n' "${PROGRAM_NAME:-ngwaf}" >&2
-          sed -n '1,20p' "$tmp" >&2
-        fi
+        printf '%s: Fastly API returned invalid JSON%s: GET %s\n' \
+          "${PROGRAM_NAME:-ngwaf}" "$elapsed_text" "$path" >&2
+        print_invalid_json_preview "$tmp"
+        print_troubleshooting_hint
         rm -f "$tmp" "$err_tmp"
         exit 1
       fi
@@ -301,8 +445,12 @@ get() {
       ;;
     *)
       progress_stop error
-      printf '%s: Fastly API returned HTTP %s: GET %s\n' "${PROGRAM_NAME:-ngwaf}" "$code" "$path" >&2
-      jq . "$tmp" >&2 2>/dev/null || cat "$tmp" >&2
+      printf '%s: Fastly API returned HTTP %s%s: GET %s\n' \
+        "${PROGRAM_NAME:-ngwaf}" "$code" "$elapsed_text" "$path" >&2
+      print_http_status_hint "$code"
+      printf '%s: response body:\n' "${PROGRAM_NAME:-ngwaf}" >&2
+      print_response_body "$tmp"
+      print_troubleshooting_hint
       rm -f "$tmp" "$err_tmp"
       exit 1
       ;;
@@ -324,7 +472,7 @@ http_get_to_file() {
   local outfile="$2"
   shift 2
 
-  local code err_tmp curl_rc=0
+  local code err_tmp curl_rc=0 started_at elapsed
   # See get(): the base option prevents an empty-array nounset failure on the
   # Bash 3.2 version included with macOS.
   local -a retry_args=(--retry "$CURL_RETRIES")
@@ -341,6 +489,7 @@ http_get_to_file() {
   fi
 
   progress_start "${NGWAF_PROGRESS_LABEL:-querying Fastly API: $path}"
+  started_at="$(date +%s)"
 
   if code="$(
     curl -sS -G \
@@ -359,10 +508,11 @@ http_get_to_file() {
   else
     curl_rc=$?
   fi
+  elapsed=$(( $(date +%s) - started_at ))
 
   if (( curl_rc != 0 )); then
     progress_stop error
-    print_curl_failure "$curl_rc" "$path" "$err_tmp"
+    print_curl_failure "$curl_rc" "$path" "$err_tmp" "$elapsed"
     rm -f "$err_tmp"
     printf '000\n'
     return

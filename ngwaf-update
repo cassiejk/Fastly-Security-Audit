@@ -1,10 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BIN_DIR="$HOME/bin"
+_ngwaf_update_source="${BASH_SOURCE[0]}"
+while [[ -h "$_ngwaf_update_source" ]]; do
+  _ngwaf_update_dir="$(cd -P "$(dirname "$_ngwaf_update_source")" >/dev/null 2>&1 && pwd)"
+  _ngwaf_update_source="$(readlink "$_ngwaf_update_source")"
+  [[ "$_ngwaf_update_source" == /* ]] ||
+    _ngwaf_update_source="$_ngwaf_update_dir/$_ngwaf_update_source"
+done
+NGWAF_UPDATE_ROOT="$(cd -P "$(dirname "$_ngwaf_update_source")" >/dev/null 2>&1 && pwd)"
+unset _ngwaf_update_source _ngwaf_update_dir
+
+[[ -r "$NGWAF_UPDATE_ROOT/lib/runtime.sh" ]] || {
+  printf 'ngwaf-update: missing module: %s\n' \
+    "$NGWAF_UPDATE_ROOT/lib/runtime.sh" >&2
+  exit 1
+}
+# shellcheck source=lib/runtime.sh
+source "$NGWAF_UPDATE_ROOT/lib/runtime.sh"
+ngwaf_require_bash_runtime ngwaf-update
+
+BIN_DIR="${FASTLY_AUDIT_BIN_DIR:-$HOME/bin}"
 PRIMARY_TARGET="$BIN_DIR/fastly-audit"
 LEGACY_TARGET="$BIN_DIR/ngwaf"
-INSTALL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/fastly-audit"
+UPDATER_TARGET="$BIN_DIR/ngwaf-update"
+INSTALL_ROOT="${FASTLY_AUDIT_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/fastly-audit}"
 
 candidate="${1:-.}"
 
@@ -22,6 +42,7 @@ fi
 
 [[ -f "$SOURCE_ROOT/fastly-audit" \
   && -f "$SOURCE_ROOT/ngwaf" \
+  && -f "$SOURCE_ROOT/lib/runtime.sh" \
   && -d "$SOURCE_ROOT/lib" \
   && -d "$SOURCE_ROOT/customer" ]] || {
   printf 'ngwaf-update: %s is not a modular fastly-audit package\n' \
@@ -31,7 +52,7 @@ fi
 
 # Validate every Bash source before touching the current installation.
 while IFS= read -r file; do
-  bash -n "$file"
+  "$BASH" -n "$file"
 done < <(
   find "$SOURCE_ROOT" -type f \
     \( \
@@ -57,6 +78,8 @@ mkdir -p "$stage/lib" "$stage/customer"
 install -m 755 "$SOURCE_ROOT/fastly-audit" "$stage/fastly-audit"
 
 install -m 755 "$SOURCE_ROOT/ngwaf" "$stage/ngwaf"
+
+install -m 755 "$SOURCE_ROOT/ngwaf-update" "$stage/ngwaf-update"
 
 cp -R "$SOURCE_ROOT/lib/." "$stage/lib/"
 cp -R "$SOURCE_ROOT/customer/." "$stage/customer/"
@@ -98,6 +121,10 @@ replace_command_link \
   "$LEGACY_TARGET" \
   "$INSTALL_ROOT/ngwaf"
 
+replace_command_link \
+  "$UPDATER_TARGET" \
+  "$INSTALL_ROOT/ngwaf-update"
+
 printf 'Installed package: %s -> %s\n' \
   "$SOURCE_ROOT" "$INSTALL_ROOT"
 
@@ -107,5 +134,25 @@ printf 'Primary command: %s -> %s\n' \
 printf 'Compatibility command: %s -> %s\n' \
   "$LEGACY_TARGET" "$INSTALL_ROOT/ngwaf"
 
+printf 'Updater command: %s -> %s\n' \
+  "$UPDATER_TARGET" "$INSTALL_ROOT/ngwaf-update"
+
+case ":$PATH:" in
+  *":$BIN_DIR:"*)
+    ;;
+  *)
+    printf 'PATH note: add %s to PATH if fastly-audit or ngwaf is not found.\n' \
+      "$BIN_DIR"
+    ;;
+esac
+
+printf 'Required runtime: Bash %s or newer via /usr/bin/env bash\n' \
+  "$NGWAF_MIN_BASH_VERSION"
+
 "$PRIMARY_TARGET" version
 "$LEGACY_TARGET" version
+
+printf '\nNext setup check:\n'
+printf '  export FASTLY_API_TOKEN=YOUR_FASTLY_TOKEN\n'
+printf '  fastly-audit setup --customer-id CUSTOMER_ID\n'
+printf '  fastly-audit doctor --verbose\n'

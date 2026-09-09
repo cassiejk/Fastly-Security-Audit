@@ -2,6 +2,15 @@
 # shellcheck shell=bash
 # Shared helpers for shell-based behavior tests.
 
+TEST_HELPERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# shellcheck source=../lib/runtime.sh
+source "$TEST_HELPERS_DIR/../lib/runtime.sh"
+
+_test_entry="${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
+ngwaf_require_bash_runtime "$(basename "$_test_entry")"
+unset _test_entry
+
 test_cleanup() {
   local rc=$?
 
@@ -13,7 +22,7 @@ test_cleanup() {
 
 test_init() {
   # shellcheck disable=SC2034
-  ROOT="$(cd "$(dirname "${BASH_SOURCE[1]}")/.." && pwd -P)"
+  ROOT="$(cd "$TEST_HELPERS_DIR/.." && pwd -P)"
   # shellcheck disable=SC2034
   TEST_TMP="$(mktemp -d)"
 

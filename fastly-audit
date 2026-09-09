@@ -30,9 +30,19 @@ done
 NGWAF_ROOT="$(cd -P "$(dirname "$_ngwaf_source")" >/dev/null 2>&1 && pwd)"
 unset _ngwaf_source _ngwaf_dir
 
+[[ -r "$NGWAF_ROOT/lib/runtime.sh" ]] || {
+  printf '%s: missing module: %s\n' \
+    "$PROGRAM_NAME" "$NGWAF_ROOT/lib/runtime.sh" >&2
+  exit 1
+}
+# shellcheck source=lib/runtime.sh
+source "$NGWAF_ROOT/lib/runtime.sh"
+ngwaf_require_bash_runtime "$PROGRAM_NAME"
+
 for _ngwaf_module in \
   lib/core.sh \
   lib/doctor.sh \
+  lib/setup.sh \
   lib/account.sh \
   lib/services.sh \
   lib/security.sh \
