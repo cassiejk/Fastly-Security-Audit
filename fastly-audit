@@ -51,6 +51,7 @@ for _ngwaf_module in \
   lib/metrics.sh \
   lib/request_search.sh \
   lib/rule_audit.sh \
+  lib/template_audit.sh \
   lib/attack_analysis.sh \
   lib/snapshots.sh \
   customer/costco.sh \

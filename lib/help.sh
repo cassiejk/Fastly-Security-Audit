@@ -52,6 +52,7 @@ Recent request search (1-7 days):
   ngwaf count <workspace> '<Fastly Search query>' [days]
   ngwaf requests <workspace> '<Fastly Search query>' [days] [--limit N] [--format auto|json|csv] [--output FILE]
   ngwaf rule-audit <workspace> <rule_id> [<rule_id> ...] [--days N] [--signals CSV] [--json]
+  ngwaf template-audit <workspace> <template> [days] [--json|--format human|json]
   ngwaf signal-count <workspace> <signal> [days]
 
 Examples:
@@ -98,6 +99,7 @@ Examples:
   ngwaf count production 'ruleid:6047e66d33e0b901e666e424' 7
   ngwaf requests production 'ruleid:6047e66d33e0b901e666e424 tag:SQLI' 7 --limit 25
   ngwaf rule-audit production 6047e66d33e0b901e666e424 --days 7 --json
+  ngwaf template-audit production "Registration Attempt" --json
 
   # Snapshots use mode 0600 and redact list entries unless explicitly included:
   ngwaf snapshot Production
@@ -187,6 +189,11 @@ Notes:
     calculates percentages. Signal cohorts can overlap and must not be summed
     as unique requests. Review indicators are factual prompts for human review,
     not automatic policy-remediation claims.
+  - template-audit correlates templated_signal tagging rules, associated signal
+    thresholds, and retained signal activity into one logical control audit.
+    It prefers stable signal/template identifiers, falls back to exact display
+    names, and fails on ambiguity instead of guessing. Threshold relationship
+    indicators are conservative review prompts, not remediation advice.
   - API calls show an interactive progress indicator on stderr. Set
     NGWAF_PROGRESS=never to disable it, or NGWAF_PROGRESS=always to force it.
     Set NGWAF_DEBUG=1 to show request paths and query parameters (never tokens).
@@ -237,6 +244,7 @@ Next-Gen WAF:
   fastly-audit ngwaf count <workspace> '<query>' [days]
   fastly-audit ngwaf requests <workspace> '<query>' [days] [--limit N] [--format auto|json|csv] [--output FILE]
   fastly-audit ngwaf rule-audit <workspace> <rule_id> [<rule_id> ...] [--days N] [--signals CSV] [--json]
+  fastly-audit ngwaf template-audit <workspace> <template> [days] [--json|--format human|json]
   fastly-audit ngwaf signal-count <workspace> <signal> [days]
   fastly-audit ngwaf overview [days] [--json]
   fastly-audit ngwaf timeseries <workspace> [days] [--json]
@@ -280,6 +288,7 @@ fastly-audit ngwaf — Next-Gen WAF inspection
   count <workspace> '<query>' [days]
   requests <workspace> '<query>' [days] [--limit N] [--format auto|json|csv] [--output FILE]
   rule-audit <workspace> <rule_id> [<rule_id> ...] [--days N] [--signals CSV] [--json]
+  template-audit <workspace> <template> [days] [--json|--format human|json]
   signal-count <workspace> <signal> [days]
   overview [days] [--json]
   timeseries <workspace> [days] [--json]

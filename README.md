@@ -36,6 +36,7 @@ ngwaf-helper/
 │   ├── metrics.sh         # timeseries and metric summaries
 │   ├── request_search.sh  # request-search counts and drill-down rows
 │   ├── rule_audit.sh      # rule configuration plus retained-match analysis
+│   ├── template_audit.sh  # templated signal control correlation
 │   ├── attack_analysis.sh # attack-profile and request-origin reports
 │   ├── snapshots.sh       # protected snapshots + local semantic diffs
 │   └── help.sh            # CLI help
@@ -49,6 +50,7 @@ ngwaf-helper/
     ├── count.sh
     ├── requests.sh
     ├── rule-audit.sh
+    ├── template-audit.sh
     ├── metrics.sh
     ├── doctor.sh
     ├── setup.sh
@@ -266,6 +268,7 @@ silently counted as disabled.
 | `overview`, `timeseries`, `metrics`, `attack-profile` | NGWAF timeseries API | Aggregated timeseries | Uses complete UTC days; `to` is exclusive; every requested metric must be present and numeric in every returned row. |
 | `count`, `signal-count`, `requests` | NGWAF request-search API | Retained searchable request records | Uses a rolling window ending five minutes before execution; `meta.total` may reflect sampled or mixed-storage records and is not raw traffic. `requests` returns a bounded set of actual rows separately from the total cohort size. |
 | `rule-audit` | NGWAF rule API plus request-search API | Rule configuration plus retained-search cohort counts | Retrieves live rule configuration, counts `ruleid:<id>` and selected `ruleid:<id> tag:<signal>` intersections over one shared rolling window, and emits deterministic review indicators without treating overlapping signal cohorts as additive. |
+| `template-audit` | NGWAF rules, signal thresholds, and request-search APIs | Templated signal configuration plus retained-search count | Correlates `templated_signal` tagging rules and signal thresholds into one logical control, counts retained `tag:<signal>` matches, and emits conservative review indicators without declaring remediation. |
 | `bot-stats` | Fastly Historical Stats | Daily service statistics | Bot metrics are sampled and scaled estimates; they are not directly comparable to unsampled `edge_requests`. |
 | `services`, `products`, `inventory` | Customer audit events plus service/product APIs | Observed inventory | The service set is audit-window-derived, not a guaranteed all-time inventory. |
 | `security summary` | Customer audit events, security-product enablement/configuration APIs, and NGWAF workspaces | Cross-product configuration inventory | Enabled does not prove traffic or enforcement; inconclusive probes remain unknown. |
@@ -371,6 +374,34 @@ the same 1-7 day limit and five-minute ingestion buffer as `count`. Signal
 cohorts can overlap and must not be summed as unique requests. Review
 indicators are deterministic observations for human review; they are not
 automatic remediation advice and do not assert that traffic is malicious.
+
+### Template Audit
+
+Correlate a templated NGWAF signal/control as one logical unit:
+
+```bash
+fastly-audit ngwaf template-audit production "Registration Attempt"
+fastly-audit ngwaf template-audit production "Registration Attempt" --json
+```
+
+The command inventories all matching `templated_signal` tagging rules,
+preserving both enabled and disabled rules, then correlates thresholds that
+consume the same signal. It reports the extracted method/path/host when those
+fields are present, threshold counts/windows/actions/durations, retained
+request-search matches for the signal, and a drill-down command using
+`fastly-audit ngwaf requests`.
+
+Template selection prefers stable signal/template identifiers where the API
+payload exposes them. If stable IDs are not available, it falls back to exact
+case-insensitive display-name matching. Ambiguous matches fail instead of being
+guessed.
+
+Review indicators are intentionally conservative. They flag observations such
+as disabled tagging rules, active thresholds without enabled tagging rules,
+enabled tagging rules without active thresholds, identical thresholds,
+duplicate tagging conditions, mixed actions/durations, and possible threshold
+overlap. They do not claim that a threshold is useless, redundant, or safe to
+remove.
 
 ## Installation
 
@@ -498,6 +529,7 @@ fastly-audit bot stats SERVICE_ID 30 --json
 fastly-audit bot rules Production --json
 fastly-audit ngwaf requests Production 'tag:SQLI' 7 --limit 25
 fastly-audit ngwaf rule-audit Production RULE_ID --days 7
+fastly-audit ngwaf template-audit Production "Registration Attempt"
 fastly-audit snapshot ngwaf Production --output before.json
 fastly-audit diff before.json after.json --check --json
 ```

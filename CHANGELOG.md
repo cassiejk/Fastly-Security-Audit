@@ -12,6 +12,9 @@ documented here.
 - Added a standalone Release installer that downloads, verifies, and installs
   the CLI package from the latest or a specified GitHub Release.
 - Added release packaging and release-install regression coverage.
+- Added `fastly-audit ngwaf template-audit` to correlate templated signal
+  tagging rules, thresholds, retained activity, and conservative review
+  indicators.
 
 
 ## [24.1] - 2026-09-04

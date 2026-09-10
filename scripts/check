@@ -65,6 +65,7 @@ printf 'Behavior tests...\n'
 "$ROOT/tests/rules.sh"
 "$ROOT/tests/requests.sh"
 "$ROOT/tests/rule-audit.sh"
+"$ROOT/tests/template-audit.sh"
 "$ROOT/tests/snapshots.sh"
 "$ROOT/tests/namespaces.sh"
 "$ROOT/tests/security.sh"

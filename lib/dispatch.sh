@@ -39,6 +39,11 @@ dispatch_flat() {
   local command="${1:-help}"
   (( $# == 0 )) || shift
 
+  if [[ "$command" == "template-audit" && ( "${1:-}" == "--help" || "${1:-}" == "-h" ) ]]; then
+    cmd_template_audit "$@"
+    return
+  fi
+
   dispatch_preflight "$command"
 
   case "$command" in
@@ -71,6 +76,7 @@ dispatch_flat() {
     count) cmd_count "$@" ;;
     requests) cmd_requests "$@" ;;
     rule-audit) cmd_rule_audit "$@" ;;
+    template-audit) cmd_template_audit "$@" ;;
     signal-count) cmd_signal_count "$@" ;;
     snapshot) cmd_snapshot "$@" ;;
     diff) cmd_diff "$@" ;;
@@ -92,7 +98,7 @@ dispatch_ngwaf_namespace() {
 
   case "$subcommand" in
     help|-h|--help) ngwaf_namespace_usage ;;
-    workspaces|workspace|posture|rule|rules|account-rules|thresholds|lists|bot-rules|count|requests|rule-audit|signal-count|overview|timeseries|metrics|attack-profile|attack-origins)
+    workspaces|workspace|posture|rule|rules|account-rules|thresholds|lists|bot-rules|count|requests|rule-audit|template-audit|signal-count|overview|timeseries|metrics|attack-profile|attack-origins)
       dispatch_flat "$subcommand" "$@"
       ;;
     snapshot) dispatch_flat snapshot "$@" ;;
