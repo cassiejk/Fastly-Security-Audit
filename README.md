@@ -381,6 +381,7 @@ Correlate a templated NGWAF signal/control as one logical unit:
 
 ```bash
 fastly-audit ngwaf template-audit production "Registration Attempt"
+fastly-audit ngwaf template-audit production REGATTEMPT
 fastly-audit ngwaf template-audit production "Registration Attempt" --json
 ```
 
@@ -391,10 +392,11 @@ fields are present, threshold counts/windows/actions/durations, retained
 request-search matches for the signal, and a drill-down command using
 `fastly-audit ngwaf requests`.
 
-Template selection prefers stable signal/template identifiers where the API
-payload exposes them. If stable IDs are not available, it falls back to exact
-case-insensitive display-name matching. Ambiguous matches fail instead of being
-guessed.
+Template selection prefers exact canonical signal/template identifiers such as
+`REGATTEMPT`, then exact display names from API metadata. For known UI/API name
+mismatches, supported exact UI labels such as `Registration Attempt` and
+`Registration Attempts` resolve to the canonical signal. Partial or fuzzy names
+are not guessed, and ambiguous matches fail closed.
 
 Review indicators are intentionally conservative. They flag observations such
 as disabled tagging rules, active thresholds without enabled tagging rules,

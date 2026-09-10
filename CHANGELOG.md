@@ -15,6 +15,9 @@ documented here.
 - Added `fastly-audit ngwaf template-audit` to correlate templated signal
   tagging rules, thresholds, retained activity, and conservative review
   indicators.
+- Added exact friendly-name resolution for `template-audit`, including
+  `Registration Attempt` and `Registration Attempts` resolving to `REGATTEMPT`
+  while preserving canonical signal-name lookups.
 
 
 ## [24.1] - 2026-09-04

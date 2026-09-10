@@ -5,6 +5,103 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/helpers.sh"
 test_init
 
+# shellcheck source=../lib/core.sh
+source "$ROOT/lib/core.sh"
+# shellcheck source=../lib/template_audit.sh
+source "$ROOT/lib/template_audit.sh"
+
+resolver_candidates='[
+  {
+    "rule_id": "rule-registration",
+    "enabled": true,
+    "type": "templated_signal",
+    "name": "REGATTEMPT",
+    "template_id": "tmpl-registration",
+    "template_name": null,
+    "signal_id": null,
+    "signal_name": "REGATTEMPT",
+    "correlation_key": "template_id:tmpl-registration",
+    "selectors": ["rule-registration", "tmpl-registration", "REGATTEMPT"]
+  }
+]'
+
+assert_template_resolves() {
+  local selector="$1"
+  local expected_strategy="$2"
+  local result
+
+  result="$(template_audit_select_template_json "$resolver_candidates" "$selector")"
+  jq -e \
+    --arg selector "$selector" \
+    --arg expected_strategy "$expected_strategy" '
+      .status == "selected"
+      and .requested_template == $selector
+      and .template.canonical_signal == "REGATTEMPT"
+      and .template.signal_name == "REGATTEMPT"
+      and .template.match_strategy == $expected_strategy
+    ' >/dev/null <<<"$result"
+}
+
+assert_template_not_found() {
+  local selector="$1"
+  local result
+
+  result="$(template_audit_select_template_json "$resolver_candidates" "$selector")"
+  jq -e \
+    --arg selector "$selector" '
+      .status == "not_found"
+      and .requested_template == $selector
+    ' >/dev/null <<<"$result"
+}
+
+assert_template_resolves REGATTEMPT canonical_exact
+assert_template_resolves regattempt canonical_exact_case_insensitive
+assert_template_resolves "Registration Attempt" friendly_name_alias
+assert_template_resolves "Registration Attempts" friendly_name_alias
+assert_template_not_found "Password Reset"
+assert_template_not_found Registration
+
+alias_result="$(template_audit_select_template_json "$resolver_candidates" "Registration Attempt")"
+jq -e '
+  .template.alias == "Registration Attempt"
+  and .template.alias_canonical == "REGATTEMPT"
+  and .template.resolver.input == "Registration Attempt"
+  and .template.resolver.canonical_signal == "REGATTEMPT"
+' >/dev/null <<<"$alias_result"
+
+ambiguous_candidates='[
+  {
+    "rule_id": "rule-a",
+    "enabled": true,
+    "type": "templated_signal",
+    "name": "Shared Friendly",
+    "template_id": "tmpl-one",
+    "template_name": "Shared Friendly",
+    "signal_id": "SIG_A",
+    "signal_name": "SIG_A",
+    "correlation_key": "signal_id:SIG_A",
+    "selectors": ["rule-a", "tmpl-one", "SIG_A", "Shared Friendly"]
+  },
+  {
+    "rule_id": "rule-b",
+    "enabled": true,
+    "type": "templated_signal",
+    "name": "Shared Friendly",
+    "template_id": "tmpl-two",
+    "template_name": "Shared Friendly",
+    "signal_id": "SIG_B",
+    "signal_name": "SIG_B",
+    "correlation_key": "signal_id:SIG_B",
+    "selectors": ["rule-b", "tmpl-two", "SIG_B", "Shared Friendly"]
+  }
+]'
+ambiguous_result="$(template_audit_select_template_json "$ambiguous_candidates" "Shared Friendly")"
+jq -e '
+  .status == "ambiguous"
+  and .match_strategy == "display_name_exact"
+  and (.matches | length) == 2
+' >/dev/null <<<"$ambiguous_result"
+
 mkdir -p "$TEST_TMP/bin"
 
 cat >"$TEST_TMP/bin/curl" <<'FAKE_CURL'
@@ -38,18 +135,18 @@ write_rules() {
     ambiguous)
       cat >"$outfile" <<'JSON'
 {"meta":{"total":2},"data":[
-  {"id":"rule-a","type":"templated_signal","enabled":true,"template":{"id":"tmpl-one","name":"Registration Attempt"},"signal":{"id":"REG_A","name":"Registration Attempt"},"conditions":[{"field":"method","operator":"equals","value":"POST"},{"field":"path","operator":"equals","value":"/register"}],"actions":[{"type":"add_signal","signal":{"id":"REG_A","name":"Registration Attempt"}}]},
-  {"id":"rule-b","type":"templated_signal","enabled":true,"template":{"id":"tmpl-two","name":"Registration Attempt"},"signal":{"id":"REG_B","name":"Registration Attempt"},"conditions":[{"field":"method","operator":"equals","value":"POST"},{"field":"path","operator":"equals","value":"/signup"}],"actions":[{"type":"add_signal","signal":{"id":"REG_B","name":"Registration Attempt"}}]}
+  {"id":"rule-a","type":"templated_signal","enabled":true,"template":{"id":"tmpl-one","name":"Shared Friendly"},"signal":{"id":"SIG_A","name":"SIG_A"},"conditions":[{"field":"method","operator":"equals","value":"POST"},{"field":"path","operator":"equals","value":"/register"}],"actions":[{"type":"add_signal","signal":{"id":"SIG_A","name":"SIG_A"}}]},
+  {"id":"rule-b","type":"templated_signal","enabled":true,"template":{"id":"tmpl-two","name":"Shared Friendly"},"signal":{"id":"SIG_B","name":"SIG_B"},"conditions":[{"field":"method","operator":"equals","value":"POST"},{"field":"path","operator":"equals","value":"/signup"}],"actions":[{"type":"add_signal","signal":{"id":"SIG_B","name":"SIG_B"}}]}
 ]}
 JSON
       ;;
     *)
       cat >"$outfile" <<'JSON'
 {"meta":{"total":4},"data":[
-  {"id":"rule-enabled","type":"templated_signal","enabled":true,"description":"Registration Attempt submit route","template":{"id":"tmpl-registration","name":"Registration Attempt"},"signal":{"id":"REGISTRATION_ATTEMPT","name":"Registration Attempt"},"conditions":[{"field":"method","operator":"equals","value":"POST"},{"field":"path","operator":"equals","value":"/register/submit"}],"actions":[{"type":"add_signal","signal":{"id":"REGISTRATION_ATTEMPT","name":"Registration Attempt"}}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-09-01T00:00:00Z"},
-  {"id":"rule-disabled","type":"templated_signal","enabled":false,"description":"Registration Attempt legacy route","template":{"id":"tmpl-registration","name":"Registration Attempt"},"signal":{"id":"REGISTRATION_ATTEMPT","name":"Registration Attempt"},"conditions":[{"field":"method","operator":"equals","value":"POST"},{"field":"path","operator":"equals","value":"/api/register"}],"actions":[{"type":"add_signal","signal":{"id":"REGISTRATION_ATTEMPT","name":"Registration Attempt"}}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-08-01T00:00:00Z"},
-  {"id":"rule-duplicate","type":"templated_signal","enabled":true,"description":"Registration Attempt duplicate route","template":{"id":"tmpl-registration","name":"Registration Attempt"},"signal":{"id":"REGISTRATION_ATTEMPT","name":"Registration Attempt"},"conditions":[{"field":"method","operator":"equals","value":"POST"},{"field":"path","operator":"equals","value":"/register/submit"}],"actions":[{"type":"add_signal","signal":{"id":"REGISTRATION_ATTEMPT","name":"Registration Attempt"}}]},
-  {"id":"rule-other","type":"templated_signal","enabled":true,"description":"Login Attempt route","template":{"id":"tmpl-login","name":"Login Attempt"},"signal":{"id":"LOGIN_ATTEMPT","name":"Login Attempt"},"conditions":[{"field":"method","operator":"equals","value":"POST"},{"field":"path","operator":"equals","value":"/login"}],"actions":[{"type":"add_signal","signal":{"id":"LOGIN_ATTEMPT","name":"Login Attempt"}}]}
+  {"id":"rule-enabled","type":"templated_signal","enabled":true,"description":"Registration Attempt submit route","template":{"id":"tmpl-registration"},"signal":{"name":"REGATTEMPT"},"conditions":[{"field":"method","operator":"equals","value":"POST"},{"field":"path","operator":"equals","value":"/register/submit"}],"actions":[{"type":"add_signal","signal":"REGATTEMPT"}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-09-01T00:00:00Z"},
+  {"id":"rule-disabled","type":"templated_signal","enabled":false,"description":"Registration Attempt legacy route","template":{"id":"tmpl-registration"},"signal":{"name":"REGATTEMPT"},"conditions":[{"field":"method","operator":"equals","value":"POST"},{"field":"path","operator":"equals","value":"/api/register"}],"actions":[{"type":"add_signal","signal":"REGATTEMPT"}],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-08-01T00:00:00Z"},
+  {"id":"rule-duplicate","type":"templated_signal","enabled":true,"description":"Registration Attempt duplicate route","template":{"id":"tmpl-registration"},"signal":{"name":"REGATTEMPT"},"conditions":[{"field":"method","operator":"equals","value":"POST"},{"field":"path","operator":"equals","value":"/register/submit"}],"actions":[{"type":"add_signal","signal":"REGATTEMPT"}]},
+  {"id":"rule-other","type":"templated_signal","enabled":true,"description":"Login Attempt route","template":{"id":"tmpl-login"},"signal":{"name":"LOGINATTEMPT"},"conditions":[{"field":"method","operator":"equals","value":"POST"},{"field":"path","operator":"equals","value":"/login"}],"actions":[{"type":"add_signal","signal":"LOGINATTEMPT"}]}
 ]}
 JSON
       ;;
@@ -67,11 +164,11 @@ write_thresholds() {
     *)
       cat >"$outfile" <<'JSON'
 {"data":[
-  {"id":"threshold-1","enabled":true,"signal":{"id":"REGISTRATION_ATTEMPT","name":"Registration Attempt"},"count":3,"window_seconds":60,"action":"block","key":"IP","duration_seconds":86400},
-  {"id":"threshold-2","enabled":true,"signal":{"id":"REGISTRATION_ATTEMPT","name":"Registration Attempt"},"count":7,"window_seconds":600,"action":"block","key":"IP","duration_seconds":86400},
-  {"id":"threshold-disabled","enabled":false,"signal":{"id":"REGISTRATION_ATTEMPT","name":"Registration Attempt"},"count":10,"window_seconds":3600,"action":"block","key":"IP","duration_seconds":86400},
-  {"id":"threshold-duplicate","enabled":true,"signal":{"id":"REGISTRATION_ATTEMPT","name":"Registration Attempt"},"count":3,"window_seconds":60,"action":"block","key":"IP","duration_seconds":86400},
-  {"id":"threshold-other","enabled":true,"signal":{"id":"LOGIN_ATTEMPT","name":"Login Attempt"},"count":5,"window_seconds":60,"action":"block","key":"IP","duration_seconds":3600}
+  {"id":"threshold-1","enabled":true,"signal":{"name":"REGATTEMPT"},"count":3,"window_seconds":60,"action":"block","key":"IP","duration_seconds":86400},
+  {"id":"threshold-2","enabled":true,"signal":{"name":"REGATTEMPT"},"count":7,"window_seconds":600,"action":"block","key":"IP","duration_seconds":86400},
+  {"id":"threshold-disabled","enabled":false,"signal":{"name":"REGATTEMPT"},"count":10,"window_seconds":3600,"action":"block","key":"IP","duration_seconds":86400},
+  {"id":"threshold-duplicate","enabled":true,"signal":{"name":"REGATTEMPT"},"count":3,"window_seconds":60,"action":"block","key":"IP","duration_seconds":86400},
+  {"id":"threshold-other","enabled":true,"signal":{"name":"LOGINATTEMPT"},"count":5,"window_seconds":60,"action":"block","key":"IP","duration_seconds":3600}
 ]}
 JSON
       ;;
@@ -128,10 +225,15 @@ jq -e '
   and .customer_id == "test-customer"
   and .workspace == "Production"
   and .workspace_id == "production"
-  and .template.name == "Registration Attempt"
+  and .template.name == "REGATTEMPT"
   and .template.template_id == "tmpl-registration"
-  and .template.signal_id == "REGISTRATION_ATTEMPT"
-  and .template.match_strategy == "display_name_exact_case_insensitive"
+  and .template.signal_id == null
+  and .template.signal_name == "REGATTEMPT"
+  and .template.canonical_signal == "REGATTEMPT"
+  and .template.input == "Registration Attempt"
+  and .template.alias == "Registration Attempt"
+  and .template.alias_canonical == "REGATTEMPT"
+  and .template.match_strategy == "friendly_name_alias"
   and .summary.tagging_rules == 3
   and .summary.enabled_tagging_rules == 2
   and .summary.disabled_tagging_rules == 1
@@ -139,7 +241,7 @@ jq -e '
   and .summary.active_thresholds == 3
   and .summary.disabled_thresholds == 1
   and .traffic.retained_matches == 123456
-  and .traffic.query == "tag:\"Registration Attempt\""
+  and .traffic.query == "tag:REGATTEMPT"
   and .traffic.count_scope == "retained_searchable_request_records"
   and (.traffic.sampling_caveat | contains("not raw traffic"))
   and (.drill_down.command | contains("fastly-audit ngwaf requests"))
@@ -155,20 +257,25 @@ jq -e '
   and any(.review_indicators[]; .indicator == "possible_overlap")
   and .provenance.API_access == "read_only_GET_requests"
 ' >/dev/null <<<"$output"
-grep -F 'tag:"Registration Attempt"' "$NGWAF_TEST_CURL_ARGS" >/dev/null
+grep -F 'tag:REGATTEMPT' "$NGWAF_TEST_CURL_ARGS" >/dev/null
 grep -F 'https://api.fastly.com/ngwaf/v1/workspaces/production/rules' "$NGWAF_TEST_CURL_ARGS" >/dev/null
 grep -F 'https://api.fastly.com/ngwaf/v1/workspaces/production/thresholds' "$NGWAF_TEST_CURL_ARGS" >/dev/null
 grep -F 'https://api.fastly.com/ngwaf/v1/workspaces/production/requests' "$NGWAF_TEST_CURL_ARGS" >/dev/null
 
-id_output="$("$ROOT/fastly-audit" ngwaf template-audit production tmpl-registration --json 2>"$TEST_TMP/id.err")"
+id_output="$("$ROOT/fastly-audit" ngwaf template-audit production REGATTEMPT --json 2>"$TEST_TMP/id.err")"
 jq -e '
-  .template.match_strategy == "stable_identifier"
+  .template.match_strategy == "canonical_exact"
+  and .template.canonical_signal == "REGATTEMPT"
+  and .template.alias == null
   and .template.template_id == "tmpl-registration"
   and .summary.tagging_rules == 3
 ' >/dev/null <<<"$id_output"
 
 "$ROOT/ngwaf" template-audit Production "Registration Attempt" 7 >"$TEST_TMP/human" 2>"$TEST_TMP/human.err"
-grep -F 'Template Audit: Registration Attempt' "$TEST_TMP/human" >/dev/null
+grep -F 'Template Audit: REGATTEMPT' "$TEST_TMP/human" >/dev/null
+grep -F 'Input: Registration Attempt' "$TEST_TMP/human" >/dev/null
+grep -F 'Signal: REGATTEMPT' "$TEST_TMP/human" >/dev/null
+grep -F 'Matched by: friendly_name_alias' "$TEST_TMP/human" >/dev/null
 grep -F 'Signal tagging rules' "$TEST_TMP/human" >/dev/null
 grep -F 'DISABLED' "$TEST_TMP/human" >/dev/null
 grep -F 'Thresholds' "$TEST_TMP/human" >/dev/null
@@ -198,11 +305,11 @@ fi
 grep -F 'templated signal not found: Password Reset' "$TEST_TMP/missing.err" >/dev/null
 
 if NGWAF_TEST_TEMPLATE_AUDIT_MODE=ambiguous \
-  "$ROOT/fastly-audit" ngwaf template-audit Production "Registration Attempt" --json >"$TEST_TMP/ambiguous.out" 2>"$TEST_TMP/ambiguous.err"; then
+  "$ROOT/fastly-audit" ngwaf template-audit Production "Shared Friendly" --json >"$TEST_TMP/ambiguous.out" 2>"$TEST_TMP/ambiguous.err"; then
   printf 'template-audit test: ambiguous template unexpectedly succeeded\n' >&2
   exit 1
 fi
-grep -F 'templated signal is ambiguous: Registration Attempt' "$TEST_TMP/ambiguous.err" >/dev/null
+grep -F 'templated signal is ambiguous: Shared Friendly' "$TEST_TMP/ambiguous.err" >/dev/null
 
 if NGWAF_TEST_TEMPLATE_AUDIT_MODE=malformed-thresholds \
   "$ROOT/fastly-audit" ngwaf template-audit Production "Registration Attempt" --json >"$TEST_TMP/malformed.out" 2>"$TEST_TMP/malformed.err"; then

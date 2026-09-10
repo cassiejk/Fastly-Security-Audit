@@ -246,66 +246,192 @@ template_audit_candidates_json() {
     '
 }
 
+template_audit_signal_aliases_json() {
+  jq -n '
+    [
+      {
+        canonical: "REGATTEMPT",
+        aliases: [
+          "Registration Attempt",
+          "Registration Attempts"
+        ]
+      }
+    ]
+  '
+}
+
 template_audit_select_template_json() {
   [[ $# -eq 2 ]] || die 'template_audit_select_template_json requires <candidates-json> <template>'
 
   local candidates_payload="$1"
   local template_input="$2"
+  local aliases_payload
 
-  json_stream "$candidates_payload" |
+  aliases_payload="$(template_audit_signal_aliases_json)"
+
+  json_stream "$candidates_payload" "$aliases_payload" |
     jq -s --arg requested "$template_input" '
+      def nonempty_scalar:
+        select(. != null)
+        | if type == "string" or type == "number" or type == "boolean" then tostring else empty end
+        | select(length > 0);
+      def unique_nonempty($items): [$items[]? | nonempty_scalar] | unique;
       def norm_name: tostring | ascii_downcase;
+      def canonical_values:
+        unique_nonempty([
+          .rule_id,
+          .template_id,
+          .signal_id,
+          .signal_name
+        ]);
+      def display_values:
+        unique_nonempty([
+          .template_name,
+          .name
+        ]);
+      def canonical_signal($rules):
+        [
+          $rules[]
+          | .signal_name // .signal_id // .name // .template_id // empty
+          | nonempty_scalar
+        ]
+        | unique
+        | .[0] // null;
+      def grouped($matches):
+        $matches
+        | sort_by(.correlation_key)
+        | group_by(.correlation_key)
+        | map({
+            correlation_key: .[0].correlation_key,
+            template_id: ([.[].template_id // empty] | unique | .[0] // null),
+            signal_id: ([.[].signal_id // empty] | unique | .[0] // null),
+            name: ([.[] | .name // .signal_name // .template_name // empty] | unique | .[0] // null),
+            canonical_signal: canonical_signal(.),
+            tagging_rule_ids: [.[].rule_id],
+            rules: .
+          });
+      def candidate_summary:
+        {
+          name,
+          template_id,
+          signal_id,
+          signal_name,
+          canonical_signal: ([.] | canonical_signal(.)),
+          tagging_rule_ids: [.rule_id],
+          correlation_key
+        };
+
       .[0] as $candidates
+      | .[1] as $aliases
       | ($requested | norm_name) as $requested_name
-      | [
-          $candidates[]
-          | select(
-              (.template_id // "") == $requested
-              or (.signal_id // "") == $requested
-              or (.rule_id // "") == $requested
-              or ((.template_name // "" | norm_name) == $requested_name)
-              or ((.signal_name // "" | norm_name) == $requested_name)
-              or ((.name // "" | norm_name) == $requested_name)
-            )
-        ] as $matches
       | (
-          $matches
-          | sort_by(.correlation_key)
-          | group_by(.correlation_key)
-          | map({
-              correlation_key: .[0].correlation_key,
-              template_id: ([.[].template_id // empty] | unique | .[0] // null),
-              signal_id: ([.[].signal_id // empty] | unique | .[0] // null),
-              name: ([.[] | .name // .signal_name // .template_name // empty] | unique | .[0] // null),
-              tagging_rule_ids: [.[].rule_id],
-              rules: .
-            })
-        ) as $groups
+          [
+            {
+              match_strategy: "canonical_exact",
+              alias: null,
+              alias_canonical: null,
+              matches: [
+                $candidates[]
+                | select(any(canonical_values[]; . == $requested))
+              ]
+            },
+            {
+              match_strategy: "canonical_exact_case_insensitive",
+              alias: null,
+              alias_canonical: null,
+              matches: [
+                $candidates[]
+                | select(any(canonical_values[]; (. | norm_name) == $requested_name))
+              ]
+            },
+            {
+              match_strategy: "display_name_exact",
+              alias: null,
+              alias_canonical: null,
+              matches: [
+                $candidates[]
+                | select(any(display_values[]; . == $requested))
+              ]
+            },
+            {
+              match_strategy: "display_name_exact_case_insensitive",
+              alias: null,
+              alias_canonical: null,
+              matches: [
+                $candidates[]
+                | select(any(display_values[]; (. | norm_name) == $requested_name))
+              ]
+            },
+            (
+              [
+                $aliases[]
+                | . as $entry
+                | select(any(($entry.aliases // [])[]?; . == $requested))
+                | ($entry.canonical | nonempty_scalar)
+              ]
+              | unique
+            ) as $exact_alias_targets
+            | {
+                match_strategy: "friendly_name_alias",
+                alias: $requested,
+                alias_canonical: ($exact_alias_targets[0] // null),
+                matches: [
+                  $exact_alias_targets[] as $target
+                  | $candidates[]
+                  | select(any(canonical_values[]; (. == $target) or ((. | norm_name) == ($target | norm_name))))
+                ]
+              },
+            (
+              [
+                $aliases[]
+                | . as $entry
+                | select(any(($entry.aliases // [])[]?; (. | norm_name) == $requested_name))
+                | ($entry.canonical | nonempty_scalar)
+              ]
+              | unique
+            ) as $case_alias_targets
+            | {
+                match_strategy: "friendly_name_alias",
+                alias: $requested,
+                alias_canonical: ($case_alias_targets[0] // null),
+                matches: [
+                  $case_alias_targets[] as $target
+                  | $candidates[]
+                  | select(any(canonical_values[]; (. == $target) or ((. | norm_name) == ($target | norm_name))))
+                ]
+              }
+          ]
+          | map(.matches |= unique_by(.correlation_key + ":" + (.rule_id // "")))
+          | map(select((.matches | length) > 0))
+          | .[0] // {
+              match_strategy: null,
+              alias: null,
+              alias_canonical: null,
+              matches: []
+            }
+        ) as $resolution
+      | ($resolution.matches | grouped(.)) as $groups
       | if ($groups | length) == 0 then
           {
             status: "not_found",
             requested_template: $requested,
             candidates: [
               $candidates[]
-              | {
-                  name,
-                  template_id,
-                  signal_id,
-                  tagging_rule_ids: [.rule_id],
-                  correlation_key
-                }
+              | candidate_summary
             ]
           }
         elif ($groups | length) > 1 then
           {
             status: "ambiguous",
             requested_template: $requested,
+            match_strategy: $resolution.match_strategy,
             matches: [
               $groups[]
               | {
                   name,
                   template_id,
                   signal_id,
+                  signal_name: .canonical_signal,
                   tagging_rule_ids,
                   correlation_key
                 }
@@ -323,18 +449,19 @@ template_audit_select_template_json() {
                 template_id: $selected.template_id,
                 signal_id: $selected.signal_id,
                 signal_name: ([($selected.rules[] | .signal_name // empty)] | unique | .[0] // $selected.name),
+                canonical_signal: $selected.canonical_signal,
                 correlation_key: $selected.correlation_key,
-                match_strategy: (
-                  if any(
-                    $selected.rules[];
-                    (.template_id // "") == $requested
-                    or (.signal_id // "") == $requested
-                    or (.rule_id // "") == $requested
-                  )
-                  then "stable_identifier"
-                  else "display_name_exact_case_insensitive"
-                  end
-                ),
+                input: $requested,
+                match_strategy: $resolution.match_strategy,
+                alias: $resolution.alias,
+                alias_canonical: $resolution.alias_canonical,
+                resolver: {
+                  input: $requested,
+                  canonical_signal: $selected.canonical_signal,
+                  match_strategy: $resolution.match_strategy,
+                  alias: $resolution.alias,
+                  alias_canonical: $resolution.alias_canonical
+                },
                 enabled: (
                   if $enabled_count > 0 then true
                   elif $disabled_count > 0 and $disabled_count == ($selected.rules | length) then false
@@ -675,7 +802,8 @@ template_audit_report_json() {
 
   signal_value="$(
     jq -r '
-      .template.signal_name
+      .template.canonical_signal
+      // .template.signal_name
       // .template.name
       // .template.signal_id
       // .template.template_id
@@ -770,7 +898,7 @@ template_audit_report_json() {
               tagging_rules_endpoint: "GET /ngwaf/v1/workspaces/{workspace_id}/rules",
               thresholds_endpoint: "GET /ngwaf/v1/workspaces/{workspace_id}/thresholds",
               pagination: "rules complete_or_fail; thresholds single response",
-              correlation_policy: "Prefer signal/template identifiers; fall back to exact display-name matching; fail on ambiguity."
+              correlation_policy: "Prefer exact canonical signal/template identifiers, then exact display names, then centralized explicit aliases; fail on ambiguity."
             },
             request_search: {
               endpoint: "GET /ngwaf/v1/workspaces/{workspace_id}/requests",
@@ -792,11 +920,13 @@ template_audit_render_human() {
   local report="$1"
   local tagging_count threshold_count indicator_count
 
-  ui_heading "Template Audit: $(jq -r '.template.name // .template.signal_name // .template.signal_id // "unknown"' <<<"$report")"
+  ui_heading "Template Audit: $(jq -r '.template.canonical_signal // .template.name // .template.signal_name // .template.signal_id // "unknown"' <<<"$report")"
   jq -r '
+    def resolved_signal: .template.canonical_signal // .template.signal_name // .template.name // "-";
     "Customer: \(.customer) (\(.customer_id))",
     "Workspace: \(.workspace) (\(.workspace_id); input=\(.workspace_input))",
-    "Signal: \(.template.signal_name // .template.name // "-")",
+    (if (.template.input // "") != resolved_signal then "Input: \(.template.input)" else empty end),
+    "Signal: \(resolved_signal)",
     "Signal ID: \(.template.signal_id // "-")",
     "Template ID: \(.template.template_id // "-")",
     "Matched by: \(.template.match_strategy)",

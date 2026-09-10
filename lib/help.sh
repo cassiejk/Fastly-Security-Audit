@@ -191,9 +191,11 @@ Notes:
     not automatic policy-remediation claims.
   - template-audit correlates templated_signal tagging rules, associated signal
     thresholds, and retained signal activity into one logical control audit.
-    It prefers stable signal/template identifiers, falls back to exact display
-    names, and fails on ambiguity instead of guessing. Threshold relationship
-    indicators are conservative review prompts, not remediation advice.
+    It prefers exact canonical signal/template identifiers, then exact display
+    names, then centralized explicit UI-name aliases such as Registration
+    Attempt -> REGATTEMPT. It fails on ambiguity instead of guessing. Threshold
+    relationship indicators are conservative review prompts, not remediation
+    advice.
   - API calls show an interactive progress indicator on stderr. Set
     NGWAF_PROGRESS=never to disable it, or NGWAF_PROGRESS=always to force it.
     Set NGWAF_DEBUG=1 to show request paths and query parameters (never tokens).
