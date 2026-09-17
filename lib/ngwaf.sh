@@ -1,6 +1,133 @@
 # shellcheck shell=bash
 # Sourced by the ngwaf entry point; do not execute directly.
 
+workspace_services_payload_json() {
+  local in_band_evidence="$1" product="$2" workspaces="$3" selected_id="$4"
+  printf '%s\n%s\n%s\n' "$in_band_evidence" "$product" "$workspaces" |
+    jq -s --arg selected_id "$selected_id" '
+    .[0] as $in_band_evidence | .[1] as $product | .[2] as $workspaces
+    | if ($workspaces.data | type) != "array" or ($in_band_evidence.mappings | type) != "array" or ($product.services | type) != "array" then
+      error("mapping source has a missing or malformed collection") else . end
+    | ($in_band_evidence.mappings | map(select(.status == "CONFIRMED") | . as $row
+      | ($workspaces.data | map(select(.id == $row.workspace_id))) as $by_id
+      | (if ($by_id | length) == 1 then $by_id
+         else ($workspaces.data | map(select(.name == $row.workspace_name))) end) as $matches
+      | {
+      workspace_id: (if ($matches | length) == 1 then $matches[0].id else $row.workspace_id end),
+      workspace: .workspace_name, service_id: .source_service_id,
+      name: .source_service_name, type: "CDN", active_version: .active_version,
+      mapping_source: "in_band_vcl_evidence",
+      mapping_evidence: {inspection_service_id, generated_vcl_version: .active_version,
+        internal_site_id: .workspace_id,
+        workspace_resolution: (if ($by_id | length) == 1 then "exact_id"
+          elif ($matches | length) == 1 then "unique_exact_workspace_name" else "UNRESOLVED" end)}
+    })) as $old
+    | ($product.services | map(select(.type == "vcl" and
+        .configuration_status == "RETRIEVED" and
+        ((.configuration.workspace_id // "") | length > 0)) | {
+      workspace_id: .configuration.workspace_id, service_id: .id,
+      name, type: "CDN", active_version,
+      mapping_source: "enabled_product_api",
+      mapping_evidence: {configuration_endpoint: .configuration_source}
+    })) as $new
+    | ($in_band_evidence.mappings | map(select(.status == "UNKNOWN" or .status == "UNRESOLVED" or .status == "AMBIGUOUS"))) as $unresolved
+    | ($product.services | map(select(.type == "vcl" and
+        (.configuration_status != "RETRIEVED" or
+         ((.configuration.workspace_id // "") | length == 0))))) as $unconfigured
+    | ($workspaces.data | map(.id)) as $ids
+    | ([$old[], $new[]] | map(select(.workspace_id as $id | $ids | index($id) != null))
+       | sort_by(.workspace_id, .service_id) | group_by([.workspace_id, .service_id])
+       | map(.[0] + {mapping_sources: (map(.mapping_source) | unique),
+           mapping_evidence: (map({source: .mapping_source, evidence: .mapping_evidence}) | unique)})) as $relationships
+    | (if $in_band_evidence.summary.sites_inventory_status != "COMPLETE" or $product.status == "UNKNOWN" or $product.status == "FAILED" then "UNKNOWN"
+       elif ($unresolved | length) > 0 or ($unconfigured | length) > 0 or $product.status != "COMPLETE" or
+         (($product.result.rejected_service_ids // []) | length) > 0 or
+         ([$old[], $new[]] | any(.workspace_id as $id | $ids | index($id) == null)) then "PARTIAL"
+       else "COMPLETE" end) as $status
+    | {
+      command: "ngwaf workspace-services", customer: $in_band_evidence.customer.name,
+      customer_id: $in_band_evidence.customer.id, status: $status,
+      retrieved_at: (now | todateiso8601),
+      coverage_scope: "observed deployed configuration of token-visible CDN services; not an authoritative linkage inventory",
+      provenance: {in_band_vcl_evidence: $in_band_evidence.sources,
+        enabled_product_api: $product.result,
+        workspace_endpoint: "GET /ngwaf/v1/workspaces"},
+      unresolved_services: $unresolved, unresolved_product_configurations: $unconfigured,
+      unmatched_workspace_relationships: ([$old[], $new[]] | map(select(.workspace_id as $id | $ids | index($id) == null))),
+      summary: {
+        in_band_vcl_evidence_relationships: ($old | unique_by([.workspace_id, .service_id]) | length),
+        enabled_product_relationships: ($new | unique_by([.workspace_id, .service_id]) | length),
+        workspaces_with_no_observed_mapping: ([$workspaces.data[] | select(.id as $id | [$relationships[].workspace_id] | index($id) == null)] | length)
+      },
+      workspaces: [$workspaces.data[] | select($selected_id == "" or .id == $selected_id)
+        | . as $w | {workspace: .name, workspace_id: .id,
+          services: [$relationships[] | select(.workspace_id == $w.id) | del(.workspace_id, .workspace)],
+          service_count: ([$relationships[] | select(.workspace_id == $w.id)] | length)}]
+    }
+    | if $selected_id != "" then
+        if (.workspaces | length) == 1 then . + .workspaces[0]
+        else error("resolved workspace is absent from workspace inventory") end
+      else . end
+  '
+}
+
+cmd_workspace_services() {
+  local selector='' all=false json=false corp='' cid resolved selected_id=''
+  local workspaces in_band_evidence inventory product payload
+  local -a in_band_args=(--json)
+  while (( $# > 0 )); do
+    case "$1" in
+      --all) all=true; shift ;;
+      --json) json=true; shift ;;
+      --sigsci-corp)
+        (( $# >= 2 )) || die '--sigsci-corp requires a corp slug'
+        corp="$2"; in_band_args+=(--sigsci-corp "$corp"); shift 2 ;;
+      --*) die "unknown workspace-services option: $1" ;;
+      *) [[ -z "$selector" ]] || die 'specify one workspace or --all'; selector="$1"; shift ;;
+    esac
+  done
+  if [[ "$all" == true ]]; then
+    [[ -z "$selector" ]] || die 'specify one workspace or --all'
+  else
+    [[ -n "$selector" ]] || die 'usage: fastly-audit ngwaf workspace-services <workspace>|--all [--json] [--sigsci-corp CORP]'
+  fi
+  internal_ngwaf_require_credentials 'in-band workspace-service mapping' || return 1
+  if [[ "$all" != true ]]; then
+    resolved="$(resolve_workspace_json "$selector")" || return 1
+    selected_id="$(jq -er '.id' <<<"$resolved")" || return 1
+  fi
+  cid="$(current_cid)"
+  workspaces="$(get_all_pages /ngwaf/v1/workspaces --data-urlencode "customer_id=$cid")" || return 1
+  in_band_evidence="$(cmd_security_legacy_map "${in_band_args[@]}")" || return 1
+  inventory="$(get_token_visible_customer_services)" || return 1
+  product="$(discover_product_json ngwaf 'Edge WAF service attachments' ngwaf security "$inventory" true)" || return 1
+  payload="$(workspace_services_payload_json "$in_band_evidence" "$product" "$workspaces" "$selected_id")" || return 1
+  if [[ "$json" == true ]]; then
+    jq . <<<"$payload"
+  else
+    jq -r '"Mapping status: " + .status,
+      (.workspaces[] | "Workspace: " + .workspace,
+        (if .service_count == 0 then "NO OBSERVED CDN SERVICE MAPPING" else empty end))' <<<"$payload"
+    jq -r '["WORKSPACE", "CDN SERVICE", "SERVICE ID", "VERSION", "SOURCE"],
+      (.workspaces[] as $w | $w.services[] | [$w.workspace, .name, .service_id,
+        (.active_version // "UNKNOWN" | tostring), (.mapping_sources | map(if . == "in_band_vcl_evidence" then "in-band VCL evidence" elif . == "enabled_product_api" then "enabled-product API" else . end) | join(", "))]) | @tsv' <<<"$payload" | human_table
+    jq -r '"Total mapped services: " + ([.workspaces[].service_count] | add // 0 | tostring),
+      "Mapping coverage (all token-visible CDN services):",
+      "  in-band VCL evidence relationships: " + (.summary.in_band_vcl_evidence_relationships | tostring),
+      "  enabled-product relationships: " + (.summary.enabled_product_relationships | tostring),
+      "  workspaces with no observed mapping: " + (.summary.workspaces_with_no_observed_mapping | tostring),
+      (.unresolved_services[] | "Unresolved service: " + .source_service_id + ": " + (.reason // .status)),
+      (.unresolved_product_configurations[] | "Unresolved product configuration: " + .id),
+      (.provenance.enabled_product_api.rejected_service_ids[]? | "Unvalidated product service ID: " + .),
+      (if .provenance.enabled_product_api.status != "COMPLETE" then
+        "Enabled-product inventory: " + (.provenance.enabled_product_api.reason // "unavailable") else empty end),
+      (if .provenance.in_band_vcl_evidence.internal_ngwaf_sites.status != "COMPLETE" then
+        "In-band evidence site inventory: " + (.provenance.in_band_vcl_evidence.internal_ngwaf_sites.reason // "unavailable") else empty end),
+      "Coverage describes observed configuration evidence, not an authoritative linkage inventory."' <<<"$payload"
+  fi
+  [[ "$(jq -r .status <<<"$payload")" == COMPLETE ]]
+}
+
 cmd_workspaces() {
   local cid body total returned
   cid="$(current_cid)"

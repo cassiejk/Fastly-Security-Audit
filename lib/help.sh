@@ -139,15 +139,15 @@ Notes:
     calendar month such as Aug 1 -> Sep 1 can be reproduced.
   - intl-bot-stats and intl-bot-types are intentionally scoped to the 11
     international production service names used by the current Costco QBR slide.
-  - services discovers selected-customer service IDs from customer-scoped audit
-    events, verifies each by direct service lookup, and maps vcl -> CDN and
-    wasm -> Compute. This is an audit-observed inventory, not a guaranteed
-    complete all-time service list.
+  - services lists token-visible Fastly services from GET /service, filters to
+    the selected customer ID, deduplicates by service ID, and maps vcl -> CDN
+    and wasm -> Compute. It does not prove the token can see every service the
+    customer owns.
   - products inventories known public service-level product enablement APIs and
-    maps enabled products back to the audit-observed selected-customer service
+    maps enabled products back to the token-visible selected-customer service
     set. NGWAF, Bot Management, and DDoS Protection include configuration when
     the API returns it.
-  - inventory combines audit-observed service counts, product enablement, and
+  - inventory combines token-visible service counts, product enablement, and
     NGWAF workspace inventory. Product enablement does not prove meaningful
     production traffic.
   - account-level products without a service mapping are intentionally not included
@@ -224,15 +224,18 @@ Core:
   fastly-audit customer setup [--customer-id CUSTOMER_ID] [--json]
   fastly-audit customer use <customer_id>
   fastly-audit customer whoami
+  fastly-audit customer vcl-size [--json]
   fastly-audit inventory [--json]
 
 Service inventory:
   fastly-audit service list [--json]
   fastly-audit service products [--json]
   fastly-audit service inventory [--json]
+  fastly-audit service vcl-size <service> [--json]
 
 Security products:
-  fastly-audit security summary [--json]
+  fastly-audit security summary [--json] [--detailed]
+  fastly-audit security legacy-map [service-name-or-id] [--sigsci-corp CORP] [--format human|json|csv] [--output FILE]
 
 Next-Gen WAF:
   fastly-audit ngwaf workspaces
@@ -279,6 +282,7 @@ ngwaf_namespace_usage() {
 fastly-audit ngwaf — Next-Gen WAF inspection
 
   workspaces
+  workspace-services <workspace>|--all [--json] [--sigsci-corp CORP]
   workspace <workspace>
   posture <workspace>
   rule <workspace> <rule_id>
@@ -305,9 +309,13 @@ service_namespace_usage() {
   cat <<'HELP'
 fastly-audit service — selected-customer edge-service inspection
 
-  list [--json]       Audit-observed CDN and Compute service inventory
+  list [--json]      Token-visible selected-customer CDN and Compute service inventory
   products [--json]   Service-level product enablement and configuration
   inventory [--json] Combined service, product, and NGWAF inventory
+  vcl-size <service> [--json]
+                      Read-only active generated VCL size for one VCL/CDN service
+
+Generated VCL content is not printed. Compute services are not applicable.
 HELP
 }
 
@@ -315,12 +323,17 @@ security_namespace_usage() {
   cat <<'HELP'
 fastly-audit security — selected-customer security-product inspection
 
-  summary [--json]   API Discovery, Bot Management, DDoS Protection,
-                     Next-Gen WAF, and NGWAF workspace coverage
+  summary [--json] [--detailed]
+                     API Discovery, Bot Management, DDoS Protection,
+                     Edge WAF service attachments, and NGWAF workspace coverage
+  legacy-map [service-name-or-id] [--sigsci-corp CORP] [--format human|json|csv] [--output FILE]
+                     Read-only CDN service to in-band Inspection Service to NGWAF workspace evidence
 
 Enablement is configuration inventory; it does not prove traffic,
 effective enforcement, or security efficacy. Unknown checks are never
 silently counted as disabled.
+legacy-map validates returned NGWAF site customer_id values against the
+selected Fastly customer before using internal site evidence.
 HELP
 }
 
@@ -345,6 +358,9 @@ fastly-audit customer — authentication and customer selection
   setup [--customer-id CUSTOMER_ID] [--json]
   use <customer_id>
   whoami
+  vcl-size [--json]  Active generated VCL sizes for selected-customer VCL/CDN services
+
+Customer VCL sizing is read-only, skips Compute services, and sorts largest first.
 HELP
 }
 

@@ -1,15 +1,15 @@
 # fastly-audit v24.1
 
 v24.1 adds a customer-scoped security-product inventory spanning API
-Discovery, Bot Management, DDoS Protection, Next-Gen WAF service mappings,
+Discovery, Bot Management, DDoS Protection, Edge WAF service attachments,
 and the complete NGWAF workspace collection. Product-list queries explicitly
 carry the selected customer ID and validate the response customer before data
 is accepted.
 
 The summary distinguishes configuration enablement from observed traffic or
-security efficacy, preserves inconclusive results as unknown, and retains the
-audit-window limitation of the observed service inventory. All v24.0
-namespaces and the complete `ngwaf` compatibility interface remain supported.
+security efficacy, preserves inconclusive results as unknown, and uses
+token-visible selected-customer service inventory. All v24.0 namespaces and the
+complete `ngwaf` compatibility interface remain supported.
 
 ## Layout
 
@@ -237,7 +237,62 @@ The response preserves the rule object at the top level and adds `context` and
 `provenance`. The command verifies that the API response contains the requested
 rule ID; missing rules, malformed responses, and mismatched IDs fail closed.
 
+### Generated VCL size
+
+Measure active generated VCL for Fastly VCL/CDN services without printing the
+generated VCL contents:
+
+```bash
+fastly-audit service vcl-size <service>
+fastly-audit service vcl-size <service> --json
+fastly-audit customer vcl-size
+fastly-audit customer vcl-size --json
+```
+
+The single-service command resolves the service within the selected customer
+token-visible service inventory, uses the active version reported by service
+metadata, and retrieves `GET /service/{service_id}/version/{version}/generated_vcl`.
+The customer command filters to the selected customer, skips Compute services
+as not applicable, measures VCL/CDN services sequentially, and sorts successful
+rows largest-first. Measurements count bytes and lines of the generated VCL
+content only; JSON response overhead and HTTP headers are not counted.
+
 ### Security product summary
+
+Observe workspace to CDN service mappings using existing configuration evidence:
+
+```bash
+fastly-audit ngwaf workspace-services gdx-costco-stg-is --sigsci-corp costco
+fastly-audit ngwaf workspace-services --all --json --sigsci-corp costco
+```
+
+This reverses confirmed `security legacy-map` generated-VCL evidence and merges
+Edge WAF enabled-product configuration relationships. Each relationship retains
+`mapping_sources` and source-specific evidence. In-band VCL evidence is observed
+deployed configuration, not an authoritative API linkage. No observed mapping
+does not prove absence of linkage. Internal site identity is reconciled to the
+workspace inventory by exact ID or a unique exact workspace name, with the
+internal site ID retained in evidence. Ambiguous or absent workspace identity
+is retained separately and makes coverage incomplete. The command scans all
+token-visible CDN services even when selecting one workspace. It uses the legacy-map internal
+authentication and corp validation requirements. Incomplete source retrieval or
+unresolved inspections produce PARTIAL/UNKNOWN output and a nonzero exit status;
+JSON includes unresolved services and source provenance.
+
+JSON uses `in_band_vcl_evidence` in mapping source values and the provenance key,
+and `summary.in_band_vcl_evidence_relationships` for the evidence count. These
+replace the previous `legacy_generated_vcl` names without deprecated aliases.
+This source identifies how a mapping was observed; it does not establish a CDN
+service's current architecture. This command does not detect architecture.
+
+Fastly's public [Edge WAF architecture terminology](https://www.fastly.com/documentation/guides/next-gen-waf/setup-and-configuration/edge-deployment/edge-waf-architecture-types/)
+uses **in-band** for inline inspection and **out-of-band** for inspection that
+returns a decision to the CDN service before request processing continues.
+For CDN services, `ngwaf_oob_enabled = true` means out-of-band; `false` or an
+unset parameter means in-band. Future architecture fields reserve `in_band`,
+`out_of_band`, and `unknown`. WAFD refers specifically to internal implementation
+or migration terminology associated with out-of-band, rather than a synonym
+for the public architecture type.
 
 Inspect selected-customer security-product coverage without querying unrelated
 delivery and observability products:
@@ -245,20 +300,91 @@ delivery and observability products:
 ```bash
 fastly-audit security summary
 fastly-audit security summary --json
+fastly-audit security summary --detailed
 ```
 
-The summary checks API Discovery, Bot Management, DDoS Protection, and
-Next-Gen WAF enablement against the audit-observed service set. Where the
-public product API supplies configuration, it also reports fields such as
-DDoS mode, Bot Management ContentGuard state, and NGWAF workspace/traffic-ramp
-mapping. The complete NGWAF workspace collection is included as separate
-context.
+The summary lists token-visible Fastly services from the service inventory API,
+filters them to the selected customer ID, deduplicates by service ID, and then
+checks API Discovery, Bot Management, DDoS Protection, and Edge WAF service
+attachments against that service set. The default summary is attachment-focused
+and does not fetch Bot Management or DDoS per-service configuration. Use
+`--detailed` to retrieve configuration fields such as DDoS mode and Bot
+Management ContentGuard state. Edge WAF workspace/traffic-ramp mapping and the
+complete NGWAF workspace collection remain included as separate context.
+Product attachment coverage is sourced from the product-specific enabled-service
+APIs, validated against the selected-customer service inventory, and displayed
+as enabled services over token-visible customer services.
+
+For NGWAF, Edge WAF service attachment and workspace inventory are reported as
+separate facts. The command joins service-level Edge WAF attachment configuration
+(`workspace_id`, `traffic_ramp`) to the discovered NGWAF workspace inventory
+where possible, and flags mismatches such as missing workspaces, missing or
+low traffic ramps, and duplicate attachment rows. A workspace without an Edge
+WAF service attachment is reported as inventory context, not as an anomaly by
+itself.
+
+The service count is intentionally described as token-visible inventory. It
+does not prove that the authenticated token can see every service in the
+customer account. If the service inventory API is unavailable or returns an
+unexpected shape, the command fails closed instead of substituting an
+audit-event-derived count.
 
 An enabled mapping means the product is attached in Fastly configuration. It
 does not prove that the service carries current production traffic, that a
 specific enforcement path is active, or that the control is effective. A
 non-2xx enablement probe other than 404 is reported as unknown rather than
 silently counted as disabled.
+
+Security-product counts carry explicit result semantics. `COMPLETE` with
+`count: 0` means Fastly successfully reported no matching enabled mappings.
+`PARTIAL` reports `count_lower_bound` and is rendered as `>=N` in human output.
+`UNKNOWN` means the count is unavailable because every relevant probe failed or
+was malformed. Failures keep source, reason, and HTTP status context in JSON
+under each product's `result` object.
+
+### In-Band NGWAF Mapping Evidence
+
+Build a read-only map from selected-customer CDN services to in-band
+Inspection Services and internal NGWAF workspaces:
+
+```bash
+fastly-audit security legacy-map
+fastly-audit security legacy-map prd-usbcwww
+fastly-audit security legacy-map prd-usbcwww --format json
+fastly-audit security legacy-map prod-is --sigsci-corp costco
+fastly-audit security legacy-map --format csv --output legacy-map.csv
+```
+
+The command uses the selected-customer Fastly service inventory, inspects only
+CDN/VCL services, retrieves active generated VCL, and searches for
+in-band NGWAF Inspection Service hostnames such as
+`se--...--....edgecompute.app`. It then reads the internal NGWAF sites inventory
+for `SIGSCI_CORP` using `FASTLY_DSTOKEN` and `FASTLY_VOUCH_COOKIE`, resolves
+each site `serviceID` as a Fastly Inspection Service, and confirms mappings
+only when the generated-VCL Inspection Service hostname joins exactly to the
+Fastly Inspection Service name and site `serviceID`.
+`--sigsci-corp <corp>` overrides `SIGSCI_CORP` for one run.
+Direct Inspection Service lookups use bounded concurrency; set
+`FASTLY_AUDIT_LOOKUP_CONCURRENCY` to a positive integer up to `16` to override
+the default of `8`.
+
+Before using internal site evidence, the command validates the returned NGWAF
+site `customer_id` values against the selected Fastly customer ID. A successful
+query to the wrong corp, multiple returned customer IDs, or missing customer ID
+evidence fails closed instead of producing ordinary unresolved rows.
+
+`CONFIRMED` rows have direct evidence for that exact join. `UNRESOLVED`,
+`AMBIGUOUS`, `NOT_FOUND`, and `UNKNOWN` rows avoid name inference and do not
+claim that a workspace is absent or disabled. Cookies are required for the
+internal site inventory but are not printed or persisted by the command.
+JSON preserves older `legacy_ess_*` and `ess_service_id` fields as
+compatibility aliases, as do the tested `legacy_inspection_service_*` fields
+and historical summary keys. Prefer `inspection_service_host`,
+`inspection_service_name`, and `inspection_service_id` in new consumers.
+The `legacy-map` command name, helpers, trace/concurrency environment variables,
+and test harness names remain historical identifiers for compatibility; they
+do not assert current architecture. Its VCL evidence alone is not architecture
+detection.
 
 ### Data and output contracts
 
@@ -270,8 +396,9 @@ silently counted as disabled.
 | `rule-audit` | NGWAF rule API plus request-search API | Rule configuration plus retained-search cohort counts | Retrieves live rule configuration, counts `ruleid:<id>` and selected `ruleid:<id> tag:<signal>` intersections over one shared rolling window, and emits deterministic review indicators without treating overlapping signal cohorts as additive. |
 | `template-audit` | NGWAF rules, signal thresholds, and request-search APIs | Templated signal configuration plus retained-search count | Correlates `templated_signal` tagging rules and signal thresholds into one logical control, counts retained `tag:<signal>` matches, and emits conservative review indicators without declaring remediation. |
 | `bot-stats` | Fastly Historical Stats | Daily service statistics | Bot metrics are sampled and scaled estimates; they are not directly comparable to unsampled `edge_requests`. |
-| `services`, `products`, `inventory` | Customer audit events plus service/product APIs | Observed inventory | The service set is audit-window-derived, not a guaranteed all-time inventory. |
-| `security summary` | Customer audit events, security-product enablement/configuration APIs, and NGWAF workspaces | Cross-product configuration inventory | Enabled does not prove traffic or enforcement; inconclusive probes remain unknown. |
+| `services`, `products`, `inventory` | Fastly service inventory plus service/product APIs | Token-visible selected-customer inventory | Service inventory is filtered by exact selected customer ID; it does not prove token visibility is complete for the customer. |
+| `security summary` | Fastly service inventory, security-product enablement/configuration APIs, and NGWAF workspaces | Cross-product configuration inventory | Service count is token-visible and selected-customer filtered; enabled does not prove traffic or enforcement; inconclusive probes remain unknown. |
+| `security legacy-map` | Fastly service inventory, generated VCL, internal NGWAF sites, and Inspection Service lookups | Read-only migration mapping evidence | `CONFIRMED` requires exact CDN service generated-VCL hostname -> Inspection Service name -> site `serviceID`; unresolved or failed joins remain unknown/unresolved. |
 | `attack-origins` | Per-workspace top-attacks plus NGWAF timeseries | Ranked/truncated attack dimensions | Production workspaces are selected by a documented name regex and country rows are reconciled to `requests_attack`. |
 
 Analytical JSON includes a `window` object and a `provenance` object. Request

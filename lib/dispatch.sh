@@ -57,6 +57,7 @@ dispatch_flat() {
     products) cmd_products "$@" ;;
     inventory) cmd_inventory "$@" ;;
     workspaces) cmd_workspaces "$@" ;;
+    workspace-services) cmd_workspace_services "$@" ;;
     overview) cmd_overview "$@" ;;
     timeseries) cmd_timeseries "$@" ;;
     metrics) cmd_metrics "$@" ;;
@@ -98,7 +99,7 @@ dispatch_ngwaf_namespace() {
 
   case "$subcommand" in
     help|-h|--help) ngwaf_namespace_usage ;;
-    workspaces|workspace|posture|rule|rules|account-rules|thresholds|lists|bot-rules|count|requests|rule-audit|template-audit|signal-count|overview|timeseries|metrics|attack-profile|attack-origins)
+    workspaces|workspace-services|workspace|posture|rule|rules|account-rules|thresholds|lists|bot-rules|count|requests|rule-audit|template-audit|signal-count|overview|timeseries|metrics|attack-profile|attack-origins)
       dispatch_flat "$subcommand" "$@"
       ;;
     snapshot) dispatch_flat snapshot "$@" ;;
@@ -116,6 +117,10 @@ dispatch_service_namespace() {
     list) dispatch_flat services "$@" ;;
     products) dispatch_flat products "$@" ;;
     inventory) dispatch_flat inventory "$@" ;;
+    vcl-size)
+      dispatch_preflight services
+      cmd_service_vcl_size "$@"
+      ;;
     *) die "unknown service command: $subcommand; run: $PROGRAM_NAME service help" ;;
   esac
 }
@@ -130,6 +135,10 @@ dispatch_security_namespace() {
     summary)
       dispatch_preflight security-summary
       cmd_security_summary "$@"
+      ;;
+    legacy-map)
+      dispatch_preflight security-summary
+      cmd_security_legacy_map "$@"
       ;;
     *) die "unknown security command: $subcommand; run: $PROGRAM_NAME security help" ;;
   esac
@@ -160,6 +169,10 @@ dispatch_customer_namespace() {
     setup) dispatch_flat setup "$@" ;;
     use) dispatch_flat use "$@" ;;
     whoami) dispatch_flat whoami "$@" ;;
+    vcl-size)
+      dispatch_preflight services
+      cmd_customer_vcl_size "$@"
+      ;;
     help|-h|--help) customer_namespace_usage ;;
     *) die "unknown customer command: $subcommand; run: $PROGRAM_NAME customer help" ;;
   esac

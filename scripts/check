@@ -68,7 +68,11 @@ printf 'Behavior tests...\n'
 "$ROOT/tests/template-audit.sh"
 "$ROOT/tests/snapshots.sh"
 "$ROOT/tests/namespaces.sh"
+"$ROOT/tests/service-inventory.sh"
+"$ROOT/tests/vcl-size.sh"
 "$ROOT/tests/security.sh"
+"$ROOT/tests/legacy-map.sh"
+"$BASH" "$ROOT/tests/workspace-services.sh"
 "$ROOT/tests/json-transport.sh"
 "$ROOT/tests/updater.sh"
 

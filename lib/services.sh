@@ -5,8 +5,8 @@
 # Sourced by the ngwaf entry point; do not execute directly.
 
 get_selected_services() {
-  local cid from_ts page page_size max_pages
-  local body count activation_pages activation_events truncated
+  local cid from_ts page page_size max_pages recent_code
+  local body count activation_pages activation_events recent_events truncated
   local ids_tmp recent_tmp services_tmp unknown_tmp
   local sid detail_tmp code observed_ids selected unknown_checks
 
@@ -33,6 +33,7 @@ get_selected_services() {
   unknown_tmp="$(mktemp)"
   activation_pages=0
   activation_events=0
+  recent_events=0
   truncated=false
 
   printf 'Discovering selected-customer services from Fastly audit events...\n' >&2
@@ -86,24 +87,27 @@ get_selected_services() {
   # Add the most recent general customer events. This is intentionally only one
   # page: it catches very new service configuration activity without crawling
   # the account's full high-volume audit stream.
-  body="$(
-    get "/events" \
+  recent_code="$(
+    http_get_to_file "/events" "$recent_tmp" \
       -H "Accept: application/vnd.api+json" \
       --data-urlencode "filter[customer_id]=$cid" \
       --data-urlencode "sort=-created_at" \
       --data-urlencode "page[number]=1" \
       --data-urlencode "page[size]=$page_size"
   )"
-  jq -e '.data | type == "array"' >/dev/null <<<"$body" || {
-    rm -f "$ids_tmp" "$recent_tmp" "$services_tmp" "$unknown_tmp"
-    die '/events recent activity query did not return a JSON:API data array'
-  }
-  if ! jq -e --arg cid "$cid" '[.data[].attributes.customer_id // empty] | all(. == $cid)' >/dev/null <<<"$body"; then
-    rm -f "$ids_tmp" "$recent_tmp" "$services_tmp" "$unknown_tmp"
-    die '/events recent activity query returned another customer; refusing service discovery'
+  if [[ "$recent_code" == 2* ]] && jq -e '.data | type == "array"' >/dev/null 2>&1 <"$recent_tmp"; then
+    body="$(cat "$recent_tmp")"
+    if jq -e --arg cid "$cid" '[.data[].attributes.customer_id // empty] | all(. == $cid)' >/dev/null <<<"$body"; then
+      recent_events="$(jq '.data | length' <<<"$body")"
+      jq -r '.data[].attributes.service_id // empty' <<<"$body" >>"$ids_tmp"
+    else
+      rm -f "$ids_tmp" "$recent_tmp" "$services_tmp" "$unknown_tmp"
+      die '/events recent activity query returned another customer; refusing service discovery'
+    fi
+  else
+    printf '%s: WARNING: /events recent activity query returned HTTP %s or invalid JSON; continuing with activation-event service discovery only.\n' \
+      "${PROGRAM_NAME:-ngwaf}" "$recent_code" >&2
   fi
-  jq -r '.data[].attributes.service_id // empty' <<<"$body" >"$recent_tmp"
-  cat "$recent_tmp" >>"$ids_tmp"
 
   observed_ids="$(sort -u "$ids_tmp" | jq -Rn '[inputs | select(length > 0)]')"
   printf 'Observed %s unique service ID(s); fetching service metadata...\n' "$(jq 'length' <<<"$observed_ids")" >&2
@@ -147,7 +151,7 @@ get_selected_services() {
     --argjson audit_days "$SERVICE_AUDIT_DAYS" \
     --argjson activation_pages "$activation_pages" \
     --argjson activation_events "$activation_events" \
-    --argjson recent_events "$(jq '.data | length' <<<"$body")" \
+    --argjson recent_events "$recent_events" \
     --argjson truncated "$truncated" \
     '.[0] as $observed_ids
     | .[1] as $unknown_checks
@@ -171,6 +175,110 @@ get_selected_services() {
     }'
 }
 
+get_token_visible_customer_services() {
+  local cid tmp code services retrieved_at
+
+  cid="$(current_cid)"
+  tmp="$(mktemp)"
+  retrieved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  printf 'Listing token-visible services from Fastly service inventory...\n' >&2
+
+  code="$(http_get_to_file "/service" "$tmp")"
+  if [[ "$code" != 2* ]]; then
+    printf '%s: Service inventory unavailable: GET /service returned HTTP %s; not falling back to audit-event inventory.\n' \
+      "${PROGRAM_NAME:-ngwaf}" "$code" >&2
+    printf '%s: Token-visible customer services: UNKNOWN\n' "${PROGRAM_NAME:-ngwaf}" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if ! jq -e 'type == "array" or ((.data // null) | type == "array")' >/dev/null 2>&1 <"$tmp"; then
+    printf '%s: Service inventory unavailable: GET /service returned invalid JSON shape; expected an array or an object with a data array.\n' \
+      "${PROGRAM_NAME:-ngwaf}" >&2
+    printf '%s: Token-visible customer services: UNKNOWN\n' "${PROGRAM_NAME:-ngwaf}" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+
+  services="$(
+    jq --arg cid "$cid" '
+      def service_array:
+        if type == "array" then .
+        else (.data // [])
+        end;
+      service_array
+      | map(select((.id // "") != "" and (.customer_id // "") == $cid))
+      | unique_by(.id)
+    ' "$tmp"
+  )"
+  {
+    cat "$tmp"
+    printf '%s\n' "$services"
+  } | jq -s \
+    --arg method "fastly-service-inventory" \
+    --arg endpoint "GET /service" \
+    --arg cid "$cid" \
+    --arg retrieved_at "$retrieved_at" '
+      .[0] as $raw
+      | .[1] as $services
+      | (
+          if ($raw | type) == "array" then null
+          else ($raw.meta.total // null)
+          end
+        ) as $reported_total
+      | (
+          if ($raw | type) == "array" then ($raw | length)
+          else (($raw.data // []) | length)
+          end
+        ) as $returned_total
+      | ($reported_total != null and $returned_total < $reported_total) as $truncated
+      | (if $truncated then "PARTIAL" else "COMPLETE" end) as $status
+      |
+      {
+        meta: {
+          discovery_method: $method,
+          source: $endpoint,
+          customer_filter: "exact_customer_id",
+          selected_customer_id: $cid,
+          selected_total: (if $status == "COMPLETE" then ($services | length) else null end),
+          selected_total_lower_bound: ($services | length),
+          completeness: (if $status == "COMPLETE" then "token-visible" else "partial-token-visible" end),
+          status: $status,
+          evidence_type: "DIRECT",
+          count: (if $status == "COMPLETE" then ($services | length) else null end),
+          count_lower_bound: (if $status == "COMPLETE" then null else ($services | length) end),
+          result: {
+            status: $status,
+            count: (if $status == "COMPLETE" then ($services | length) else null end),
+            count_lower_bound: (if $status == "COMPLETE" then null else ($services | length) end),
+            source: $endpoint,
+            evidence_type: "DIRECT",
+            retrieved_at: $retrieved_at,
+            customer_scope: {
+              customer_id: $cid,
+              filter: "exact_customer_id",
+              token_visibility_complete_for_customer: null
+            },
+            reason: (if $status == "COMPLETE" then "complete service inventory response" else "PARTIAL: service inventory response reported more rows than were returned" end),
+            pagination: {
+              returned_total: $returned_total,
+              reported_total: $reported_total,
+              truncated: $truncated
+            },
+            fallback_used: false,
+            returned_total: $returned_total,
+            reported_total: $reported_total
+          },
+          token_visibility_complete_for_customer: null,
+          note: "Services are listed from Fastly service inventory, filtered to the selected customer ID, and deduplicated by service ID. This is token-visible inventory and does not prove that the token can see every service in the customer account."
+        },
+        data: $services
+      }
+    '
+  rm -f "$tmp"
+}
+
 # Service-level products that currently expose a public "services with product
 # enabled" endpoint. Account-level products (for example KV Store or Domain
 # Research) are intentionally excluded from this service matrix.
@@ -185,10 +293,237 @@ domain_inspector	Domain Inspector	none	observability
 fanout	Fanout	none	delivery
 image_optimizer	Image Optimizer	none	delivery
 log_explorer_insights	Log Explorer & Insights	none	observability
-ngwaf	Next-Gen WAF	ngwaf	security
+ngwaf	Edge WAF service attachments	ngwaf	security
 origin_inspector	Origin Inspector	none	observability
 websockets	WebSockets	none	delivery
 EOF
+}
+
+normalize_services_for_vcl_size_json() {
+  [[ $# -eq 1 ]] || die 'normalize_services_for_vcl_size_json requires <services-json>'
+
+  local services_body="$1"
+  jq '
+    def platform:
+      if (.type // "") == "vcl" then "CDN"
+      elif (.type // "") == "wasm" then "Compute"
+      else (.type // "unknown")
+      end;
+    def active_version:
+      if (.active_version | type) == "object" then
+        (.active_version.number // .active_version.version // .active_version.id // null)
+      elif .active_version != null then .active_version
+      else ((.environments // []) as $environments
+        | if ($environments | type) == "array" then
+            (([$environments[] | select((.name // "") == "production") | .active_version] | .[0]) // .version // null)
+          else (.version // null)
+          end)
+      end;
+    (.data // []) | map({
+      id,
+      name: (.name // ""),
+      customer_id: (.customer_id // null),
+      type: (.type // "unknown"),
+      platform: platform,
+      active_version: active_version,
+      paused: (.paused // false)
+    })
+  ' <<<"$services_body"
+}
+
+resolve_vcl_size_service_json() {
+  [[ $# -eq 2 ]] || die 'resolve_vcl_size_service_json requires <services-json> <service>'
+
+  local services_body="$1"
+  local selector="$2"
+  local services
+  services="$(normalize_services_for_vcl_size_json "$services_body")"
+
+  printf '%s\n' "$services" |
+    jq --arg selector "$selector" '
+      (map(select(.id == $selector))) as $id_matches
+      | if ($id_matches | length) == 1 then
+          {status: "COMPLETE", service: $id_matches[0]}
+        elif ($id_matches | length) > 1 then
+          {status: "AMBIGUOUS", reason: "multiple services matched service ID", matches: $id_matches}
+        else
+          (map(select((.name | ascii_downcase) == ($selector | ascii_downcase)))) as $name_matches
+          | if ($name_matches | length) == 1 then
+              {status: "COMPLETE", service: $name_matches[0]}
+            elif ($name_matches | length) > 1 then
+              {status: "AMBIGUOUS", reason: "multiple services matched service name", matches: $name_matches}
+            else
+              {status: "NOT_FOUND", reason: "service not found in selected customer token-visible service inventory", matches: []}
+            end
+        end
+    '
+}
+
+generated_vcl_line_count() {
+  [[ $# -eq 1 ]] || die 'generated_vcl_line_count requires <content-file>'
+
+  local path="$1"
+  local bytes newline_count last_byte_hex
+  bytes="$(wc -c <"$path" | tr -d '[:space:]')"
+  if [[ "$bytes" == "0" ]]; then
+    printf '0\n'
+    return
+  fi
+
+  newline_count="$(LC_ALL=C tr -cd '\n' <"$path" | wc -c | tr -d '[:space:]')"
+  last_byte_hex="$(tail -c 1 "$path" | od -An -tx1 | tr -d '[:space:]')"
+  if [[ "$last_byte_hex" == "0a" ]]; then
+    printf '%s\n' "$newline_count"
+  else
+    printf '%s\n' "$(( newline_count + 1 ))"
+  fi
+}
+
+measure_generated_vcl_for_service_json() {
+  [[ $# -eq 1 ]] || die 'measure_generated_vcl_for_service_json requires <service-json>'
+
+  local service_json="$1"
+  local sid name service_type platform active_version endpoint retrieved_at
+  local body_tmp content_tmp code bytes lines kib status reason
+
+  sid="$(jq -r '.id // empty' <<<"$service_json")"
+  name="$(jq -r '.name // ""' <<<"$service_json")"
+  service_type="$(jq -r '.type // "unknown"' <<<"$service_json")"
+  platform="$(jq -r '.platform // "unknown"' <<<"$service_json")"
+  active_version="$(jq -r '.active_version // empty' <<<"$service_json")"
+  retrieved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  if [[ "$service_type" != "vcl" ]]; then
+    jq -n \
+      --arg id "$sid" \
+      --arg name "$name" \
+      --arg type "$service_type" \
+      --arg platform "$platform" \
+      --arg active_version "$active_version" \
+      '{
+        id: $id,
+        name: $name,
+        type: $type,
+        platform: $platform,
+        active_version: (if $active_version == "" then null else $active_version end),
+        generated_vcl: {
+          status: "NOT_APPLICABLE",
+          evidence_type: "INFORMATIONAL",
+          source: null,
+          retrieved_at: null,
+          reason: "Generated VCL is not applicable to non-VCL/Compute services",
+          measurements: {
+            evidence_type: "DERIVED",
+            bytes: null,
+            lines: null,
+            kib: null
+          }
+        }
+      }'
+    return
+  fi
+
+  if [[ -z "$active_version" || "$active_version" == "null" ]]; then
+    jq -n \
+      --arg id "$sid" \
+      --arg name "$name" \
+      --arg type "$service_type" \
+      --arg platform "$platform" \
+      '{
+        id: $id,
+        name: $name,
+        type: $type,
+        platform: $platform,
+        active_version: null,
+        generated_vcl: {
+          status: "UNKNOWN",
+          evidence_type: "UNKNOWN",
+          source: "GET /service/{service_id}/version/{version}/generated_vcl",
+          retrieved_at: null,
+          reason: "active version could not be established",
+          measurements: {
+            evidence_type: "DERIVED",
+            bytes: null,
+            lines: null,
+            kib: null
+          }
+        }
+      }'
+    return
+  fi
+
+  endpoint="/service/$sid/version/$active_version/generated_vcl"
+  body_tmp="$(mktemp)"
+  content_tmp="$(mktemp)"
+  chmod 600 "$body_tmp" "$content_tmp" 2>/dev/null || true
+
+  code="$(http_get_to_file "$endpoint" "$body_tmp")"
+  if [[ "$code" == 2* ]] && jq -e '((type == "object" and (.content | type) == "string") or type == "string")' >/dev/null 2>&1 <"$body_tmp"; then
+    if jq -j 'if type == "object" then .content else . end' "$body_tmp" >"$content_tmp" 2>/dev/null; then
+      bytes="$(wc -c <"$content_tmp" | tr -d '[:space:]')"
+      lines="$(generated_vcl_line_count "$content_tmp")"
+      kib="$(jq -n --argjson bytes "$bytes" '($bytes / 1024 * 100 | round) / 100')"
+      status='COMPLETE'
+      reason='generated VCL retrieved and measured'
+    else
+      status='UNKNOWN'
+      reason='generated VCL response content could not be decoded'
+      bytes='null'
+      lines='null'
+      kib='null'
+    fi
+  elif [[ "$code" == 2* ]]; then
+    status='UNKNOWN'
+    reason='generated VCL response did not contain a supported content string'
+    bytes='null'
+    lines='null'
+    kib='null'
+  else
+    status='UNKNOWN'
+    reason="generated VCL query failed: HTTP $code"
+    bytes='null'
+    lines='null'
+    kib='null'
+  fi
+
+  rm -f "$body_tmp" "$content_tmp"
+
+  jq -n \
+    --arg id "$sid" \
+    --arg name "$name" \
+    --arg type "$service_type" \
+    --arg platform "$platform" \
+    --arg active_version "$active_version" \
+    --arg status "$status" \
+    --arg source "GET /service/{service_id}/version/{version}/generated_vcl" \
+    --arg endpoint "$endpoint" \
+    --arg retrieved_at "$retrieved_at" \
+    --arg reason "$reason" \
+    --argjson bytes "$bytes" \
+    --argjson lines "$lines" \
+    --argjson kib "$kib" '
+      {
+        id: $id,
+        name: $name,
+        type: $type,
+        platform: $platform,
+        active_version: $active_version,
+        generated_vcl: {
+          status: $status,
+          evidence_type: (if $status == "COMPLETE" then "DIRECT" else "UNKNOWN" end),
+          source: $source,
+          endpoint: $endpoint,
+          retrieved_at: (if $status == "COMPLETE" then $retrieved_at else null end),
+          reason: $reason,
+          measurements: {
+            evidence_type: "DERIVED",
+            bytes: $bytes,
+            lines: $lines,
+            kib: $kib
+          }
+        }
+      }
+    '
 }
 
 # Return one normalized JSON object for a service-level product. Prefer the
@@ -197,47 +532,139 @@ EOF
 # different customer, fall back to read-only per-service enablement probes.
 
 discover_product_json() {
-  [[ $# -eq 5 ]] || die 'discover_product_json requires <id> <label> <config-kind> <category> <services-json>'
+  [[ $# -ge 5 && $# -le 6 ]] || die 'discover_product_json requires <id> <label> <config-kind> <category> <services-json> [request-config]'
 
   local product_id="$1"
   local label="$2"
   local config_kind="$3"
   local category="$4"
   local services_body="$5"
-  local cid list_tmp list_code returned_cid method enabled_ids unknown_checks
-  local probe_tmp probe_code sid configs_tmp configs
+  local request_config="${6:-true}"
+  local cid list_tmp parse_tmp list_code returned_cid method enabled_ids raw_enabled_ids unknown_checks
+  local fallback_reason disabled_count forced_status forced_reason
+  local probe_tmp probe_code sid configs_tmp configs retrieved_at selected_services
+  [[ "$request_config" == 'true' || "$request_config" == 'false' ]] ||
+    die 'discover_product_json request-config must be true or false'
 
   cid="$(current_cid)"
-  list_tmp="$(mktemp)"
-  list_code="$(
-    http_get_to_file "/enabled-products/v1/$product_id/services" "$list_tmp" \
-      --data-urlencode "customer_id=$cid"
-  )"
+  retrieved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  list_tmp=''
+  parse_tmp=''
+  list_code=''
   enabled_ids='[]'
+  raw_enabled_ids='[]'
   unknown_checks='[]'
   returned_cid=''
   method='customer-list'
+  fallback_reason=''
+  disabled_count=0
+  forced_status=''
+  forced_reason=''
+  selected_services='[]'
 
-  if [[ "$list_code" == 2* ]] && jq -e 'type == "object" and ((.services // []) | type == "array")' >/dev/null 2>&1 <"$list_tmp"; then
-    returned_cid="$(jq -r '.customer.id // empty' "$list_tmp")"
-    if [[ -n "$returned_cid" && "$returned_cid" == "$cid" ]]; then
-      enabled_ids="$(
-        {
-          jq '.data' <<<"$services_body"
-          cat "$list_tmp"
-        } | jq -s '
-          .[0] as $services
-          | (.[1].services // []) as $enabled
-          | [$services[] | select(.id as $id | $enabled | index($id) != null) | .id]
-        '
-      )"
-    else
-      method='per-service-probe'
-    fi
+  if ! selected_services="$(
+    jq -c '
+      def selected_array:
+        if type == "object" and (.data | type) == "array" then .data
+        elif type == "array" then .
+        else error("selected service inventory is missing a data array")
+        end;
+      selected_array as $services
+      | if all($services[]; type == "object" and ((.id // "") | type == "string" and length > 0)) then
+          $services
+        else
+          error("selected service inventory contains service objects without string id")
+        end
+    ' <<<"$services_body" 2>/dev/null
+  )"; then
+    selected_services='[]'
+    method='selected-service-inventory-parse-error'
+    forced_status='UNKNOWN'
+    forced_reason='selected service inventory could not be normalized'
+    unknown_checks='[]'
   else
-    method='per-service-probe'
+    list_tmp="$(mktemp)"
+    parse_tmp="$(mktemp)"
+    list_code="$(
+      http_get_to_file "/enabled-products/v1/$product_id/services" "$list_tmp" \
+        --data-urlencode "customer_id=$cid"
+    )"
   fi
-  rm -f "$list_tmp"
+
+  if [[ -z "$forced_status" && "$list_code" == 2* ]]; then
+    if jq --arg cid "$cid" '
+      def service_id:
+        if type == "string" then .
+        elif type == "object" then
+          (
+            .id
+            // .service_id
+            // .service.id
+            // .attributes.service_id
+            // .attributes.id
+            // empty
+          )
+        else empty
+        end;
+      def ids_from($items):
+        [$items[] | service_id | select(type == "string" and length > 0)];
+      def customer:
+        (.customer.id // .customer_id // .meta.customer_id // .data.customer_id // null);
+      if type == "object" then
+        if has("services") then
+          if (.services | type) == "array" then
+            {ok: true, collection: "services", customer_id: customer, ids: ids_from(.services)}
+          else
+            {ok: false, reason: "services field is present but is not an array"}
+          end
+        elif has("data") then
+          if (.data | type) == "array" then
+            {ok: true, collection: "data", customer_id: customer, ids: ids_from(.data)}
+          else
+            {ok: false, reason: "data field is present but is not an array"}
+          end
+        else
+          {ok: false, reason: "missing services or data collection"}
+        end
+      elif type == "array" then
+        {ok: true, collection: "root", customer_id: null, ids: ids_from(.)}
+      else
+        {ok: false, reason: "response root is not an object or array"}
+      end
+    ' "$list_tmp" >"$parse_tmp" 2>/dev/null; then
+      if [[ "$(jq -r '.ok' "$parse_tmp")" == 'true' ]]; then
+        returned_cid="$(jq -r '.customer_id // empty' "$parse_tmp")"
+        if [[ -n "$returned_cid" && "$returned_cid" != "$cid" ]]; then
+          method='per-service-probe'
+          fallback_reason="customer-list returned customer.id=$returned_cid"
+        else
+          raw_enabled_ids="$(jq '.ids' "$parse_tmp")"
+        fi
+      else
+        method='customer-list-parse-error'
+        forced_status='UNKNOWN'
+        forced_reason="$(jq -r '.reason // "enabled-product response did not contain a recognized service collection"' "$parse_tmp")"
+      fi
+    else
+      method='customer-list-parse-error'
+      forced_status='UNKNOWN'
+      forced_reason='enabled-product response was not valid JSON'
+    fi
+
+    if [[ "$method" == 'customer-list' ]]; then
+      enabled_ids="$(
+        printf '%s\n%s\n' "$selected_services" "$raw_enabled_ids" |
+          jq -s '
+            .[0] as $services
+            | (.[1] | unique) as $enabled
+            | [$services[] | select(.id as $id | $enabled | index($id) != null) | .id]
+          '
+      )"
+    fi
+  elif [[ -z "$forced_status" ]]; then
+    method='per-service-probe'
+    fallback_reason="customer-list returned HTTP $list_code"
+  fi
 
   if [[ "$method" == 'per-service-probe' ]]; then
     local enabled_tmp unknown_tmp
@@ -250,24 +677,33 @@ discover_product_json() {
       probe_code="$(http_get_to_file "/enabled-products/v1/$product_id/services/$sid" "$probe_tmp")"
       case "$probe_code" in
         2*) printf '%s\n' "$sid" >>"$enabled_tmp" ;;
-        404) : ;;
+        404) disabled_count=$(( disabled_count + 1 )) ;;
         *)
           jq -n --arg service_id "$sid" --arg status "$probe_code" \
             '{service_id: $service_id, http_status: $status}' >>"$unknown_tmp"
           ;;
       esac
       rm -f "$probe_tmp"
-    done < <(jq -r '.data[].id' <<<"$services_body")
+    done < <(jq -r '.[].id' <<<"$selected_services")
 
     enabled_ids="$(jq -Rn '[inputs | select(length > 0)]' <"$enabled_tmp")"
+    raw_enabled_ids="$enabled_ids"
     unknown_checks="$(jq -s '.' "$unknown_tmp")"
     rm -f "$enabled_tmp" "$unknown_tmp"
+  elif [[ -n "$forced_status" ]]; then
+    unknown_checks="$(
+      jq -r '.[].id' <<<"$selected_services" |
+        jq -Rn --arg status 'parse_error' '[inputs | select(length > 0) | {service_id: ., http_status: $status}]'
+    )"
   fi
+  [[ -z "$list_tmp" ]] || rm -f "$list_tmp"
+  [[ -z "$parse_tmp" ]] || rm -f "$parse_tmp"
 
-  # Fetch configuration only for products whose public API exposes a useful
-  # configuration resource today: NGWAF, Bot Management, and DDoS Protection.
+  # Fetch configuration only when explicitly requested for products whose
+  # public API exposes a useful configuration resource today: NGWAF, Bot
+  # Management, and DDoS Protection.
   configs_tmp="$(mktemp)"
-  if [[ "$config_kind" != 'none' ]]; then
+  if [[ "$config_kind" != 'none' && "$request_config" == 'true' ]]; then
     while IFS= read -r sid; do
       [[ -n "$sid" ]] || continue
       probe_tmp="$(mktemp)"
@@ -277,28 +713,61 @@ discover_product_json() {
           jq -s \
             --arg service_id "$sid" \
             '.[0] as $configuration
-             | {service_id: $service_id, configuration: $configuration, configuration_http_status: 200}' >>"$configs_tmp"
+             | {
+                 service_id: $service_id,
+                 configuration: $configuration,
+                 configuration_http_status: 200,
+                 configuration_status: "RETRIEVED",
+                 configuration_requested: true
+               }' >>"$configs_tmp"
       else
         jq -n \
           --arg service_id "$sid" \
           --arg status "$probe_code" \
-          '{service_id: $service_id, configuration: null, configuration_http_status: $status}' >>"$configs_tmp"
+          '{
+             service_id: $service_id,
+             configuration: null,
+             configuration_http_status: $status,
+             configuration_status: "UNAVAILABLE",
+             configuration_requested: true
+           }' >>"$configs_tmp"
       fi
       rm -f "$probe_tmp"
+    done < <(jq -r '.[]' <<<"$enabled_ids")
+  elif [[ "$config_kind" != 'none' ]]; then
+    while IFS= read -r sid; do
+      [[ -n "$sid" ]] || continue
+      jq -n \
+        --arg service_id "$sid" \
+        '{
+           service_id: $service_id,
+           configuration: null,
+           configuration_http_status: null,
+           configuration_status: "NOT_REQUESTED",
+           configuration_requested: false
+         }' >>"$configs_tmp"
     done < <(jq -r '.[]' <<<"$enabled_ids")
   fi
   configs="$(jq -s '.' "$configs_tmp")"
   rm -f "$configs_tmp"
 
   {
-    jq '.data' <<<"$services_body"
-    printf '%s\n%s\n%s\n' "$enabled_ids" "$configs" "$unknown_checks"
+    printf '%s\n' "$selected_services"
+    printf '%s\n%s\n%s\n%s\n' "$enabled_ids" "$configs" "$unknown_checks" "$raw_enabled_ids"
   } | jq -s \
     --arg id "$product_id" \
     --arg label "$label" \
     --arg category "$category" \
+    --arg cid "$cid" \
     --arg discovery_method "$method" \
-    --arg list_customer_id "$returned_cid" '
+    --arg fallback_reason "$fallback_reason" \
+    --arg list_customer_id "$returned_cid" \
+    --arg retrieved_at "$retrieved_at" \
+    --arg forced_status "$forced_status" \
+    --arg forced_reason "$forced_reason" \
+    --arg config_kind "$config_kind" \
+    --arg request_config "$request_config" \
+    --argjson disabled_count "$disabled_count" '
       def platform:
         if (.type // "") == "vcl" then "CDN"
         elif (.type // "") == "wasm" then "Compute"
@@ -308,22 +777,127 @@ discover_product_json() {
         if (.active_version | type) == "object" then
           (.active_version.number // .active_version.version // .active_version.id // null)
         elif .active_version != null then .active_version
-        elif ((.environments // []) | type) == "array" then
-          (([.environments[] | select((.name // "") == "production") | .active_version] | .[0]) // .version // null)
-        else (.version // null)
+        else ((.environments // []) as $environments
+          | if ($environments | type) == "array" then
+              (([$environments[] | select((.name // "") == "production") | .active_version] | .[0]) // .version // null)
+            else (.version // null)
+            end)
         end;
       .[0] as $all_services
       | .[1] as $enabled_ids
       | .[2] as $configs
       | .[3] as $unknown_checks
+      | .[4] as $raw_enabled_ids
+      | ($raw_enabled_ids | unique) as $raw_unique_enabled_ids
+      | ([$all_services[].id] | unique) as $selected_service_ids
+      | ($raw_unique_enabled_ids - $selected_service_ids) as $rejected_service_ids
+      | (($raw_enabled_ids | length) - ($raw_unique_enabled_ids | length)) as $duplicate_returned_count
+      | ($raw_enabled_ids | group_by(.) | map(select(length > 1) | .[0])) as $duplicate_returned_service_ids
+      | ($all_services | length) as $service_total
+      | ($enabled_ids | length) as $enabled_count
+      | ($unknown_checks | length) as $unknown_count
+      | ([$configs[]? | select(.configuration_status == "RETRIEVED")] | length) as $configuration_retrieved_count
+      | ([$configs[]? | select(.configuration_status == "UNAVAILABLE")] | length) as $configuration_unavailable_count
+      | ([$configs[]? | select(.configuration_status == "NOT_REQUESTED")] | length) as $configuration_not_requested_count
+      | (
+          if $config_kind == "none" then "NOT_APPLICABLE"
+          elif $enabled_count == 0 then "NOT_APPLICABLE"
+          elif $request_config != "true" then "NOT_REQUESTED"
+          elif $configuration_unavailable_count == 0 then "COMPLETE"
+          elif $configuration_retrieved_count == 0 then "UNAVAILABLE"
+          else "PARTIAL"
+          end
+        ) as $configuration_status
+      | (
+          if $discovery_method == "customer-list" then ($service_total - $enabled_count)
+          else $disabled_count
+          end
+        ) as $effective_disabled_count
+      | (
+          if $forced_status != "" then $forced_status
+              elif $unknown_count == 0 then "COMPLETE"
+              elif $unknown_count == $service_total then "UNKNOWN"
+              else "PARTIAL"
+              end
+        ) as $status
+      | (if $status == "UNKNOWN" then "UNKNOWN" else "DIRECT" end) as $evidence_type
+      | (
+          if $status == "COMPLETE" then $enabled_count
+          else null
+          end
+        ) as $count
+      | (
+          if $status == "PARTIAL" then $enabled_count
+          else null
+          end
+        ) as $count_lower_bound
       | {
         id: $id,
         label: $label,
         category: $category,
         discovery_method: $discovery_method,
         product_list_customer_id: (if $list_customer_id == "" then null else $list_customer_id end),
-        enabled_count: ($enabled_ids | length),
-        unknown_check_count: ($unknown_checks | length),
+        status: $status,
+        count: $count,
+        count_lower_bound: $count_lower_bound,
+        evidence_type: $evidence_type,
+        result: {
+          status: $status,
+          count: $count,
+          count_lower_bound: $count_lower_bound,
+          source: $discovery_method,
+          api: "GET /enabled-products/v1/" + $id + "/services",
+          evidence_type: $evidence_type,
+          retrieved_at: $retrieved_at,
+          customer_scope: {
+            customer_id: $cid,
+            selected_customer_id: $cid,
+            validation: "selected customer service inventory validation"
+          },
+          reason: (
+            if $forced_reason != "" then "query failed: " + $forced_reason
+            elif $status == "UNKNOWN" and $unknown_count == $service_total and $service_total == 0 then "query failed: product inventory unavailable"
+            elif $status == "COMPLETE" and $fallback_reason == "" and ($rejected_service_ids | length) == 0 and $duplicate_returned_count == 0 then "complete product service list"
+            elif $status == "COMPLETE" and $fallback_reason == "" then "complete product service list; rejected " + (($rejected_service_ids | length) | tostring) + " unvalidated service ID(s); ignored " + ($duplicate_returned_count | tostring) + " duplicate returned service ID(s)"
+            elif $status == "COMPLETE" then "complete per-service fallback after " + $fallback_reason
+            elif $status == "PARTIAL" then "query partially failed: " + ($unknown_count | tostring) + " of " + ($service_total | tostring) + " service check(s) unknown" + (if $fallback_reason == "" then "" else "; fallback reason: " + $fallback_reason end)
+            else "query failed: all " + ($service_total | tostring) + " service check(s) unknown" + (if $fallback_reason == "" then "" else "; fallback reason: " + $fallback_reason end)
+            end
+          ),
+          http_statuses: ([$unknown_checks[].http_status] | unique),
+          pagination: null,
+          fallback_used: ($discovery_method != "customer-list"),
+          fallback_reason: (if $fallback_reason == "" then null else $fallback_reason end),
+          services_checked: $service_total,
+          enabled_count: $enabled_count,
+          disabled_count: $effective_disabled_count,
+          unknown_count: $unknown_count,
+          rejected_count: ($rejected_service_ids | length),
+          rejected_service_ids: $rejected_service_ids,
+          duplicate_returned_count: $duplicate_returned_count,
+          duplicate_returned_service_ids: $duplicate_returned_service_ids,
+          configuration: {
+            status: $configuration_status,
+            requested: ($request_config == "true" and $config_kind != "none" and $enabled_count > 0),
+            kind: $config_kind,
+            source: (
+              if $config_kind == "none" or $request_config != "true" or $enabled_count == 0 then null
+              else "GET /enabled-products/v1/" + $id + "/services/{service_id}/configuration"
+              end
+            ),
+            evidence_type: (
+              if $configuration_status == "COMPLETE" then "DIRECT"
+              elif $configuration_status == "NOT_APPLICABLE" then "INFORMATIONAL"
+              else "UNKNOWN"
+              end
+            ),
+            retrieved_count: $configuration_retrieved_count,
+            unavailable_count: $configuration_unavailable_count,
+            not_requested_count: $configuration_not_requested_count
+          }
+        },
+        enabled_count: $enabled_count,
+        unknown_check_count: $unknown_count,
         unknown_checks: $unknown_checks,
         services: [
           $all_services[]
@@ -339,7 +913,31 @@ discover_product_json() {
               active_version: ($svc | active_version),
               paused: ($svc.paused // false),
               configuration: ($cfg.configuration // null),
-              configuration_http_status: ($cfg.configuration_http_status // null)
+              configuration_http_status: ($cfg.configuration_http_status // null),
+              configuration_status: (
+                $cfg.configuration_status //
+                (if $config_kind == "none" then "NOT_APPLICABLE"
+                 elif $request_config != "true" then "NOT_REQUESTED"
+                 else "UNAVAILABLE"
+                 end)
+              ),
+              configuration_evidence_type: (
+                ($cfg.configuration_status //
+                  (if $config_kind == "none" then "NOT_APPLICABLE"
+                   elif $request_config != "true" then "NOT_REQUESTED"
+                   else "UNAVAILABLE"
+                   end)) as $cfg_status
+                | if $cfg_status == "RETRIEVED" then "DIRECT"
+                  elif $cfg_status == "NOT_APPLICABLE" then "INFORMATIONAL"
+                  else "UNKNOWN"
+                  end
+              ),
+              configuration_source: (
+                if $config_kind == "none" or $request_config != "true" then null
+                else "GET /enabled-products/v1/" + $id + "/services/" + $svc.id + "/configuration"
+                end
+              ),
+              configuration_requested: ($cfg.configuration_requested // ($request_config == "true" and $config_kind != "none"))
             }
         ]
       }
@@ -371,7 +969,8 @@ cmd_services() {
 
   cid="$(current_cid)"
   customer="$(get "/customer/$cid")"
-  services_body="$(get_selected_services)"
+  services_body="$(get_token_visible_customer_services)" ||
+    die 'service inventory unavailable; cannot safely use audit-event-derived service counts as a substitute'
 
   normalized="$(
     printf '%s\n%s\n' "$customer" "$services_body" |
@@ -385,9 +984,11 @@ cmd_services() {
           if (.active_version | type) == "object" then
             (.active_version.number // .active_version.version // .active_version.id // null)
           elif .active_version != null then .active_version
-          elif ((.environments // []) | type) == "array" then
-            (([.environments[] | select((.name // "") == "production") | .active_version] | .[0]) // .version // null)
-          else (.version // null)
+          else ((.environments // []) as $environments
+            | if ($environments | type) == "array" then
+                (([$environments[] | select((.name // "") == "production") | .active_version] | .[0]) // .version // null)
+              else (.version // null)
+              end)
           end;
         .[0] as $customer
         | .[1] as $body
@@ -401,12 +1002,12 @@ cmd_services() {
               other: ([$services[] | select(((.type // "") != "vcl") and ((.type // "") != "wasm"))] | length),
               paused: ([$services[] | select(.paused == true)] | length),
               discovery_method: ($body.meta.discovery_method // null),
-              audit_window_days: ($body.meta.audit_window_days // null),
-              activation_event_pages_fetched: ($body.meta.activation_event_pages_fetched // null),
-              activation_events_scanned: ($body.meta.activation_events_scanned // null),
-              recent_events_scanned: ($body.meta.recent_events_scanned // null),
-              activation_scan_truncated: ($body.meta.activation_scan_truncated // false),
-              unknown_service_lookup_count: ($body.meta.unknown_service_lookup_count // 0),
+              source: ($body.meta.source // $body.meta.result.source // null),
+              status: ($body.meta.status // $body.meta.result.status // "UNKNOWN"),
+              evidence_type: ($body.meta.evidence_type // $body.meta.result.evidence_type // "UNKNOWN"),
+              count: ($body.meta.count // $body.meta.result.count // null),
+              count_lower_bound: ($body.meta.count_lower_bound // $body.meta.result.count_lower_bound // null),
+              token_visibility_complete_for_customer: ($body.meta.token_visibility_complete_for_customer // null),
               completeness: ($body.meta.completeness // "unknown")
             },
             services: [
@@ -434,15 +1035,10 @@ cmd_services() {
 
   jq -r '
     "Customer: \(.customer.name) (\(.customer.id))",
-    "Observed services: \(.summary.total) total — \(.summary.cdn) CDN, \(.summary.compute) Compute, \(.summary.other) other; \(.summary.paused) paused",
-    "Discovery: audit events over \(.summary.audit_window_days)d; activation pages=\(.summary.activation_event_pages_fetched), activation events=\(.summary.activation_events_scanned), recent events=\(.summary.recent_events_scanned)"
+    "Token-visible customer services: \(.summary.total) total — \(.summary.cdn) CDN, \(.summary.compute) Compute, \(.summary.other) other; \(.summary.paused) paused",
+    "Service inventory source: \(.summary.source // .summary.discovery_method // "unknown")",
+    "Inventory completeness: \(.summary.completeness)"
   ' <<<"$normalized"
-  if jq -e '.summary.activation_scan_truncated == true' >/dev/null <<<"$normalized"; then
-    printf 'WARNING: activation-event discovery hit the configured page cap; this observed service set may be incomplete. Increase NGWAF_SERVICE_AUDIT_MAX_PAGES if needed.\n' >&2
-  fi
-  if jq -e '.summary.unknown_service_lookup_count > 0' >/dev/null <<<"$normalized"; then
-    printf 'WARNING: one or more observed service IDs could not be resolved. Use `ngwaf services --json` for discovery metadata.\n' >&2
-  fi
   printf '\n'
 
   jq -r '
@@ -463,6 +1059,189 @@ cmd_services() {
   ' <<<"$normalized" | human_table
 }
 
+cmd_service_vcl_size() {
+  [[ $# -ge 1 && $# -le 2 ]] || die 'usage: fastly-audit service vcl-size <service> [--json]'
+
+  local mode='' selector='' arg cid customer services_body resolved service result payload
+  for arg in "$@"; do
+    case "$arg" in
+      --json) mode='--json' ;;
+      *)
+        [[ -z "$selector" ]] || die 'usage: fastly-audit service vcl-size <service> [--json]'
+        selector="$arg"
+        ;;
+    esac
+  done
+  [[ -n "$selector" ]] || die 'usage: fastly-audit service vcl-size <service> [--json]'
+
+  cid="$(current_cid)"
+  customer="$(get "/customer/$cid")"
+  services_body="$(get_token_visible_customer_services)" ||
+    die 'service inventory unavailable; cannot resolve service safely'
+  resolved="$(resolve_vcl_size_service_json "$services_body" "$selector")"
+
+  case "$(jq -r '.status' <<<"$resolved")" in
+    COMPLETE)
+      service="$(jq '.service' <<<"$resolved")"
+      ;;
+    AMBIGUOUS)
+      die "service selector is ambiguous: $selector"
+      ;;
+    *)
+      die "service not found in selected customer token-visible service inventory: $selector"
+      ;;
+  esac
+
+  result="$(measure_generated_vcl_for_service_json "$service")"
+  payload="$(
+    printf '%s\n%s\n' "$customer" "$result" |
+      jq -s '
+        .[0] as $customer
+        | .[1] as $service
+        | {
+            schema_version: 1,
+            command: "service vcl-size",
+            customer: {id: ($customer.id // null), name: ($customer.name // null)},
+            service: $service,
+            limitations: [
+              "Generated VCL size is measured from Fastly active generated VCL for the active service version.",
+              "Measurements are byte and line counts of generated VCL content only; response JSON, headers, and transport overhead are not counted.",
+              "Generated VCL content is not included in normal output."
+            ]
+          }
+      '
+  )"
+
+  if [[ "$mode" == '--json' ]]; then
+    jq . <<<"$payload"
+    return
+  fi
+
+  jq -r '
+    def comma:
+      tostring | split("") | reverse | to_entries
+      | map(if .key > 0 and (.key % 3) == 0 then .value + "," else .value end)
+      | reverse | join("");
+    def size:
+      if . == null then "UNKNOWN" else ((. | tostring) + " KiB") end;
+    "Service: \(.service.name)",
+    "Service ID: \(.service.id)",
+    "Type: \(.service.platform)",
+    "Active version: \(.service.active_version // "UNKNOWN")",
+    "",
+    "Generated VCL",
+    "Lines: \(.service.generated_vcl.measurements.lines | if . == null then "UNKNOWN" else comma end)",
+    "Bytes: \(.service.generated_vcl.measurements.bytes | if . == null then "UNKNOWN" else comma end)",
+    "Size: \(.service.generated_vcl.measurements.kib | size)",
+    "Status: \(.service.generated_vcl.status)",
+    "Reason: \(.service.generated_vcl.reason)"
+  ' <<<"$payload"
+}
+
+cmd_customer_vcl_size() {
+  [[ $# -le 1 ]] || die 'usage: fastly-audit customer vcl-size [--json]'
+
+  local mode="${1:-}"
+  local cid customer services_body services results_tmp result payload
+  [[ -z "$mode" || "$mode" == '--json' ]] || die 'usage: fastly-audit customer vcl-size [--json]'
+
+  cid="$(current_cid)"
+  customer="$(get "/customer/$cid")"
+  services_body="$(get_token_visible_customer_services)" ||
+    die 'service inventory unavailable; cannot build customer VCL size report safely'
+  services="$(normalize_services_for_vcl_size_json "$services_body")"
+  results_tmp="$(mktemp)"
+
+  while IFS= read -r service; do
+    [[ -n "$service" ]] || continue
+    result="$(measure_generated_vcl_for_service_json "$service")"
+    printf '%s\n' "$result" >>"$results_tmp"
+  done < <(jq -c '.[]' <<<"$services")
+
+  payload="$(
+    printf '%s\n%s\n%s\n' "$customer" "$services_body" "$(jq -s '.' "$results_tmp")" |
+      jq -s '
+        .[0] as $customer
+        | .[1] as $services_body
+        | .[2] as $services
+        | ($services | map(select(.type == "vcl"))) as $vcl_services
+        | {
+            schema_version: 1,
+            command: "customer vcl-size",
+            customer: {id: ($customer.id // null), name: ($customer.name // null)},
+            summary: {
+              total_token_visible_services: ($services | length),
+              vcl_services: ($vcl_services | length),
+              measured: ([$services[] | select(.generated_vcl.status == "COMPLETE")] | length),
+              unknown: ([$services[] | select(.generated_vcl.status == "UNKNOWN")] | length),
+              not_applicable: ([$services[] | select(.generated_vcl.status == "NOT_APPLICABLE")] | length),
+              compute_skipped: ([$services[] | select(.type == "wasm")] | length),
+              source: "GET /service/{service_id}/version/{version}/generated_vcl",
+              service_inventory: ($services_body.meta.result // $services_body.meta // {})
+            },
+            services: (
+              $services
+              | sort_by(-(.generated_vcl.measurements.bytes // -1), .name)
+            ),
+            limitations: [
+              "Generated VCL content is not included in normal output.",
+              "Only VCL/CDN services are queried for generated VCL; Compute services are not applicable.",
+              "Customer scope is the selected customer token-visible service inventory filtered and deduplicated by service ID."
+            ]
+          }
+      '
+  )"
+  rm -f "$results_tmp"
+
+  if [[ "$mode" == '--json' ]]; then
+    jq . <<<"$payload"
+    return
+  fi
+
+  jq -r '
+    "Customer: \(.customer.name) (\(.customer.id))",
+    "VCL services measured: \(.summary.measured)",
+    "Unknown: \(.summary.unknown)",
+    "Compute skipped: \(.summary.compute_skipped)"
+  ' <<<"$payload"
+
+  printf '\n'
+  jq -r '
+    def size:
+      if . == null then "UNKNOWN" else ((. | tostring) + " KiB") end;
+    ["SERVICE", "VERSION", "LINES", "BYTES", "SIZE"],
+    (
+      .services[]
+      | select(.generated_vcl.status == "COMPLETE")
+      | [
+          .name,
+          (.active_version | tostring),
+          (.generated_vcl.measurements.lines | tostring),
+          (.generated_vcl.measurements.bytes | tostring),
+          (.generated_vcl.measurements.kib | size)
+        ]
+    )
+    | @tsv
+  ' <<<"$payload" | human_table
+
+  if jq -e '.summary.unknown > 0' >/dev/null <<<"$payload"; then
+    printf '\nUNKNOWN\n'
+    jq -r '
+      ["SERVICE", "VERSION", "REASON"],
+      (
+        .services[]
+        | select(.generated_vcl.status == "UNKNOWN")
+        | [
+            .name,
+            (.active_version // "-" | tostring),
+            (.generated_vcl.reason // "unknown")
+          ]
+      )
+      | @tsv
+    ' <<<"$payload" | human_table
+  fi
+}
+
 cmd_products() {
   [[ $# -le 1 ]] || die 'usage: ngwaf products [--json]'
 
@@ -472,7 +1251,8 @@ cmd_products() {
 
   cid="$(current_cid)"
   customer="$(get "/customer/$cid")"
-  services_body="$(get_selected_services)"
+  services_body="$(get_token_visible_customer_services)" ||
+    die 'service inventory unavailable; cannot safely use audit-event-derived service counts as a substitute'
   products="$(collect_products_json "$services_body")"
 
   payload="$(
@@ -487,7 +1267,7 @@ cmd_products() {
           service_discovery: ($services_body.meta // {}),
           product_definitions_scanned: ($products | length),
           products: $products,
-          note: "Service-level product inventory is evaluated against the audit-observed selected-customer service set. Account-level products without a service mapping are not included. Non-2xx checks other than 404 are reported as unknown rather than treated as disabled."
+          note: "Service-level product inventory is evaluated against the selected-customer token-visible service inventory from GET /service. Account-level products without a service mapping are not included. Non-2xx checks other than 404 are reported as unknown rather than treated as disabled."
         }
       '
   )"
@@ -499,14 +1279,21 @@ cmd_products() {
 
   jq -r '
     "Customer: \(.customer.name) (\(.customer.id))",
-    "Observed services scanned: \(.services_scanned)",
-    "Service discovery: audit events over \(.service_discovery.audit_window_days // "?")d; truncated=\(.service_discovery.activation_scan_truncated // false)",
+    "Token-visible customer services scanned: \(.services_scanned)",
+    "Service inventory source: \(.service_discovery.source // .service_discovery.discovery_method // "unknown")",
     "Service-level products checked: \(.product_definitions_scanned)"
   ' <<<"$payload"
 
   printf '\nPRODUCT SUMMARY\n'
   jq -r '
-    ["CATEGORY", "PRODUCT", "ENABLED SERVICES", "UNKNOWN CHECKS", "DISCOVERY"],
+    def count_display:
+      if (.result.status // .status) == "COMPLETE" then
+        ((.result.count // .enabled_count // 0) | tostring) + "/" + ((.result.services_checked // 0) | tostring)
+      elif (.result.status // .status) == "PARTIAL" then
+        ">=" + ((.result.count_lower_bound // .enabled_count // 0) | tostring) + "/" + ((.result.services_checked // 0) | tostring)
+      else "UNKNOWN"
+      end;
+    ["CATEGORY", "PRODUCT", "SERVICES", "STATUS", "DISCOVERY"],
     (
       .products
       | sort_by(.category, .label)
@@ -514,8 +1301,8 @@ cmd_products() {
       | [
           (.category | ascii_upcase),
           .label,
-          (.enabled_count | tostring),
-          (.unknown_check_count | tostring),
+          count_display,
+          (.result.status // .status // "UNKNOWN"),
           .discovery_method
         ]
     )
@@ -561,7 +1348,8 @@ cmd_inventory() {
 
   cid="$(current_cid)"
   customer="$(get "/customer/$cid")"
-  services_body="$(get_selected_services)"
+  services_body="$(get_token_visible_customer_services)" ||
+    die 'service inventory unavailable; cannot safely use audit-event-derived service counts as a substitute'
   products="$(collect_products_json "$services_body")"
   workspaces="$(
     get_all_pages "/ngwaf/v1/workspaces" \
@@ -595,8 +1383,10 @@ cmd_inventory() {
                     active_version: (
                       if (.active_version | type) == "object" then (.active_version.number // .active_version.version // .active_version.id // null)
                       elif .active_version != null then .active_version
-                      elif ((.environments // []) | type) == "array" then (([.environments[] | select((.name // "") == "production") | .active_version] | .[0]) // .version // null)
-                      else (.version // null)
+                      else ((.environments // []) as $environments
+                        | if ($environments | type) == "array" then (([$environments[] | select((.name // "") == "production") | .active_version] | .[0]) // .version // null)
+                          else (.version // null)
+                          end)
                       end
                     ),
                     paused: (.paused // false)
@@ -613,8 +1403,7 @@ cmd_inventory() {
               pages_fetched: ($workspaces.meta.pages_fetched // null)
             },
             notes: [
-              "Service inventory contains services observed through selected-customer audit events and then verified by direct service lookup; it is not guaranteed to be a complete all-time account inventory.",
-              "The audit-based service discovery window is finite and may be truncated by NGWAF_SERVICE_AUDIT_MAX_PAGES on very active accounts.",
+              "Service inventory contains token-visible services from Fastly service inventory filtered to the selected customer ID; it does not prove that the token can see every service in the customer account.",
               "Product inventory covers known public service-level product enablement APIs; account-level products are not included.",
               "A product check that returns a non-2xx status other than 404 is reported as unknown, not disabled.",
               "Product enablement is configuration inventory and does not prove that a service currently carries meaningful production traffic."
@@ -631,13 +1420,14 @@ cmd_inventory() {
   jq -r '
     "Customer: \(.customer.name) (\(.customer.id))",
     "",
-    "EDGE SERVICES (AUDIT-OBSERVED)",
+    "EDGE SERVICES (TOKEN-VISIBLE)",
     "  Total:   \(.edge_services.total)",
     "  CDN:     \(.edge_services.cdn)",
     "  Compute: \(.edge_services.compute)",
     "  Other:   \(.edge_services.other)",
     "  Paused:  \(.edge_services.paused)",
-    "  Audit window: \(.edge_services.discovery.audit_window_days // "?")d; activation scan truncated=\(.edge_services.discovery.activation_scan_truncated // false)",
+    "  Source:  \(.edge_services.discovery.source // .edge_services.discovery.discovery_method // "unknown")",
+    "  Completeness: \(.edge_services.discovery.completeness // "unknown")",
     "",
     "NGWAF",
     "  Workspaces: \(.ngwaf.workspace_count)"
@@ -645,7 +1435,14 @@ cmd_inventory() {
 
   printf '\nSERVICE-LEVEL PRODUCTS\n'
   jq -r '
-    ["CATEGORY", "PRODUCT", "ENABLED SERVICES", "UNKNOWN"],
+    def count_display:
+      if (.result.status // .status) == "COMPLETE" then
+        ((.result.count // .enabled_count // 0) | tostring) + "/" + ((.result.services_checked // 0) | tostring)
+      elif (.result.status // .status) == "PARTIAL" then
+        ">=" + ((.result.count_lower_bound // .enabled_count // 0) | tostring) + "/" + ((.result.services_checked // 0) | tostring)
+      else "UNKNOWN"
+      end;
+    ["CATEGORY", "PRODUCT", "SERVICES", "STATUS"],
     (
       .service_products.products
       | sort_by(.category, .label)
@@ -653,8 +1450,8 @@ cmd_inventory() {
       | [
           (.category | ascii_upcase),
           .label,
-          (.enabled_count | tostring),
-          (.unknown_check_count | tostring)
+          count_display,
+          (.result.status // .status // "UNKNOWN")
         ]
     )
     | @tsv
@@ -680,10 +1477,6 @@ cmd_inventory() {
     )
     | @tsv
   ' <<<"$payload" | human_table
-
-  if jq -e '.edge_services.discovery.activation_scan_truncated == true' >/dev/null <<<"$payload"; then
-    printf '\nWARNING: service discovery hit the audit-event page cap; service and product counts are based on an incomplete observed-service set.\n' >&2
-  fi
 
   if jq -e '[.service_products.products[].unknown_check_count] | add > 0' >/dev/null <<<"$payload"; then
     printf '\nWARNING: Some product checks were inconclusive. Run `ngwaf inventory --json` for exact HTTP statuses.\n' >&2
