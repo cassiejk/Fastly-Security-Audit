@@ -257,7 +257,34 @@ as not applicable, measures VCL/CDN services sequentially, and sorts successful
 rows largest-first. Measurements count bytes and lines of the generated VCL
 content only; JSON response overhead and HTTP headers are not counted.
 
-### Security product summary
+### Configured Fastly Domains
+
+```bash
+fastly-audit service domains staging-is
+fastly-audit service domains staging-is --version 111 --json
+fastly-audit ngwaf workspace-services gdx-costco-stg-is --sigsci-corp costco --with-domains
+fastly-audit ngwaf workspace-services --all --sigsci-corp costco --with-domains --json
+```
+
+Domain discovery reads `GET /service/{service_id}/version/{version}/domain`
+for the active version by default. The standalone command resolves a CDN service
+by name or ID within the selected customer's token-visible inventory and needs
+only public Fastly authentication. `--with-domains` preserves the mapping
+command's internal credential requirements and reuses mapped service IDs and
+active versions, querying each unique service/version once.
+
+These are configured Fastly domain objects, not VCL hostname references or a
+guarantee of identical NGWAF behavior for every hostname/path. A successful
+empty response has COMPLETE status and count 0. Failed or malformed retrieval
+has UNKNOWN status and null domains/count, and returns a nonzero exit status.
+JSON enrichment adds `domains` (names), `domain_count`, and `domain_inventory`
+(status, reason, endpoint, timestamp, HTTP status) to mapped services.
+With enrichment, `mapping_status` preserves the mapping result,
+`domain_inventory_status` reports domain retrieval independently, `domain_queries`
+counts unique service/version queries, and overall `status` becomes PARTIAL
+when otherwise complete mappings have incomplete domain retrieval.
+
+### Workspace-Service Mapping
 
 Observe workspace to CDN service mappings using existing configuration evidence:
 
@@ -293,6 +320,8 @@ unset parameter means in-band. Future architecture fields reserve `in_band`,
 `out_of_band`, and `unknown`. WAFD refers specifically to internal implementation
 or migration terminology associated with out-of-band, rather than a synonym
 for the public architecture type.
+
+### Security Product Summary
 
 Inspect selected-customer security-product coverage without querying unrelated
 delivery and observability products:

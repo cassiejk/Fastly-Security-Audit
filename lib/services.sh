@@ -1059,6 +1059,97 @@ cmd_services() {
   ' <<<"$normalized" | human_table
 }
 
+service_domains_json() {
+  [[ $# -eq 2 ]] || die 'service_domains_json requires <service-id> <version>'
+  local sid="$1" version="$2" endpoint='' tmp code='' domains='null'
+  local status=UNKNOWN reason='no active version found for CDN service' retrieved_at
+  retrieved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [[ "$version" =~ ^[1-9][0-9]*$ ]]; then
+    endpoint="/service/$(urlencode "$sid")/version/$version/domain"
+    tmp="$(mktemp)"
+    if code="$(http_get_to_file "$endpoint" "$tmp")"; then
+      if [[ "$code" == 000 ]]; then
+        reason='Fastly domain inventory request failed: network or transport error'
+      elif [[ "$code" == 2* ]]; then
+        if domains="$(jq --arg sid "$sid" --arg version "$version" '
+          if type != "array" then error("expected domain array")
+          elif all(.[]; type == "object" and
+            (.name | type == "string" and length > 0) and
+            (.service_id == null or .service_id == $sid) and
+            (.version == null or (.version | tostring) == $version)) then
+              sort_by(.name) | unique_by(.name) | map({name})
+          else error("invalid domain object or mismatched service/version") end
+        ' "$tmp" 2>/dev/null)"; then
+          status=COMPLETE
+          reason='configured Fastly domain objects retrieved'
+        else
+          domains='null'
+          reason='Fastly domain inventory response was malformed or did not contain a valid domain array for this service/version'
+        fi
+      else
+        reason="Fastly domain inventory request failed: HTTP $code"
+      fi
+    else
+      reason='Fastly domain inventory request failed: network or transport error'
+    fi
+    rm -f "$tmp"
+  fi
+  printf '%s\n' "$domains" | jq --arg sid "$sid" --arg version "$version" \
+    --arg status "$status" --arg reason "$reason" --arg endpoint "$endpoint" \
+    --arg code "$code" --arg retrieved_at "$retrieved_at" '{
+      service_id: $sid, version: (try ($version | tonumber) catch null),
+      status: $status, domains: ., domain_count: (if . == null then null else length end),
+      reason: $reason, retrieved_at: $retrieved_at,
+      source: "GET /service/{service_id}/version/{version}/domain",
+      endpoint: (if $endpoint == "" then null else $endpoint end),
+      http_status: (if $code == "000" or $code == "" then null else try ($code | tonumber) catch null end)
+    }'
+}
+
+cmd_service_domains() {
+  local selector='' version='' version_source=active json=false inventory resolved service result payload
+  while (( $# > 0 )); do
+    case "$1" in
+      --json) json=true; shift ;;
+      --version)
+        (( $# >= 2 )) || die '--version requires a positive version number'
+        [[ "$2" =~ ^[1-9][0-9]*$ ]] || die '--version requires a positive version number'
+        version="$2"; version_source=explicit; shift 2 ;;
+      --*) die "unknown service domains option: $1" ;;
+      *) [[ -z "$selector" ]] || die 'specify one CDN service'; selector="$1"; shift ;;
+    esac
+  done
+  [[ -n "$selector" ]] || die 'usage: fastly-audit service domains <service> [--version N] [--json]'
+  inventory="$(get_token_visible_customer_services)" || die 'service inventory unavailable; cannot resolve CDN service safely'
+  resolved="$(resolve_vcl_size_service_json "$inventory" "$selector")" || return 1
+  case "$(jq -r .status <<<"$resolved")" in
+    COMPLETE) service="$(jq .service <<<"$resolved")" ;;
+    AMBIGUOUS) die "CDN service selector is ambiguous: $selector" ;;
+    *) die "could not resolve CDN service '$selector' in selected customer inventory" ;;
+  esac
+  [[ "$(jq -r .type <<<"$service")" == vcl ]] || die "service '$selector' is not a CDN/VCL service"
+  if [[ "$version_source" == active ]]; then
+    version="$(jq -r '.active_version // ""' <<<"$service")"
+  fi
+  result="$(service_domains_json "$(jq -r .id <<<"$service")" "$version")" || return 1
+  payload="$(printf '%s\n%s\n' "$service" "$result" | jq -s --arg version_source "$version_source" '
+    .[0] as $s | .[1] + {command: "service domains", service: $s.name,
+      customer_id: $s.customer_id, version_source: $version_source,
+      limitations: ["Configured Fastly domains do not prove identical NGWAF behavior for every hostname/path."]}')" || return 1
+  if [[ "$json" == true ]]; then
+    jq . <<<"$payload"
+  else
+    jq -r '"CDN service: " + .service, "Service ID: " + .service_id,
+      "Version: " + (.version // "UNKNOWN" | tostring), "Domain inventory status: " + .status,
+      (if .status == "COMPLETE" then
+        "Configured Fastly domains:", (.domains[].name),
+        (if .domain_count == 0 then "NO CONFIGURED FASTLY DOMAINS OBSERVED" else empty end),
+        "Total configured domains: " + (.domain_count | tostring)
+       else "ERROR: " + .reason end)' <<<"$payload"
+  fi
+  [[ "$(jq -r .status <<<"$payload")" == COMPLETE ]]
+}
+
 cmd_service_vcl_size() {
   [[ $# -ge 1 && $# -le 2 ]] || die 'usage: fastly-audit service vcl-size <service> [--json]'
 

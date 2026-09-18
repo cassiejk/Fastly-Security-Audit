@@ -232,6 +232,7 @@ Service inventory:
   fastly-audit service products [--json]
   fastly-audit service inventory [--json]
   fastly-audit service vcl-size <service> [--json]
+  fastly-audit service domains <service> [--version N] [--json]
 
 Security products:
   fastly-audit security summary [--json] [--detailed]
@@ -282,7 +283,7 @@ ngwaf_namespace_usage() {
 fastly-audit ngwaf — Next-Gen WAF inspection
 
   workspaces
-  workspace-services <workspace>|--all [--json] [--sigsci-corp CORP]
+  workspace-services <workspace>|--all [--json] [--sigsci-corp CORP] [--with-domains]
   workspace <workspace>
   posture <workspace>
   rule <workspace> <rule_id>
@@ -314,8 +315,11 @@ fastly-audit service — selected-customer edge-service inspection
   inventory [--json] Combined service, product, and NGWAF inventory
   vcl-size <service> [--json]
                       Read-only active generated VCL size for one VCL/CDN service
+  domains <service> [--version N] [--json]
+                      Configured Fastly domain objects; active version by default
 
 Generated VCL content is not printed. Compute services are not applicable.
+Domains do not prove identical NGWAF behavior for every hostname/path.
 HELP
 }
 

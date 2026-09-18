@@ -71,14 +71,48 @@ workspace_services_payload_json() {
   '
 }
 
+workspace_services_with_domains_json() {
+  local payload="$1" pairs pair result tmp results
+  pairs="$(jq -c '[.workspaces[].services[] | {service_id, version: (.active_version // "" | tostring)}] | unique_by([.service_id, .version]) | .[]' <<<"$payload")" || return 1
+  tmp="$(mktemp)"
+  while IFS= read -r pair; do
+    [[ -n "$pair" ]] || continue
+    if ! result="$(service_domains_json "$(jq -r .service_id <<<"$pair")" "$(jq -r .version <<<"$pair")")"; then
+      rm -f "$tmp"
+      return 1
+    fi
+    printf '%s\n' "$result" >>"$tmp"
+  done <<<"$pairs"
+  results="$(jq -s . "$tmp")" || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
+  printf '%s\n%s\n' "$payload" "$results" | jq -s '
+    .[1] as $results | .[0]
+    | .mapping_status = .status
+    | .domain_inventory_status = (
+        if all($results[]; .status == "COMPLETE") then "COMPLETE"
+        elif any($results[]; .status == "COMPLETE") then "PARTIAL"
+        else "UNKNOWN" end)
+    | .domain_queries = ([$results[] | select(.endpoint != null)] | length)
+    | .workspaces |= map(.services |= map(. as $s
+        | ($results | map(select(.service_id == $s.service_id and
+            (.version | tostring) == ($s.active_version | tostring))) | .[0]
+           // {status: "UNKNOWN", domains: null, domain_count: null, reason: "domain lookup result unavailable"}) as $d
+        | . + {domains: (if $d.status == "COMPLETE" then [$d.domains[].name] else null end),
+            domain_count: $d.domain_count, domain_inventory: $d}))
+    | if .workspace_id != null then .services = .workspaces[0].services else . end
+    | if .status == "COMPLETE" and .domain_inventory_status != "COMPLETE" then .status = "PARTIAL" else . end
+  '
+}
+
 cmd_workspace_services() {
   local selector='' all=false json=false corp='' cid resolved selected_id=''
-  local workspaces in_band_evidence inventory product payload
+  local workspaces in_band_evidence inventory product payload with_domains=false
   local -a in_band_args=(--json)
   while (( $# > 0 )); do
     case "$1" in
       --all) all=true; shift ;;
       --json) json=true; shift ;;
+      --with-domains) with_domains=true; shift ;;
       --sigsci-corp)
         (( $# >= 2 )) || die '--sigsci-corp requires a corp slug'
         corp="$2"; in_band_args+=(--sigsci-corp "$corp"); shift 2 ;;
@@ -89,7 +123,7 @@ cmd_workspace_services() {
   if [[ "$all" == true ]]; then
     [[ -z "$selector" ]] || die 'specify one workspace or --all'
   else
-    [[ -n "$selector" ]] || die 'usage: fastly-audit ngwaf workspace-services <workspace>|--all [--json] [--sigsci-corp CORP]'
+    [[ -n "$selector" ]] || die 'usage: fastly-audit ngwaf workspace-services <workspace>|--all [--json] [--sigsci-corp CORP] [--with-domains]'
   fi
   internal_ngwaf_require_credentials 'in-band workspace-service mapping' || return 1
   if [[ "$all" != true ]]; then
@@ -102,15 +136,26 @@ cmd_workspace_services() {
   inventory="$(get_token_visible_customer_services)" || return 1
   product="$(discover_product_json ngwaf 'Edge WAF service attachments' ngwaf security "$inventory" true)" || return 1
   payload="$(workspace_services_payload_json "$in_band_evidence" "$product" "$workspaces" "$selected_id")" || return 1
+  if [[ "$with_domains" == true ]]; then
+    payload="$(workspace_services_with_domains_json "$payload")" || return 1
+  fi
   if [[ "$json" == true ]]; then
     jq . <<<"$payload"
   else
-    jq -r '"Mapping status: " + .status,
+    jq -r '"Mapping status: " + (.mapping_status // .status),
+      (if .domain_inventory_status != null then "Domain inventory status: " + .domain_inventory_status,
+        "Overall inventory status: " + .status else empty end),
       (.workspaces[] | "Workspace: " + .workspace,
         (if .service_count == 0 then "NO OBSERVED CDN SERVICE MAPPING" else empty end))' <<<"$payload"
-    jq -r '["WORKSPACE", "CDN SERVICE", "SERVICE ID", "VERSION", "SOURCE"],
+    jq -r --arg with_domains "$with_domains" '
+      (["WORKSPACE", "CDN SERVICE", "SERVICE ID", "VERSION", "SOURCE"] +
+        (if $with_domains == "true" then ["CONFIGURED FASTLY DOMAINS"] else [] end)),
       (.workspaces[] as $w | $w.services[] | [$w.workspace, .name, .service_id,
-        (.active_version // "UNKNOWN" | tostring), (.mapping_sources | map(if . == "in_band_vcl_evidence" then "in-band VCL evidence" elif . == "enabled_product_api" then "enabled-product API" else . end) | join(", "))]) | @tsv' <<<"$payload" | human_table
+        (.active_version // "UNKNOWN" | tostring), (.mapping_sources | map(if . == "in_band_vcl_evidence" then "in-band VCL evidence" elif . == "enabled_product_api" then "enabled-product API" else . end) | join(", "))] +
+        (if $with_domains != "true" then []
+         elif .domain_inventory.status != "COMPLETE" then ["UNKNOWN: " + .domain_inventory.reason]
+         elif .domain_count == 0 then ["NO CONFIGURED FASTLY DOMAINS OBSERVED"]
+         else [(.domains | join(", "))] end)) | @tsv' <<<"$payload" | human_table
     jq -r '"Total mapped services: " + ([.workspaces[].service_count] | add // 0 | tostring),
       "Mapping coverage (all token-visible CDN services):",
       "  in-band VCL evidence relationships: " + (.summary.in_band_vcl_evidence_relationships | tostring),
@@ -124,6 +169,9 @@ cmd_workspace_services() {
       (if .provenance.in_band_vcl_evidence.internal_ngwaf_sites.status != "COMPLETE" then
         "In-band evidence site inventory: " + (.provenance.in_band_vcl_evidence.internal_ngwaf_sites.reason // "unavailable") else empty end),
       "Coverage describes observed configuration evidence, not an authoritative linkage inventory."' <<<"$payload"
+  fi
+  if [[ "$with_domains" == true && "$json" != true ]]; then
+    printf '\nConfigured Fastly domains do not prove identical NGWAF behavior for every hostname/path.\n'
   fi
   [[ "$(jq -r .status <<<"$payload")" == COMPLETE ]]
 }

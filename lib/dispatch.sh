@@ -117,6 +117,10 @@ dispatch_service_namespace() {
     list) dispatch_flat services "$@" ;;
     products) dispatch_flat products "$@" ;;
     inventory) dispatch_flat inventory "$@" ;;
+    domains)
+      dispatch_preflight services
+      cmd_service_domains "$@"
+      ;;
     vcl-size)
       dispatch_preflight services
       cmd_service_vcl_size "$@"

@@ -8,6 +8,8 @@ fail() { printf '%s\n' "$1" >&2; exit 1; }
 source "$ROOT/lib/ngwaf.sh"
 # shellcheck source=lib/security.sh
 source "$ROOT/lib/security.sh"
+# shellcheck source=lib/services.sh
+source "$ROOT/lib/services.sh"
 export FASTLY_DSTOKEN=preflight-dstoken-secret
 export FASTLY_VOUCH_COOKIE=preflight-vouch-secret
 
@@ -110,6 +112,33 @@ rg -q 'in-band VCL evidence' "$TEST_TMP/human.txt"
 fixture_in_band_evidence="$(jq '.mappings = []' <<<"$fixture_in_band_evidence")"
 cmd_workspace_services workspace --json >"$TEST_TMP/product.json"
 jq -e '.service_count == 1 and .services[0].mapping_sources == ["enabled_product_api"]' "$TEST_TMP/product.json" >/dev/null
+fixture_in_band_evidence="$(jq '.mappings += [(.mappings[0] + {workspace_id:"second",workspace_name:"second"})]' <<<"$in_band_evidence")"
+fixture_workspaces="$(jq '.data += [{id:"second",name:"second"}]' <<<"$fixture_workspaces")"
+urlencode() { printf '%s\n' "$1"; }
+http_get_to_file() {
+  printf '%s\n' "$1" >>"$TEST_TMP/domain-calls"
+  if [[ "${domain_failure:-false}" == true && "$1" == /service/s2/* ]]; then
+    printf '{}\n' >"$2"; printf '403\n'
+  else
+    printf '[{"name":"configured.example"}]\n' >"$2"; printf '200\n'
+  fi
+}
+cmd_workspace_services --all --with-domains --json >"$TEST_TMP/domains.json"
+jq -e '.status == "COMPLETE" and .domain_queries == 2 and .workspaces[0].service_count == 2 and all(.workspaces[].services[]; .domain_count == 1 and .domains == ["configured.example"])' "$TEST_TMP/domains.json" >/dev/null
+[[ "$(wc -l <"$TEST_TMP/domain-calls" | tr -d ' ')" == 2 ]] || fail 'repeated domain lookup'
+rm -f "$TEST_TMP/domain-calls"
+cmd_workspace_services --all --json >"$TEST_TMP/no-domains.json"
+[[ ! -e "$TEST_TMP/domain-calls" ]] || fail 'unrequested domain lookup'
+jq -e 'has("domain_queries") | not' "$TEST_TMP/no-domains.json" >/dev/null
+result="$(workspace_services_with_domains_json "$(jq '.workspaces[].services[].active_version = null' "$TEST_TMP/product.json")")"
+jq -e '.status == "PARTIAL" and .domain_inventory_status == "UNKNOWN" and .domain_queries == 0 and .services[0].domain_count == null and (.services[0].domain_inventory.reason | contains("no active version"))' <<<"$result" >/dev/null
+[[ ! -e "$TEST_TMP/domain-calls" ]] || fail 'missing active version triggered request'
+domain_failure=true
+if cmd_workspace_services --all --with-domains --json >"$TEST_TMP/failed-domains.json"; then fail 'domain failure succeeded'; fi
+jq -e '.mapping_status == "COMPLETE" and .status == "PARTIAL" and .domain_inventory_status == "PARTIAL" and any(.workspaces[].services[]; .service_id == "s2" and .domains == null and .domain_count == null and .domain_inventory.http_status == 403)' "$TEST_TMP/failed-domains.json" >/dev/null
+cmd_workspace_services workspace --with-domains >"$TEST_TMP/domain-human.txt" && fail 'human domain failure succeeded'
+rg -q 'UNKNOWN: Fastly domain inventory request failed: HTTP 403' "$TEST_TMP/domain-human.txt"
+if rg -q 'preflight-dstoken-secret|preflight-vouch-secret' "$TEST_TMP" --glob '*.json' --glob '*.txt' --glob '*.out' --glob '*.err'; then fail 'credential value leaked'; fi
 get_all_pages() { return 1; }
 if cmd_workspace_services --all --json >/dev/null 2>&1; then fail 'mapping collection failure accepted'; fi
 printf 'workspace-services: OK\n'

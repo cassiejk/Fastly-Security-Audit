@@ -70,6 +70,7 @@ printf 'Behavior tests...\n'
 "$ROOT/tests/namespaces.sh"
 "$ROOT/tests/service-inventory.sh"
 "$ROOT/tests/vcl-size.sh"
+"$ROOT/tests/service-domains.sh"
 "$ROOT/tests/security.sh"
 "$ROOT/tests/legacy-map.sh"
 "$BASH" "$ROOT/tests/workspace-services.sh"
