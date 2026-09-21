@@ -159,7 +159,7 @@ request_search_fetch() {
   fi
 
   local pages_tmp page fetched total pages_fetched remaining per_page count page_total
-  local target total_json duplicate_ids
+  local target total_json duplicate_result duplicate_page
   pages_tmp="$(mktemp)"
   page=1
   fetched=0
@@ -243,16 +243,35 @@ request_search_fetch() {
     }
   done
 
-  duplicate_ids="$(
+  # Retain page boundaries so the error can identify the second occurrence.
+  duplicate_result="$(
     jq -s '
-      (add // [])
-      | [.[].id // empty | select(length > 0)] as $ids
-      | ($ids | length) != ($ids | unique | length)
+      [
+        to_entries[] as $page
+        | $page.value[]
+        | .id // empty
+        | select(length > 0)
+        | {id: ., page: ($page.key + 1)}
+      ]
+      | group_by(.id)
+      | map(select(length > 1))
+      | if length == 0 then
+          {duplicate: false, page: null}
+        else
+          {duplicate: true, page: (map(.[1].page) | min)}
+        end
     ' "$pages_tmp"
   )"
-  if [[ "$duplicate_ids" == "true" ]]; then
+  if [[ "$(jq -r '.duplicate' <<<"$duplicate_result")" == "true" ]]; then
+    duplicate_page="$(jq -r '.page' <<<"$duplicate_result")"
     rm -f "$pages_tmp"
-    die 'request-search pagination returned duplicate request IDs; refusing to report ambiguous rows'
+    printf '%s: error: duplicate request IDs detected in API results during pagination (page %s).\n' \
+      "${PROGRAM_NAME:-ngwaf}" "$duplicate_page" >&2
+    printf '%s: export aborted to prevent potentially unreliable results.\n' \
+      "${PROGRAM_NAME:-ngwaf}" >&2
+    printf '%s: hint: retry with a smaller --limit or narrow the query/time window.\n' \
+      "${PROGRAM_NAME:-ngwaf}" >&2
+    return 1
   fi
 
   total_json="null"

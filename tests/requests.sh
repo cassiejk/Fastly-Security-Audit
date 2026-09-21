@@ -97,7 +97,8 @@ write_success_requests() {
 
 write_paged_requests() {
   local page_num="${page:-1}"
-  local start end
+  local start end duplicate=false
+  [[ "${NGWAF_TEST_REQUEST_MODE:-}" == "paged-duplicate" ]] && duplicate=true
   start=$(( ((page_num - 1) * 100) + 1 ))
   end=$(( start + limit - 1 ))
   (( start > 125 )) && end=$(( start - 1 ))
@@ -106,12 +107,17 @@ write_paged_requests() {
   jq -n \
     --argjson start "$start" \
     --argjson end "$end" \
+    --argjson page_num "$page_num" \
+    --argjson duplicate "$duplicate" \
     '{
       meta: {total: 125},
       data: [
         range($start; ($end + 1)) as $i
         | {
-            id: ("req-" + ($i | tostring)),
+            id: (if $duplicate and $page_num == 2 and $i == $start then
+                   "req-50"
+                 else "req-" + ($i | tostring)
+                 end),
             timestamp: "2026-09-08T12:00:00Z",
             method: "GET",
             path: ("/item/" + ($i | tostring)),
@@ -142,7 +148,7 @@ case "$url" in
         write_success_requests
         printf '200'
         ;;
-      paged)
+      paged|paged-duplicate)
         write_paged_requests
         printf '200'
         ;;
@@ -337,5 +343,27 @@ grep -F 'page=1' "$NGWAF_TEST_CURL_ARGS" >/dev/null
 grep -F 'page=2' "$NGWAF_TEST_CURL_ARGS" >/dev/null
 grep -F 'limit=100' "$NGWAF_TEST_CURL_ARGS" >/dev/null
 grep -F 'limit=25' "$NGWAF_TEST_CURL_ARGS" >/dev/null
+
+export NGWAF_TEST_REQUEST_MODE=paged-duplicate
+duplicate_output="$TEST_TMP/duplicate-requests.json"
+if "$ROOT/fastly-audit" ngwaf requests Production 'tag:SQLI' \
+  --limit 125 --format json --output "$duplicate_output" \
+  >"$TEST_TMP/duplicate-out" 2>"$TEST_TMP/duplicate-err"; then
+  printf 'requests test: duplicate paginated IDs unexpectedly succeeded\n' >&2
+  exit 1
+fi
+[[ ! -e "$duplicate_output" ]]
+[[ ! -s "$TEST_TMP/duplicate-out" ]]
+grep -F 'duplicate request IDs detected in API results during pagination (page 2)' "$TEST_TMP/duplicate-err" >/dev/null
+grep -F 'export aborted to prevent potentially unreliable results' "$TEST_TMP/duplicate-err" >/dev/null
+grep -F 'hint: retry with a smaller --limit or narrow the query/time window' "$TEST_TMP/duplicate-err" >/dev/null
+
+export NGWAF_TEST_REQUEST_MODE=paged
+successful_output="$TEST_TMP/paged-requests.json"
+"$ROOT/fastly-audit" ngwaf requests Production 'tag:SQLI' \
+  --limit 125 --format json --output "$successful_output" \
+  >"$TEST_TMP/paged-output-out" 2>"$TEST_TMP/paged-output-err"
+[[ -r "$successful_output" ]]
+jq -e '.rows_returned == 125 and .meta.pages_fetched == 2' "$successful_output" >/dev/null
 
 printf 'requests: OK\n'
