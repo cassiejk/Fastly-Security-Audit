@@ -2,3 +2,4 @@
 .env
 ngwaf-snapshot-*.json
 dist/
+/dev/unifier-check/results/
