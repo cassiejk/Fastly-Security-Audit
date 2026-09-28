@@ -306,6 +306,49 @@ fastly-audit ngwaf — Next-Gen WAF inspection
 HELP
 }
 
+inventory_usage() {
+  local program="${USAGE_PROGRAM:-${PROGRAM_NAME:-fastly-audit}}"
+  cat <<HELP
+$program inventory — combined inventory for the selected customer
+
+Usage:
+  $program inventory [--json]
+  $program inventory help
+
+Use this read-only report to get an overview of the customer's token-visible
+edge services, enabled service-level products, and NGWAF workspaces before
+inspecting individual services or security configuration.
+
+The default human-readable report includes:
+  - Service counts: total, CDN, Compute, other, and paused, plus discovery
+    source and completeness.
+  - NGWAF workspace count.
+  - Service-level product counts and check status.
+  - Security product mappings to services and returned configuration, such as
+    workspace_id, traffic_ramp, DDoS mode, and Bot Management contentguard.
+
+Options:
+  --json    Emit structured JSON with service details, product check results,
+            NGWAF workspace details, and scope notes. Diagnostics go to stderr.
+  help, -h, --help
+            Show this help without credentials or API requests.
+
+Scope and limits:
+  Running the report requires FASTLY_API_TOKEN and a selected customer.
+  Services come from GET /service, filtered to that customer and deduplicated
+  by service ID. Token visibility does not prove complete account-wide coverage.
+  Products cover known public service-level enablement APIs; account-level
+  products are excluded. Inconclusive checks are unknown, not disabled.
+  Configuration and workspace presence do not prove production traffic,
+  per-hostname protection, effective enforcement, or security efficacy.
+
+Examples:
+  $program inventory
+  $program inventory --json
+  $program inventory --json | jq '.edge_services.services'
+HELP
+}
+
 service_namespace_usage() {
   cat <<'HELP'
 fastly-audit service — selected-customer edge-service inspection

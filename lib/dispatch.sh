@@ -39,6 +39,12 @@ dispatch_flat() {
   local command="${1:-help}"
   (( $# == 0 )) || shift
 
+  if [[ "$command" == "inventory" && $# -eq 1 ]]; then
+    case "$1" in
+      help|-h|--help) inventory_usage; return ;;
+    esac
+  fi
+
   if [[ "$command" == "template-audit" && ( "${1:-}" == "--help" || "${1:-}" == "-h" ) ]]; then
     cmd_template_audit "$@"
     return

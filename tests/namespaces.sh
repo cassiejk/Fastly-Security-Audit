@@ -12,6 +12,9 @@ cat >"$TEST_TMP/bin/curl" <<'FAKE_CURL'
 set -euo pipefail
 outfile=""
 url=""
+if [[ -n "${FASTLY_TEST_HELP_CURL_LOG:-}" ]]; then
+  printf 'called\n' >>"$FASTLY_TEST_HELP_CURL_LOG"
+fi
 while (( $# > 0 )); do
   case "$1" in
     -o) outfile="$2"; shift 2 ;;
@@ -62,6 +65,35 @@ grep -F 'rule <workspace> <rule_id>' "$TEST_TMP/ngwaf-help" >/dev/null
 
 "$ROOT/fastly-audit" service help >"$TEST_TMP/service-help"
 grep -F 'list [--json]' "$TEST_TMP/service-help" >/dev/null
+
+# Inventory help must work offline through both launchers and the service alias.
+export FASTLY_TEST_HELP_CURL_LOG="$TEST_TMP/help-curl-log"
+for help_flag in help -h --help; do
+  for route in flat service legacy; do
+    case "$route" in
+      flat) command=("$ROOT/fastly-audit" inventory); expected='fastly-audit inventory' ;;
+      service) command=("$ROOT/fastly-audit" service inventory); expected='fastly-audit service inventory' ;;
+      legacy) command=("$ROOT/ngwaf" inventory); expected='ngwaf inventory' ;;
+    esac
+    env -u FASTLY_API_TOKEN -u FASTLY_CUSTOMER_ID "${command[@]}" "$help_flag" \
+      >"$TEST_TMP/inventory-help" 2>"$TEST_TMP/inventory-help-err"
+    grep -F "$expected [--json]" "$TEST_TMP/inventory-help" >/dev/null
+    grep -F 'Use this read-only report' "$TEST_TMP/inventory-help" >/dev/null
+    grep -F 'NGWAF workspace count' "$TEST_TMP/inventory-help" >/dev/null
+    grep -F 'account-level' "$TEST_TMP/inventory-help" >/dev/null
+    grep -F 'Token visibility does not prove complete account-wide coverage' "$TEST_TMP/inventory-help" >/dev/null
+    [[ ! -s "$TEST_TMP/inventory-help-err" ]]
+    [[ ! -e "$FASTLY_TEST_HELP_CURL_LOG" ]]
+  done
+done
+
+# Extra arguments still fail rather than silently becoming a help request.
+if "$ROOT/fastly-audit" inventory help --json >"$TEST_TMP/out" 2>"$TEST_TMP/error"; then
+  printf 'namespace test: inventory help with extra arguments unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -F 'usage: fastly-audit inventory [--json]' "$TEST_TMP/error" >/dev/null
+unset FASTLY_TEST_HELP_CURL_LOG
 
 "$ROOT/fastly-audit" bot help >"$TEST_TMP/bot-help"
 grep -F 'stats <service_id>' "$TEST_TMP/bot-help" >/dev/null
