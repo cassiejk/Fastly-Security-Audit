@@ -12,6 +12,7 @@ Customer / auth and account inventory:
   ngwaf whoami
   ngwaf use <customer_id>
   ngwaf customer
+  ngwaf customer security [--json]
   ngwaf services [--json]
   ngwaf products [--json]
   ngwaf inventory [--json]
@@ -139,10 +140,9 @@ Notes:
     calendar month such as Aug 1 -> Sep 1 can be reproduced.
   - intl-bot-stats and intl-bot-types are intentionally scoped to the 11
     international production service names used by the current Costco QBR slide.
-  - services lists token-visible Fastly services from GET /service, filters to
-    the selected customer ID, deduplicates by service ID, and maps vcl -> CDN
-    and wasm -> Compute. It does not prove the token can see every service the
-    customer owns.
+  - services uses customer-scoped service search with legacy GET /service
+    fallback, and maps vcl -> CDN and wasm -> Compute. Complete retrieval does
+    not prove the token can see every service the customer owns.
   - products inventories known public service-level product enablement APIs and
     maps enabled products back to the token-visible selected-customer service
     set. NGWAF, Bot Management, and DDoS Protection include configuration when
@@ -224,6 +224,7 @@ Core:
   fastly-audit customer setup [--customer-id CUSTOMER_ID] [--json]
   fastly-audit customer use <customer_id>
   fastly-audit customer whoami
+  fastly-audit customer security [--json]
   fastly-audit customer vcl-size [--json]
   fastly-audit inventory [--json]
 
@@ -335,8 +336,9 @@ Options:
 
 Scope and limits:
   Running the report requires FASTLY_API_TOKEN and a selected customer.
-  Services come from GET /service, filtered to that customer and deduplicated
-  by service ID. Token visibility does not prove complete account-wide coverage.
+  Services use customer-scoped Fastly service search with cursor pagination,
+  falling back to token-visible GET /service filtered by exact customer ID.
+  Token visibility does not prove complete account-wide coverage.
   Products cover known public service-level enablement APIs; account-level
   products are excluded. Inconclusive checks are unknown, not disabled.
   Configuration and workspace presence do not prove production traffic,
@@ -397,6 +399,46 @@ Customer extensions, when installed:
 HELP
 }
 
+customer_security_usage() {
+  local program="${PROGRAM_NAME:-fastly-audit}"
+  cat <<HELP
+$program customer security — customer security configuration overview
+
+Usage:
+  $program customer security [--json]
+  $program customer security help
+
+Read-only orientation to the selected customer's Fastly security product
+configuration and complete NGWAF workspace inventory:
+  - Customer identity and token-visible service count/status.
+  - API Discovery, Bot Management, DDoS Protection, and Edge WAF attachments.
+  - Service mappings, returned DDoS mode and Bot Management configuration,
+    Edge WAF workspace/ramp mapping, and workspace mode/default block response.
+  - Workspaces with or without observed Edge WAF attachments.
+
+Options:
+  --json          Versioned JSON with provenance, completeness, and scope limits.
+  help, -h, --help Show help without credentials, customer selection, or API access.
+
+The report requires FASTLY_API_TOKEN and a selected customer. It reuses the
+security summary inventory, including its supported per-service configuration
+retrieval. Inconclusive checks remain UNKNOWN/PARTIAL, not disabled or zero.
+Workspace attachment counts are exact only when mapping evidence is complete.
+Service discovery uses customer-scoped search with legacy GET /service fallback;
+the JSON provenance identifies the source and pagination/completeness evidence.
+
+Token visibility does not prove complete account-wide service inventory.
+Configuration, product attachment, and workspace existence do not prove current
+traffic, active use, per-hostname protection, enforcement, or security efficacy.
+A workspace with zero Edge WAF attachments is valid inventory context.
+This command provides configuration inventory, not a security assessment.
+
+Examples:
+  $program customer security
+  $program customer security --json
+HELP
+}
+
 customer_namespace_usage() {
   cat <<'HELP'
 fastly-audit customer — authentication and customer selection
@@ -405,6 +447,7 @@ fastly-audit customer — authentication and customer selection
   setup [--customer-id CUSTOMER_ID] [--json]
   use <customer_id>
   whoami
+  security [--json] Customer security product configuration and NGWAF inventory
   vcl-size [--json]  Active generated VCL sizes for selected-customer VCL/CDN services
 
 Customer VCL sizing is read-only, skips Compute services, and sorts largest first.

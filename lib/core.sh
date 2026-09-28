@@ -200,11 +200,13 @@ debug_get_request() {
   printf '%s: debug: GET %s%s\n' "${PROGRAM_NAME:-ngwaf}" "$API_BASE" "$path" >&2
   for arg in "$@"; do
     if [[ "$expect_value" == "true" ]]; then
+      [[ "$arg" != cursor=* ]] || arg='cursor=<redacted>'
       printf '%s: debug: query parameter: %s\n' "${PROGRAM_NAME:-ngwaf}" "$arg" >&2
       expect_value=false
     elif [[ "$arg" == "--data-urlencode" ]]; then
       expect_value=true
     elif [[ "$arg" == --data-urlencode=* ]]; then
+      [[ "$arg" != --data-urlencode=cursor=* ]] || arg='--data-urlencode=cursor=<redacted>'
       printf '%s: debug: query parameter: %s\n' "${PROGRAM_NAME:-ngwaf}" "${arg#--data-urlencode=}" >&2
     fi
   done

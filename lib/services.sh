@@ -175,6 +175,222 @@ get_selected_services() {
     }'
 }
 
+# Customer-scoped search is a UI-backed fast path, not a public-API contract.
+# Only a fully validated traversal is published. Return 1 for an inconclusive
+# search (safe legacy fallback), 2 for auth/scope failure (no fallback). Failure
+# reasons are fixed text/status codes; cursors and response bodies stay private.
+search_customer_services_json() {
+  local cid="$1" output="$2" tmp code reason='' failure=1
+  local total='' page_total count fetched=0 pages=0 cursor='' next_cursor
+  local -a args
+  local -A seen_cursors=()
+  tmp="$(mktemp -d)" || return 1
+  : >"$tmp/pages"
+
+  while :; do
+    if (( pages >= 1000 )); then reason='cursor pagination safety limit exceeded'; break; fi
+    args=(--data-urlencode "customer_id=$cid" --data-urlencode 'limit=100' --data-urlencode 'sort=name')
+    [[ -z "$cursor" ]] || args+=(--data-urlencode "cursor=$cursor")
+    code="$(http_get_to_file /search/services "$tmp/page" "${args[@]}")" || code=000
+    case "$code" in
+      401|403)
+        reason="search authorization failed: HTTP $code"; failure=2; break ;;
+      2*) ;;
+      *) reason="search unavailable: HTTP $code"; break ;;
+    esac
+    # Bound numeric totals for safe shell arithmetic; larger inventories cannot
+    # complete within the traversal safety bound and use the legacy fallback.
+    if ! jq -e '
+      type == "object" and (.data | type == "array") and (.meta | type == "object")
+      and (.meta.total | type == "number" and . >= 0 and . <= 2147483647 and . == floor)
+      and (if .meta | has("next_cursor") then
+             (.meta.next_cursor == null or (.meta.next_cursor | type == "string"))
+           else true end)
+      and all(.data[]; type == "object" and (.id | type == "string" and length > 0)
+        and (if has("name") then .name | type == "string" else true end)
+        and (if has("type") then .type | type == "string" else true end)
+        and (if has("paused") then .paused == null or (.paused | type == "boolean") else true end))
+    ' "$tmp/page" >/dev/null 2>&1; then
+      reason='unexpected search JSON or missing/invalid metadata'; break
+    fi
+    # The authenticated, case-sensitive customer ID scopes the search request.
+    # If the response supplies ownership metadata, it must agree as well.
+    if ! jq -e --arg cid "$cid" '
+      (if has("customer_id") then .customer_id == $cid else true end)
+      and (if (.customer | type) == "object" and (.customer | has("id")) then .customer.id == $cid else true end)
+      and (if .meta | has("customer_id") then .meta.customer_id == $cid else true end)
+      and all(.data[];
+        (if has("customer_id") then .customer_id == $cid else true end)
+        and (if (.customer | type) == "object" and (.customer | has("id")) then .customer.id == $cid else true end))
+    ' "$tmp/page" >/dev/null 2>&1; then
+      reason='search response conflicts with authenticated customer scope'; failure=2; break
+    fi
+    page_total="$(jq -r '.meta.total' "$tmp/page")"
+    count="$(jq '.data | length' "$tmp/page")"
+    if [[ -n "$total" && "$total" != "$page_total" ]]; then
+      reason='search total changed during cursor traversal'; break
+    fi
+    total="$page_total"
+    jq '.data' "$tmp/page" >>"$tmp/pages" || { reason='search page could not be collected'; break; }
+    pages=$(( pages + 1 ))
+    fetched=$(( fetched + count ))
+    if (( fetched > total )); then reason='search collected more services than meta.total'; break; fi
+    next_cursor="$(jq -r '.meta.next_cursor // ""' "$tmp/page")"
+    # Reject control characters before shell extraction could alter an opaque
+    # cursor (command substitution strips trailing newlines).
+    if ! jq -e '(.meta.next_cursor // "") | test("[[:cntrl:]]") | not' "$tmp/page" >/dev/null; then
+      reason='search returned an invalid cursor'; break
+    fi
+    if [[ -z "$next_cursor" ]]; then
+      if (( fetched != total )); then reason='search collected count differs from meta.total'; fi
+      break
+    fi
+    if (( count == 0 || fetched >= total )); then
+      reason='search cursor contradicts collected count'; break
+    fi
+    if [[ -n "${seen_cursors["$next_cursor"]:-}" ]]; then
+      reason='search cursor repeated during traversal'; break
+    fi
+    seen_cursors["$next_cursor"]=1
+    cursor="$next_cursor"
+  done
+
+  if [[ -z "$reason" ]]; then
+    if ! jq -s -e 'add | length == (unique_by(.id) | length)' "$tmp/pages" >/dev/null; then
+      reason='search returned duplicate service IDs'
+    fi
+  fi
+  if [[ -n "$reason" ]]; then
+    rm -rf "$tmp"
+    printf '%s\n' "$reason"
+    return "$failure"
+  fi
+
+  jq -s --arg cid "$cid" --arg retrieved_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson count "$fetched" --argjson pages "$pages" '
+    {
+      meta: {
+        discovery_method: "fastly-customer-service-search", source: "GET /search/services",
+        scope: "customer", customer_filter: "exact_customer_id",
+        filtered_locally_by_customer_id: false, selected_customer_id: $cid,
+        selected_total: $count, selected_total_lower_bound: $count,
+        completeness: "token-visible", status: "COMPLETE", evidence_type: "DIRECT",
+        count: $count, count_lower_bound: null, fallback_used: false,
+        token_visibility_complete_for_customer: null,
+        result: {
+          status: "COMPLETE", count: $count, count_lower_bound: null,
+          source: "GET /search/services", scope: "customer", evidence_type: "DIRECT",
+          filtered_locally_by_customer_id: false, retrieved_at: $retrieved_at,
+          customer_scope: {customer_id: $cid, filter: "server_side_exact_customer_id",
+            validation: "authenticated customer identity and returned ownership metadata when present",
+            token_visibility_complete_for_customer: null},
+          reason: "complete customer-scoped service search with count and cursor validation",
+          pagination: {type: "cursor", limit: 100, sort: "name", pages_fetched: $pages,
+            returned_total: $count, reported_total: $count, truncated: false, terminated: true},
+          fallback_used: false, returned_total: $count, reported_total: $count
+        },
+        note: "Customer-scoped Fastly service search is token-visible; complete pagination does not prove visibility of every customer service."
+      },
+      data: (add | map({
+        id, name: (.name // ""), customer_id: $cid, type: (.type // "unknown"),
+        active_version: (if has("active_version") then .active_version else null end),
+        paused: (if has("paused") then .paused else null end),
+        state: (if has("state") then .state else null end),
+        production_version_number: (if has("production_version_number") then .production_version_number else null end),
+        staging_version_number: (if has("staging_version_number") then .staging_version_number else null end),
+        latest_locked_version_number: (if has("latest_locked_version_number") then .latest_locked_version_number else null end),
+        latest_draft_version_number: (if has("latest_draft_version_number") then .latest_draft_version_number else null end),
+        updated_at: (.updated_at // null), created_at: (.created_at // null)
+      }))
+    }
+  ' "$tmp/pages" >"$output"
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+# Callers that need legacy active-version/paused metadata opt in to details.
+# Search state/version fields are retained, never guessed into those fields.
+# Details are fetched only for rows lacking required legacy fields; ownership
+# must be proven by the service response itself before merging it.
+enrich_customer_services_json() {
+  local inventory="$1" cid="$2" tmp service sid code queried=0
+  tmp="$(mktemp -d)" || return 1
+  : >"$tmp/services"
+  while IFS= read -r service; do
+    if jq -e '.active_version != null and .paused != null' >/dev/null <<<"$service"; then
+      printf '%s\n' "$service" >>"$tmp/services"
+      continue
+    fi
+    sid="$(jq -r .id <<<"$service")"
+    code="$(http_get_to_file "/service/$(urlencode "$sid")" "$tmp/detail")" || code=000
+    if [[ "$code" != 2* ]] || ! jq -e --arg sid "$sid" --arg cid "$cid" \
+      'type == "object" and .id == $sid and .customer_id == $cid
+       and (if has("paused") then .paused == null or (.paused | type == "boolean") else true end)' "$tmp/detail" >/dev/null 2>&1; then
+      printf '%s: Service detail enrichment failed or scope was unverified (HTTP %s); inventory unavailable.\n' \
+        "${PROGRAM_NAME:-ngwaf}" "$code" >&2
+      rm -rf "$tmp"
+      return 1
+    fi
+    printf '%s\n' "$service" >"$tmp/search-row"
+    jq -s '.[0] * .[1]' "$tmp/search-row" "$tmp/detail" >>"$tmp/services" || { rm -rf "$tmp"; return 1; }
+    queried=$(( queried + 1 ))
+  done < <(jq -c '.data[]' <<<"$inventory")
+  printf '%s\n' "$inventory" >"$tmp/inventory"
+  jq -s '.' "$tmp/services" >"$tmp/rows" || { rm -rf "$tmp"; return 1; }
+  jq -s --argjson queried "$queried" '
+    .[0] as $inventory | .[1] as $rows
+    | $inventory | .data = $rows
+    | .meta.enrichment = {source: "GET /service/{service_id}", services_queried: $queried,
+        fields: ["active_version", "paused"], ownership_validation: "exact service and customer IDs"}
+  ' "$tmp/inventory" "$tmp/rows"
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+get_customer_services() {
+  [[ $# == 0 || ( $# == 1 && "$1" == --details ) ]] || die 'get_customer_services accepts only --details'
+  local cid selected tmp reason rc inventory
+  # Use the authenticated canonical ID, never a normalized spelling of user input.
+  load_customer_context || return 1
+  selected="$(current_cid)" || return 1
+  cid="$(jq -r .id <<<"$NGWAF_CUSTOMER_CONTEXT_JSON")"
+  if [[ -z "$cid" || "$cid" != "$selected" ]]; then
+    printf '%s: Customer service discovery requires matching authenticated customer scope.\n' "${PROGRAM_NAME:-ngwaf}" >&2
+    return 1
+  fi
+  tmp="$(mktemp)" || return 1
+  printf 'Listing customer-scoped services from Fastly service search...\n' >&2
+  if reason="$(search_customer_services_json "$cid" "$tmp")"; then
+    inventory="$(cat "$tmp")"
+    rm -f "$tmp"
+    if [[ "${1:-}" == --details ]]; then
+      enrich_customer_services_json "$inventory" "$cid"
+    else
+      printf '%s\n' "$inventory"
+    fi
+    return
+  else
+    rc=$?
+    rm -f "$tmp"
+    if [[ "$rc" == 2 ]]; then
+      printf '%s: Customer service discovery failed: %s; not using legacy fallback.\n' "${PROGRAM_NAME:-ngwaf}" "$reason" >&2
+      return 1
+    fi
+  fi
+  printf '%s: Service search was unavailable/inconclusive (%s); using legacy token-visible service discovery.\n' \
+    "${PROGRAM_NAME:-ngwaf}" "$reason" >&2
+  inventory="$(get_token_visible_customer_services)" || return 1
+  jq --arg reason "$reason" '
+    .meta.scope = "token-visible" | .meta.filtered_locally_by_customer_id = true
+    | .meta.fallback_used = true
+    | .meta.result.scope = "token-visible" | .meta.result.filtered_locally_by_customer_id = true
+    | .meta.result.fallback_used = true | .meta.result.fallback_from = "GET /search/services"
+    | .meta.result.fallback_reason = $reason
+  ' <<<"$inventory"
+}
+
 get_token_visible_customer_services() {
   local cid tmp code services retrieved_at
 
@@ -326,7 +542,7 @@ normalize_services_for_vcl_size_json() {
       type: (.type // "unknown"),
       platform: platform,
       active_version: active_version,
-      paused: (.paused // false)
+      paused: (if has("paused") then .paused else false end)
     })
   ' <<<"$services_body"
 }
@@ -911,7 +1127,7 @@ discover_product_json() {
               type: ($svc.type // "unknown"),
               platform: ($svc | platform),
               active_version: ($svc | active_version),
-              paused: ($svc.paused // false),
+              paused: (if $svc | has("paused") then $svc.paused else false end),
               configuration: ($cfg.configuration // null),
               configuration_http_status: ($cfg.configuration_http_status // null),
               configuration_status: (
@@ -969,7 +1185,7 @@ cmd_services() {
 
   cid="$(current_cid)"
   customer="$(get "/customer/$cid")"
-  services_body="$(get_token_visible_customer_services)" ||
+  services_body="$(get_customer_services --details)" ||
     die 'service inventory unavailable; cannot safely use audit-event-derived service counts as a substitute'
 
   normalized="$(
@@ -995,12 +1211,13 @@ cmd_services() {
         | ($body.data // []) as $services
         | {
             customer: {id: ($customer.id // null), name: ($customer.name // null)},
+            service_discovery: ($body.meta // {}),
             summary: {
               total: ($services | length),
               cdn: ([$services[] | select((.type // "") == "vcl")] | length),
               compute: ([$services[] | select((.type // "") == "wasm")] | length),
               other: ([$services[] | select(((.type // "") != "vcl") and ((.type // "") != "wasm"))] | length),
-              paused: ([$services[] | select(.paused == true)] | length),
+              paused: (if any($services[]; .paused == null) then null else ([$services[] | select(.paused == true)] | length) end),
               discovery_method: ($body.meta.discovery_method // null),
               source: ($body.meta.source // $body.meta.result.source // null),
               status: ($body.meta.status // $body.meta.result.status // "UNKNOWN"),
@@ -1019,7 +1236,7 @@ cmd_services() {
                   type: (.type // "unknown"),
                   platform: platform,
                   active_version: active_version,
-                  paused: (.paused // false),
+                  paused: (if has("paused") then .paused else false end),
                   created_at: (.created_at // null),
                   updated_at: (.updated_at // null)
                 }
@@ -1035,7 +1252,7 @@ cmd_services() {
 
   jq -r '
     "Customer: \(.customer.name) (\(.customer.id))",
-    "Token-visible customer services: \(.summary.total) total — \(.summary.cdn) CDN, \(.summary.compute) Compute, \(.summary.other) other; \(.summary.paused) paused",
+    "Token-visible customer services: \(.summary.total) total — \(.summary.cdn) CDN, \(.summary.compute) Compute, \(.summary.other) other; \(.summary.paused // "UNKNOWN") paused",
     "Service inventory source: \(.summary.source // .summary.discovery_method // "unknown")",
     "Inventory completeness: \(.summary.completeness)"
   ' <<<"$normalized"
@@ -1107,7 +1324,7 @@ service_domains_json() {
 }
 
 cmd_service_domains() {
-  local selector='' version='' version_source=active json=false inventory resolved service result payload
+  local selector='' version='' version_source=active json=false inventory resolved service result payload enriched
   while (( $# > 0 )); do
     case "$1" in
       --json) json=true; shift ;;
@@ -1120,7 +1337,7 @@ cmd_service_domains() {
     esac
   done
   [[ -n "$selector" ]] || die 'usage: fastly-audit service domains <service> [--version N] [--json]'
-  inventory="$(get_token_visible_customer_services)" || die 'service inventory unavailable; cannot resolve CDN service safely'
+  inventory="$(get_customer_services)" || die 'service inventory unavailable; cannot resolve CDN service safely'
   resolved="$(resolve_vcl_size_service_json "$inventory" "$selector")" || return 1
   case "$(jq -r .status <<<"$resolved")" in
     COMPLETE) service="$(jq .service <<<"$resolved")" ;;
@@ -1128,6 +1345,10 @@ cmd_service_domains() {
     *) die "could not resolve CDN service '$selector' in selected customer inventory" ;;
   esac
   [[ "$(jq -r .type <<<"$service")" == vcl ]] || die "service '$selector' is not a CDN/VCL service"
+  if [[ "$version_source" == active && "$(jq -r .meta.source <<<"$inventory")" == 'GET /search/services' ]]; then
+    enriched="$(enrich_customer_services_json "$(jq '{data: [.], meta: {}}' <<<"$service")" "$(current_cid)")" || return 1
+    service="$(normalize_services_for_vcl_size_json "$enriched" | jq '.[0]')" || return 1
+  fi
   if [[ "$version_source" == active ]]; then
     version="$(jq -r '.active_version // ""' <<<"$service")"
   fi
@@ -1167,13 +1388,18 @@ cmd_service_vcl_size() {
 
   cid="$(current_cid)"
   customer="$(get "/customer/$cid")"
-  services_body="$(get_token_visible_customer_services)" ||
+  services_body="$(get_customer_services)" ||
     die 'service inventory unavailable; cannot resolve service safely'
   resolved="$(resolve_vcl_size_service_json "$services_body" "$selector")"
 
   case "$(jq -r '.status' <<<"$resolved")" in
     COMPLETE)
       service="$(jq '.service' <<<"$resolved")"
+      if [[ "$(jq -r .meta.source <<<"$services_body")" == 'GET /search/services' && "$(jq -r .type <<<"$service")" == vcl ]]; then
+        local enriched
+        enriched="$(enrich_customer_services_json "$(jq '{data: [.], meta: {}}' <<<"$service")" "$cid")" || return 1
+        service="$(normalize_services_for_vcl_size_json "$enriched" | jq '.[0]')" || return 1
+      fi
       ;;
     AMBIGUOUS)
       die "service selector is ambiguous: $selector"
@@ -1238,7 +1464,7 @@ cmd_customer_vcl_size() {
 
   cid="$(current_cid)"
   customer="$(get "/customer/$cid")"
-  services_body="$(get_token_visible_customer_services)" ||
+  services_body="$(get_customer_services --details)" ||
     die 'service inventory unavailable; cannot build customer VCL size report safely'
   services="$(normalize_services_for_vcl_size_json "$services_body")"
   results_tmp="$(mktemp)"
@@ -1342,7 +1568,7 @@ cmd_products() {
 
   cid="$(current_cid)"
   customer="$(get "/customer/$cid")"
-  services_body="$(get_token_visible_customer_services)" ||
+  services_body="$(get_customer_services)" ||
     die 'service inventory unavailable; cannot safely use audit-event-derived service counts as a substitute'
   products="$(collect_products_json "$services_body")"
 
@@ -1358,7 +1584,7 @@ cmd_products() {
           service_discovery: ($services_body.meta // {}),
           product_definitions_scanned: ($products | length),
           products: $products,
-          note: "Service-level product inventory is evaluated against the selected-customer token-visible service inventory from GET /service. Account-level products without a service mapping are not included. Non-2xx checks other than 404 are reported as unknown rather than treated as disabled."
+          note: "Service-level product inventory is evaluated against the selected-customer token-visible service inventory; the discovery provenance identifies service search or legacy GET /service. Account-level products without a service mapping are not included. Non-2xx checks other than 404 are reported as unknown rather than treated as disabled."
         }
       '
   )"
@@ -1439,7 +1665,7 @@ cmd_inventory() {
 
   cid="$(current_cid)"
   customer="$(get "/customer/$cid")"
-  services_body="$(get_token_visible_customer_services)" ||
+  services_body="$(get_customer_services --details)" ||
     die 'service inventory unavailable; cannot safely use audit-event-derived service counts as a substitute'
   products="$(collect_products_json "$services_body")"
   workspaces="$(
@@ -1462,7 +1688,7 @@ cmd_inventory() {
               cdn: ([$services[] | select((.type // "") == "vcl")] | length),
               compute: ([$services[] | select((.type // "") == "wasm")] | length),
               other: ([$services[] | select(((.type // "") != "vcl") and ((.type // "") != "wasm"))] | length),
-              paused: ([$services[] | select(.paused == true)] | length),
+              paused: (if any($services[]; .paused == null) then null else ([$services[] | select(.paused == true)] | length) end),
               discovery: ($services_body.meta // {}),
               services: [
                 $services[]
@@ -1480,7 +1706,7 @@ cmd_inventory() {
                           end)
                       end
                     ),
-                    paused: (.paused // false)
+                    paused: (if has("paused") then .paused else false end)
                   }
               ]
             },
@@ -1516,7 +1742,7 @@ cmd_inventory() {
     "  CDN:     \(.edge_services.cdn)",
     "  Compute: \(.edge_services.compute)",
     "  Other:   \(.edge_services.other)",
-    "  Paused:  \(.edge_services.paused)",
+    "  Paused:  \(.edge_services.paused // "UNKNOWN")",
     "  Source:  \(.edge_services.discovery.source // .edge_services.discovery.discovery_method // "unknown")",
     "  Completeness: \(.edge_services.discovery.completeness // "unknown")",
     "",

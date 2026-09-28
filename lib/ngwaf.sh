@@ -133,7 +133,7 @@ cmd_workspace_services() {
   cid="$(current_cid)"
   workspaces="$(get_all_pages /ngwaf/v1/workspaces --data-urlencode "customer_id=$cid")" || return 1
   in_band_evidence="$(cmd_security_legacy_map "${in_band_args[@]}")" || return 1
-  inventory="$(get_token_visible_customer_services)" || return 1
+  inventory="$(get_customer_services --details)" || return 1
   product="$(discover_product_json ngwaf 'Edge WAF service attachments' ngwaf security "$inventory" true)" || return 1
   payload="$(workspace_services_payload_json "$in_band_evidence" "$product" "$workspaces" "$selected_id")" || return 1
   if [[ "$with_domains" == true ]]; then

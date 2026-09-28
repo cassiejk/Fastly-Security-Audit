@@ -208,7 +208,7 @@ legacy_map_lookup_inspection_service_json() {
     else
       inventory_hit="no"
     fi
-    legacy_map_trace "canonical /service customer inventory hit for $sid: $inventory_hit"
+    legacy_map_trace "canonical customer service inventory hit for $sid: $inventory_hit"
   fi
 
   detail_tmp="$(mktemp)"
@@ -1002,10 +1002,10 @@ cmd_security_legacy_map() {
   elapsed=$(( $(date +%s) - started_at ))
   legacy_map_trace "customer lookup completed in ${elapsed}s"
   started_at="$(date +%s)"
-  services_body="$(get_token_visible_customer_services)" ||
+  services_body="$(get_customer_services --details)" ||
     die 'service inventory unavailable; cannot build in-band NGWAF migration map safely'
   elapsed=$(( $(date +%s) - started_at ))
-  legacy_map_trace "canonical customer /service inventory completed in ${elapsed}s"
+  legacy_map_trace "canonical customer service discovery completed in ${elapsed}s"
   legacy_map_trace "canonical customer services returned: $(jq '.data | length' <<<"$services_body")"
   services="$(normalize_services_for_vcl_size_json "$services_body")"
 
@@ -1097,39 +1097,45 @@ cmd_security_legacy_map() {
   legacy_map_trace "legacy-map command completed in ${elapsed}s"
 }
 
-cmd_security_summary() {
-  [[ $# -le 2 ]] || die 'usage: fastly-audit security summary [--json] [--detailed]'
-
-  local mode='' detailed=false arg config_mode
+# Shared collection and schema construction; renderers consume this JSON.
+collect_security_summary_json() {
+  local config_mode="${1:-summary}"
+  local validate_scope="${2:-false}"
   local cid customer services_body products workspaces payload
-  for arg in "$@"; do
-    case "$arg" in
-      --json) mode='--json' ;;
-      --detailed) detailed=true ;;
-      *) die 'usage: fastly-audit security summary [--json] [--detailed]' ;;
-    esac
-  done
-  if $detailed; then
-    config_mode='detailed'
-  else
-    config_mode='summary'
-  fi
+  [[ "$config_mode" == summary || "$config_mode" == detailed ]] ||
+    die 'security inventory config mode must be summary or detailed'
 
-  cid="$(current_cid)"
+  cid="$(current_cid)" || return
 
   ui_phase 1 4 'Resolving the selected customer and token-visible services'
-  customer="$(get "/customer/$cid")"
-  services_body="$(get_token_visible_customer_services)" ||
+  customer="$(get "/customer/$cid")" || return
+  if [[ "$validate_scope" == true ]]; then
+    jq -e --arg cid "$cid" 'type == "object" and .id == $cid and
+      (.name | type == "string" and length > 0)' >/dev/null <<<"$customer" ||
+      die 'customer security: customer metadata does not match the selected customer'
+  fi
+  services_body="$(get_customer_services)" ||
     die 'service inventory unavailable; security summary cannot safely use audit-event-derived service counts as a substitute'
 
   ui_phase 2 4 'Checking security-product attachment inventory'
-  products="$(collect_security_products_json "$services_body" "$config_mode")"
+  products="$(collect_security_products_json "$services_body" "$config_mode")" || return
 
   ui_phase 3 4 'Retrieving the complete NGWAF workspace inventory'
   workspaces="$(
     get_all_pages "/ngwaf/v1/workspaces" \
       --data-urlencode "customer_id=$cid"
-  )"
+  )" || return
+
+  if [[ "$validate_scope" == true ]]; then
+    jq -e --arg cid "$cid" '
+      all(.data[]; type == "object" and (.id | type == "string" and length > 0)
+        and (if has("customer_id") then .customer_id == $cid else true end)
+        and (if (.customer | type) == "object" and (.customer | has("id"))
+             then .customer.id == $cid else true end))
+      and ([.data[].id] | length == (unique | length))
+    ' >/dev/null <<<"$workspaces" ||
+      die 'customer security: workspace metadata is malformed, duplicated, or conflicts with the selected customer'
+  fi
 
   ui_phase 4 4 'Building the security summary'
   payload="$(
@@ -1529,7 +1535,7 @@ cmd_security_summary() {
               cdn_mappings_lower_bound: (if $product_inventory_status == "UNKNOWN" then null else ([$products[].services[]? | select(.platform == "CDN")] | length) end),
               compute_mappings: (if $products_complete then ([$products[].services[]? | select(.platform == "Compute")] | length) else null end),
               compute_mappings_lower_bound: (if $product_inventory_status == "UNKNOWN" then null else ([$products[].services[]? | select(.platform == "Compute")] | length) end),
-              paused_service_mappings: ([$products[].services[]? | select(.paused == true)] | length),
+              paused_service_mappings: (if any($products[].services[]?; .paused == null) then null else ([$products[].services[]? | select(.paused == true)] | length) end),
               unknown_enablement_checks: ([$products[].result.unknown_count] | add // ([$products[].unknown_check_count] | add // 0)),
               configuration_summary: $configuration_summary,
               known_unavailable_configurations: $configuration_summary.known_unavailable_count,
@@ -1696,7 +1702,30 @@ cmd_security_summary() {
             ]
           }
       '
-  )"
+  )" || return
+
+  jq . <<<"$payload"
+}
+
+cmd_security_summary() {
+  [[ $# -le 2 ]] || die 'usage: fastly-audit security summary [--json] [--detailed]'
+
+  local mode='' detailed=false arg config_mode
+  local payload
+  for arg in "$@"; do
+    case "$arg" in
+      --json) mode='--json' ;;
+      --detailed) detailed=true ;;
+      *) die 'usage: fastly-audit security summary [--json] [--detailed]' ;;
+    esac
+  done
+  if $detailed; then
+    config_mode='detailed'
+  else
+    config_mode='summary'
+  fi
+
+  payload="$(collect_security_summary_json "$config_mode")"
 
   if [[ "$mode" == '--json' ]]; then
     jq . <<<"$payload"
@@ -1944,5 +1973,171 @@ cmd_security_summary() {
 
   if jq -e '.summary.unknown_enablement_checks > 0 or .summary.unavailable_configurations > 0' >/dev/null <<<"$payload"; then
     printf '%s: WARNING: one or more security-product checks were inconclusive; inspect --json details. Unknown is not disabled.\n' "$PROGRAM_NAME" >&2
+  fi
+}
+
+# Parse before preflight so help and usage errors never require API access.
+customer_security_parse_args() {
+  CUSTOMER_SECURITY_MODE=human
+  (( $# <= 1 )) || die 'usage: ngwaf security [--json|help|-h|--help]'
+  case "${1:-}" in
+    '') ;;
+    --json) CUSTOMER_SECURITY_MODE=json ;;
+    help|-h|--help) CUSTOMER_SECURITY_MODE=help ;;
+    *) die 'usage: ngwaf security [--json|help|-h|--help]' ;;
+  esac
+}
+
+customer_security_payload_json() {
+  # Retain the existing v1 product/result/provenance structures. Omit summary
+  # reconciliation findings and anomaly classifications from this orientation
+  # view; attachment counts require both inventory and configuration evidence.
+  jq '
+    . as $source
+    | (.products[] | select(.id == "ngwaf")) as $edge
+    | ($source.summary.service_inventory_status == "COMPLETE" and $edge.result.status == "COMPLETE"
+        and all($edge.services[]; .configuration_status == "RETRIEVED"
+          and (.configuration.workspace_id | type == "string" and length > 0))) as $links_complete
+    | {
+        schema_version,
+        command: "customer security",
+        generated_at,
+        customer,
+        summary,
+        products,
+        inventory_sections,
+        provenance,
+        ngwaf: (.ngwaf | {
+          edge_waf_service_attachment_result,
+          edge_waf_service_attachment_count,
+          edge_waf_service_attachment_count_lower_bound,
+          workspace_count,
+          workspace_inventory_result,
+          pages_fetched,
+          attachment_mapping_result: {
+            status: (if $links_complete then "COMPLETE" else "PARTIAL" end),
+            evidence_type: "DERIVED",
+            derived_from: ["products[].result", "products[].services[].configuration", "ngwaf.workspaces"],
+            reason: (if $links_complete then "complete attachment inventory and workspace ID configuration"
+              else "attachment inventory or workspace ID configuration is inconclusive; counts are lower bounds" end)
+          },
+          attachments: [.attachments[] as $attachment
+            | ($edge.services[] | select(.id == $attachment.service_id)) as $service
+            | $attachment
+            | del(.anomalies)
+            | .configuration_status = $service.configuration_status
+            | .configuration_evidence_type = $service.configuration_evidence_type
+            | .traffic_ramp_raw = $service.configuration.traffic_ramp],
+          workspaces: [.workspaces[]
+            | .attachment_count_lower_bound = (if $links_complete then null else .attachment_count end)
+            | .attachment_count = (if $links_complete then .attachment_count else null end)
+            | .attachment_count_status = (if $links_complete then "COMPLETE" else "PARTIAL" end)]
+        }),
+        limitations: (.limitations + [
+          "Workspace existence does not establish attachment, traffic, production use, active use, per-hostname protection, or rule effectiveness.",
+          "Workspace attachment counts are exact only when attachment inventory and workspace ID configuration are complete; otherwise observed mappings are lower bounds."
+        ])
+      }
+    | .summary.token_visibility_complete_for_customer = (
+        if ($source.provenance.service_discovery | has("token_visibility_complete_for_customer"))
+        then $source.provenance.service_discovery.token_visibility_complete_for_customer
+        else null end)
+  '
+}
+
+customer_security_render_human() {
+  local payload="$1" product_id title status mapping_count
+  ui_heading 'Customer security configuration'
+  jq -r '
+    def count($exact; $lower):
+      if $exact != null then $exact | tostring
+      elif $lower != null then ">=" + ($lower | tostring)
+      else "UNKNOWN" end;
+    "Customer: \(.customer.name) (\(.customer.id))",
+    "Token-visible services: \(count(.summary.token_visible_customer_services; .summary.token_visible_customer_services_lower_bound))",
+    "Service inventory: \(.summary.service_inventory_status) (\(.summary.completeness))"
+  ' <<<"$payload"
+
+  printf '\n'
+  ui_heading 'SECURITY PRODUCTS'
+  jq -r '
+    ["PRODUCT", "SERVICES", "STATUS"],
+    (.products[] | [ .label,
+      (if .result.count != null then .result.count | tostring
+       elif .result.count_lower_bound != null then ">=" + (.result.count_lower_bound | tostring)
+       else "UNKNOWN" end), .result.status ]) | @tsv
+  ' <<<"$payload" | human_table
+
+  while IFS=$'\t' read -r product_id title; do
+    printf '\n'
+    ui_heading "$title"
+    status="$(jq -r --arg id "$product_id" '.products[] | select(.id == $id) | .result.status' <<<"$payload")"
+    mapping_count="$(jq --arg id "$product_id" '.products[] | select(.id == $id) | .services | length' <<<"$payload")"
+    if [[ "$status" != COMPLETE ]]; then
+      printf 'Retrieval was inconclusive (%s); shown mappings are observed only.\n' "$status"
+    elif [[ "$mapping_count" == 0 ]]; then
+      printf 'No configured service mappings found.\n'
+    fi
+    [[ "$mapping_count" != 0 ]] || continue
+    jq -r --arg id "$product_id" '
+      def display: if . == null then "not reported" else tostring end;
+      . as $payload
+      | (.products[] | select(.id == $id)) as $product
+      | (if $id == "api_discovery" then ["SERVICE", "TYPE"]
+         elif $id == "bot_management" then ["SERVICE", "TYPE", "CONTENTGUARD", "CONFIG STATUS"]
+         elif $id == "ddos_protection" then ["SERVICE", "TYPE", "MODE", "CONFIG STATUS"]
+         else ["SERVICE", "TYPE", "WORKSPACE", "RAMP", "MODE", "DEFAULT BLOCK RESPONSE", "CONFIG STATUS"] end),
+        ($product.services | sort_by(.name, .id) | .[]
+          | . as $service
+          | [ (if .name == "" then .id else .name end), .platform ]
+            + (if $id == "api_discovery" then []
+               elif $id == "bot_management" then [($service.configuration.contentguard | display), $service.configuration_status]
+               elif $id == "ddos_protection" then [($service.configuration.mode | display), $service.configuration_status]
+               else
+                 ([$payload.ngwaf.attachments[] | select(.service_id == $service.id)] | .[0]) as $attachment
+                 | [($attachment.workspace.name // $attachment.workspace_id | display),
+                    ($attachment.traffic_ramp_raw | display),
+                    ($attachment.workspace.mode | display),
+                    ($attachment.workspace.default_blocking_response_code | display),
+                    $service.configuration_status]
+               end)) | @tsv
+    ' <<<"$payload" | human_table
+  done <<'PRODUCTS'
+api_discovery	API DISCOVERY
+bot_management	BOT MANAGEMENT
+ddos_protection	DDOS PROTECTION
+ngwaf	EDGE WAF SERVICE ATTACHMENTS
+PRODUCTS
+
+  printf '\n'
+  ui_heading 'NGWAF WORKSPACES'
+  if [[ "$(jq '.ngwaf.workspace_count' <<<"$payload")" == 0 ]]; then
+    printf 'No NGWAF workspaces found in the complete inventory.\n'
+  else
+    jq -r '
+      def display: if . == null then "not reported" else tostring end;
+      ["WORKSPACE", "ID", "MODE", "DEFAULT BLOCK RESPONSE", "ATTACHMENTS"],
+      (.ngwaf.workspaces | sort_by(.name, .id) | .[] | [
+        .name, .id, (.mode | display), (.default_blocking_response_code | display),
+        (if .attachment_count != null then .attachment_count | tostring
+         elif .attachment_count_lower_bound > 0 then ">=" + (.attachment_count_lower_bound | tostring)
+         else "UNKNOWN" end)]) | @tsv
+    ' <<<"$payload" | human_table
+  fi
+  if [[ "$(jq -r '.ngwaf.attachment_mapping_result.status' <<<"$payload")" != COMPLETE ]]; then
+    printf '\nWorkspace attachment counts are inconclusive; observed counts are lower bounds.\n'
+  fi
+  printf '\nScope: Token-visible services do not prove complete account-wide visibility.\n'
+  printf 'Configuration and workspace presence do not prove traffic, per-hostname protection, enforcement, or efficacy.\n'
+  printf 'A workspace with zero Edge WAF attachments is valid inventory context.\n'
+}
+
+cmd_customer_security() {
+  local payload
+  payload="$(collect_security_summary_json detailed true | customer_security_payload_json)"
+  if [[ "$CUSTOMER_SECURITY_MODE" == json ]]; then
+    jq . <<<"$payload"
+  else
+    customer_security_render_human "$payload"
   fi
 }

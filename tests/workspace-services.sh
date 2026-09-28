@@ -55,7 +55,7 @@ resolve_workspace_json() { printf 'workspace lookup\n' >>"$TEST_TMP/calls"; [[ "
 current_cid() { printf 'c\n'; }
 get_all_pages() { printf 'workspace inventory\n' >>"$TEST_TMP/calls"; printf '%s\n' "$fixture_workspaces"; }
 cmd_security_legacy_map() { printf 'in-band evidence sites and generated_vcl\n' >>"$TEST_TMP/calls"; printf '%s\n' "$fixture_in_band_evidence"; }
-get_token_visible_customer_services() { printf '/service inventory\n' >>"$TEST_TMP/calls"; printf '{"data":[]}\n'; }
+get_customer_services() { printf '/service inventory\n' >>"$TEST_TMP/calls"; printf '{"data":[]}\n'; }
 discover_product_json() { printf 'enabled product\n' >>"$TEST_TMP/calls"; printf '%s\n' "$fixture_product"; }
 
 for missing in FASTLY_DSTOKEN FASTLY_VOUCH_COOKIE both; do

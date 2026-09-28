@@ -179,6 +179,15 @@ dispatch_customer_namespace() {
     setup) dispatch_flat setup "$@" ;;
     use) dispatch_flat use "$@" ;;
     whoami) dispatch_flat whoami "$@" ;;
+    security)
+      customer_security_parse_args "$@"
+      if [[ "$CUSTOMER_SECURITY_MODE" == help ]]; then
+        customer_security_usage
+        return
+      fi
+      dispatch_preflight customer-security
+      cmd_customer_security
+      ;;
     vcl-size)
       dispatch_preflight services
       cmd_customer_vcl_size "$@"
@@ -210,7 +219,7 @@ dispatch_cli() {
     security) dispatch_security_namespace "$@" ;;
     bot) dispatch_bot_namespace "$@" ;;
     customer)
-      if [[ "$PROGRAM_NAME" == "fastly-audit" && $# -gt 0 ]]; then
+      if [[ $# -gt 0 && ( "$PROGRAM_NAME" == "fastly-audit" || "${1:-}" == security ) ]]; then
         dispatch_customer_namespace "$@"
       else
         dispatch_flat customer "$@"

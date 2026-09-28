@@ -36,6 +36,12 @@ case "$url" in
       printf '%s\n' '{"id":"test-customer","name":"Test Customer"}' >"$outfile"
     fi
     ;;
+  */search/services)
+    # This suite exercises the established legacy inventory/product scenarios.
+    # Search fast-path success and cursor failures are covered in service-search.
+    printf '%s\n' '{"error":"service search unsupported in this fixture"}' >"$outfile"
+    status=404
+    ;;
   */service)
     case "${FASTLY_TEST_SECURITY_MODE:-ok}" in
       empty-service-inventory)
@@ -471,7 +477,8 @@ jq -e '
   and .inventory_sections.service_inventory.source == "GET /service"
   and (.inventory_sections.service_inventory.retrieved_at | test("^20[0-9]{2}-[0-9]{2}-[0-9]{2}T"))
   and .inventory_sections.service_inventory.pagination.truncated == false
-  and .inventory_sections.service_inventory.fallback_used == false
+  and .inventory_sections.service_inventory.fallback_used == true
+  and .inventory_sections.service_inventory.fallback_from == "GET /search/services"
   and .inventory_sections.product_attachments.status == "COMPLETE"
   and .inventory_sections.product_attachments.evidence_type == "DERIVED"
   and (.inventory_sections.product_attachments.derived_from | index("products[].result") != null)

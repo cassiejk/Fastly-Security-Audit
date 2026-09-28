@@ -321,6 +321,81 @@ unset parameter means in-band. Future architecture fields reserve `in_band`,
 or migration terminology associated with out-of-band, rather than a synonym
 for the public architecture type.
 
+### Customer-Scoped Service Discovery
+
+Shared selected-customer inventory commands first use Fastly's service-search
+endpoint, `GET /search/services`, with the authenticated customer ID preserved
+exactly. Requests use `limit=100`, `sort=name`, and cursor pagination. An inventory
+is complete only when every page is valid, cursors terminate without repetition,
+service IDs are unique, totals remain consistent, and the collected count equals
+`meta.total`. A validated customer can legitimately have zero visible services.
+
+Service search is a UI-backed fast path; this project does not treat it as a
+documented or stable public Service API. Unsupported responses, transport/server
+failures, malformed data, or inconclusive pagination trigger a diagnosed fallback
+to the existing token-visible `GET /service` inventory with exact local customer
+filtering. Search HTTP 401/403 or conflicting ownership metadata fail without
+fallback. If fallback also fails, the command fails rather than reporting zero.
+
+JSON discovery provenance records the source, scope, pagination/completeness,
+and whether fallback was used. Progress and fallback diagnostics stay on stderr;
+cursor values are excluded from report metadata and redacted in request debug logs.
+`COMPLETE` describes the returned token-visible inventory, not proof that the
+token can see every service belonging to the customer.
+
+Search `vcl` and `wasm` retain their existing CDN/Compute interpretation. Search
+state and version fields remain distinct: `inactive` is not assumed to mean
+`paused`, and `production_version_number` is not renamed to `active_version`.
+Unavailable legacy fields remain null. Commands needing legacy active-version
+or paused metadata retrieve and verify individual service details when necessary;
+product/security reports do not add those detail requests. Single-service VCL
+and domain commands enrich only the selected service, and an explicit domain
+version requires no version enrichment.
+
+The raw legacy inventory helper and the direct `/service` discovery in the bespoke
+Costco reporting extension remain unchanged. No caching or new concurrency is
+introduced by this discovery path.
+
+### Customer Security Configuration Overview
+
+For a concise orientation to a newly assigned customer's security configuration:
+
+```bash
+fastly-audit customer security
+fastly-audit customer security --json
+fastly-audit customer security help
+ngwaf customer security
+```
+
+This read-only command combines the selected customer identity, token-visible
+service count/status, API Discovery, Bot Management, DDoS Protection, Edge WAF
+service attachments, and the complete NGWAF workspace inventory. It reuses the
+security summary collector in its existing detailed configuration mode, so
+DDoS mode and Bot Management ContentGuard are reported when returned by the
+supported APIs. No additional product endpoints or workspace inspection calls
+are introduced.
+
+Human output shows product counts/status, service mappings, returned configuration,
+and all workspaces, including those with zero Edge WAF attachments. Configuration
+retrieval status is separate from product enablement status. Missing fields are
+shown as `not reported`; unavailable configuration is never assigned a default.
+Workspace attachment counts become unknown or lower bounds when mapping evidence
+is incomplete. Conclusively empty product inventories are distinguished from
+`UNKNOWN` or `PARTIAL` retrieval.
+
+JSON uses schema version 1 with `command: "customer security"`, retaining the
+existing security-summary product, result, inventory-section, and provenance
+structures. It projects the configuration facts without reconciliation findings
+or anomaly classifications. JSON goes to stdout; diagnostics and progress go
+to stderr. Help (`help`, `-h`, or `--help`) works without credentials or customer
+selection. The report requires the existing token and selected customer.
+
+This is configuration inventory. Token-visible services do not prove complete
+account-wide visibility. Product attachment and workspace existence do not prove
+traffic, active workspace use, per-hostname protection, enforcement, or security
+efficacy. Workspaces with no Edge WAF attachments are valid inventory context.
+The command does not perform a security assessment or traffic analysis.
+
 ### Security Product Summary
 
 Inspect selected-customer security-product coverage without querying unrelated
@@ -332,8 +407,8 @@ fastly-audit security summary --json
 fastly-audit security summary --detailed
 ```
 
-The summary lists token-visible Fastly services from the service inventory API,
-filters them to the selected customer ID, deduplicates by service ID, and then
+The summary uses the shared customer-scoped service search, with fallback to
+token-visible service inventory filtered by exact customer ID, and then
 checks API Discovery, Bot Management, DDoS Protection, and Edge WAF service
 attachments against that service set. The default summary is attachment-focused
 and does not fetch Bot Management or DDoS per-service configuration. Use
@@ -425,8 +500,8 @@ detection.
 | `rule-audit` | NGWAF rule API plus request-search API | Rule configuration plus retained-search cohort counts | Retrieves live rule configuration, counts `ruleid:<id>` and selected `ruleid:<id> tag:<signal>` intersections over one shared rolling window, and emits deterministic review indicators without treating overlapping signal cohorts as additive. |
 | `template-audit` | NGWAF rules, signal thresholds, and request-search APIs | Templated signal configuration plus retained-search count | Correlates `templated_signal` tagging rules and signal thresholds into one logical control, counts retained `tag:<signal>` matches, and emits conservative review indicators without declaring remediation. |
 | `bot-stats` | Fastly Historical Stats | Daily service statistics | Bot metrics are sampled and scaled estimates; they are not directly comparable to unsampled `edge_requests`. |
-| `services`, `products`, `inventory` | Fastly service inventory plus service/product APIs | Token-visible selected-customer inventory | Service inventory is filtered by exact selected customer ID; it does not prove token visibility is complete for the customer. |
-| `security summary` | Fastly service inventory, security-product enablement/configuration APIs, and NGWAF workspaces | Cross-product configuration inventory | Service count is token-visible and selected-customer filtered; enabled does not prove traffic or enforcement; inconclusive probes remain unknown. |
+| `services`, `products`, `inventory` | Customer-scoped service search with legacy service-inventory fallback, plus service/product APIs | Token-visible selected-customer inventory | Search uses validated exact customer scope and complete cursor traversal; fallback filters locally. Neither proves complete customer visibility. |
+| `security summary`, `customer security` | Shared customer-scoped service discovery, security-product enablement/configuration APIs, and NGWAF workspaces | Cross-product configuration inventory | Service count is token-visible and selected-customer scoped; enabled does not prove traffic or enforcement; inconclusive probes remain unknown. |
 | `security legacy-map` | Fastly service inventory, generated VCL, internal NGWAF sites, and Inspection Service lookups | Read-only migration mapping evidence | `CONFIRMED` requires exact CDN service generated-VCL hostname -> Inspection Service name -> site `serviceID`; unresolved or failed joins remain unknown/unresolved. |
 | `attack-origins` | Per-workspace top-attacks plus NGWAF timeseries | Ranked/truncated attack dimensions | Production workspaces are selected by a documented name regex and country rows are reconciled to `requests_attack`. |
 
