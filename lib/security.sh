@@ -2034,6 +2034,7 @@ customer_security_payload_json() {
             | .attachment_count_status = (if $links_complete then "COMPLETE" else "PARTIAL" end)]
         }),
         limitations: (.limitations + [
+          "Edge WAF service attachments count NGWAF product enablement on token-visible Fastly services, not NGWAF workspaces or every NGWAF deployment method; zero attachments does not mean NGWAF is undeployed.",
           "Workspace existence does not establish attachment, traffic, production use, active use, per-hostname protection, or rule effectiveness.",
           "Workspace attachment counts are exact only when attachment inventory and workspace ID configuration are complete; otherwise observed mappings are lower bounds."
         ])
@@ -2067,6 +2068,14 @@ customer_security_render_human() {
        elif .result.count_lower_bound != null then ">=" + (.result.count_lower_bound | tostring)
        else "UNKNOWN" end), .result.status ]) | @tsv
   ' <<<"$payload" | human_table
+  jq -r '
+    "NGWAF workspaces inventoried: \(.ngwaf.workspace_count) (\(.ngwaf.workspace_inventory_result.status)).",
+    "Edge WAF service attachments count NGWAF product enablement on token-visible Fastly services; they do not count NGWAF workspaces or every NGWAF deployment method.",
+    (if .ngwaf.workspace_count > 0 and
+        ([.products[] | select(.id == "ngwaf") | .result.count] | .[0]) == 0
+     then "Zero Edge WAF service attachments does not mean NGWAF is undeployed."
+     else empty end)
+  ' <<<"$payload"
 
   while IFS=$'\t' read -r product_id title; do
     printf '\n'

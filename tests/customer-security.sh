@@ -175,6 +175,11 @@ if grep -E '/events|/domains|/backends|/timeseries|/rules|/requests' "$CUSTOMER_
 fi
 run_human
 grep -F 'Customer security configuration' "$TEST_TMP/human" >/dev/null
+grep -F 'NGWAF workspaces inventoried: 2 (COMPLETE).' "$TEST_TMP/human" >/dev/null
+grep -F 'they do not count NGWAF workspaces or every NGWAF deployment method.' "$TEST_TMP/human" >/dev/null
+if grep -F 'Zero Edge WAF service attachments does not mean NGWAF is undeployed.' "$TEST_TMP/human" >/dev/null; then
+  printf 'customer-security: zero-attachment note appeared for nonzero attachments\n' >&2; exit 1
+fi
 for heading in 'API DISCOVERY' 'BOT MANAGEMENT' 'DDOS PROTECTION' 'EDGE WAF SERVICE ATTACHMENTS' 'NGWAF WORKSPACES'; do
   grep -F "$heading" "$TEST_TMP/human" >/dev/null
 done
@@ -219,7 +224,10 @@ for mode in zero unknown partial edge-zero edge-unknown edge-config-unavailable 
       jq -e 'all(.products[]; .result.status == "PARTIAL" and .result.count == null and .result.count_lower_bound == 1)' "$TEST_TMP/json" >/dev/null
       grep -F 'Retrieval was inconclusive (PARTIAL)' "$TEST_TMP/human" >/dev/null ;;
     edge-zero)
-      jq -e '.ngwaf.workspace_count == 2 and all(.ngwaf.workspaces[]; .attachment_count == 0)' "$TEST_TMP/json" >/dev/null ;;
+      jq -e '.ngwaf.workspace_count == 2 and all(.ngwaf.workspaces[]; .attachment_count == 0)
+        and any(.limitations[]; contains("zero attachments does not mean NGWAF is undeployed"))' "$TEST_TMP/json" >/dev/null
+      grep -F 'NGWAF workspaces inventoried: 2 (COMPLETE).' "$TEST_TMP/human" >/dev/null
+      grep -F 'Zero Edge WAF service attachments does not mean NGWAF is undeployed.' "$TEST_TMP/human" >/dev/null ;;
     edge-unknown|edge-config-unavailable)
       jq -e 'all(.ngwaf.workspaces[]; .attachment_count == null and .attachment_count_lower_bound == 0)' "$TEST_TMP/json" >/dev/null
       grep -E 'Unattached Workspace.*UNKNOWN' "$TEST_TMP/human" >/dev/null
