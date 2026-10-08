@@ -28,6 +28,10 @@ legacy_map_usage() {
   die 'usage: fastly-audit security legacy-map [service-name-or-id] [--sigsci-corp CORP] [--format human|json|csv] [--output FILE]'
 }
 
+# TODO(legacy-sigsci-auth): This internal Signal Sciences path uses DSTOKEN and
+# VouchCookie from a legacy dashboard session, separate from FASTLY_API_TOKEN.
+# manage.fastly.com uses OIDC/OAuth and does not provide these cookies. Replace
+# this dependency if the legacy dashboard/auth flow is retired.
 internal_ngwaf_require_credentials() {
   local context="${1:-internal NGWAF site inventory}"
   local -a missing=()
@@ -36,7 +40,7 @@ internal_ngwaf_require_credentials() {
   (( ${#missing[@]} > 0 )) || return 0
   printf '%s: missing required credentials for %s:\n' "${PROGRAM_NAME:-fastly-audit}" "$context" >&2
   printf '  %s\n' "${missing[@]}" >&2
-  printf '\nSet the missing credential(s) and retry.\n' >&2
+  printf '\nSet the missing credential(s) from a legacy Signal Sciences dashboard session and retry.\n' >&2
   return 1
 }
 
@@ -129,12 +133,12 @@ legacy_map_fetch_sites_json() {
       302)
         error_type='AUTH_REDIRECT'
         error_reason='internal NGWAF session was redirected; likely expired or invalid internal session cookies'
-        recommended_action='refresh FASTLY_DSTOKEN and FASTLY_VOUCH_COOKIE, then retry'
+        recommended_action='refresh FASTLY_DSTOKEN and FASTLY_VOUCH_COOKIE from a legacy Signal Sciences dashboard session, then retry'
         ;;
       401)
         error_type='AUTH_FAILED'
         error_reason='internal NGWAF authentication failed'
-        recommended_action='refresh FASTLY_DSTOKEN and FASTLY_VOUCH_COOKIE'
+        recommended_action='refresh FASTLY_DSTOKEN and FASTLY_VOUCH_COOKIE from a legacy Signal Sciences dashboard session'
         ;;
       403)
         error_type='ACCESS_DENIED'
@@ -149,7 +153,7 @@ legacy_map_fetch_sites_json() {
       3*)
         error_type='AUTH_REDIRECT'
         error_reason='internal NGWAF request was redirected unexpectedly'
-        recommended_action='verify the internal NGWAF endpoint and refresh FASTLY_DSTOKEN and FASTLY_VOUCH_COOKIE if the redirect is to authentication'
+        recommended_action='verify the internal NGWAF endpoint; if redirected to authentication, refresh FASTLY_DSTOKEN and FASTLY_VOUCH_COOKIE from a legacy Signal Sciences dashboard session'
         ;;
       4*|5*)
         error_type='HTTP_ERROR'

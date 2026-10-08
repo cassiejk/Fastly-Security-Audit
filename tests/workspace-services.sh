@@ -71,6 +71,7 @@ for missing in FASTLY_DSTOKEN FASTLY_VOUCH_COOKIE both; do
   fi
   [[ ! -s "$TEST_TMP/calls" && ! -s "$TEST_TMP/missing.out" ]] || fail 'preflight performed collection work or emitted a result'
   rg -q 'missing required credentials for in-band workspace-service mapping' "$TEST_TMP/missing.err"
+  rg -q 'legacy Signal Sciences dashboard session' "$TEST_TMP/missing.err"
   if [[ "$missing" == both ]]; then
     rg -q '^  FASTLY_DSTOKEN$' "$TEST_TMP/missing.err"
     rg -q '^  FASTLY_VOUCH_COOKIE$' "$TEST_TMP/missing.err"

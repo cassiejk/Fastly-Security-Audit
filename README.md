@@ -467,6 +467,16 @@ for `SIGSCI_CORP` using `FASTLY_DSTOKEN` and `FASTLY_VOUCH_COOKIE`, resolves
 each site `serviceID` as a Fastly Inspection Service, and confirms mappings
 only when the generated-VCL Inspection Service hostname joins exactly to the
 Fastly Inspection Service name and site `serviceID`.
+In the production CLI, these two cookie variables are needed only for
+employee/internal NGWAF site inventory used by `security legacy-map` and
+`ngwaf workspace-services`. They come from a legacy Signal Sciences dashboard
+session; they are not normal Fastly API credentials. `FASTLY_API_TOKEN`
+authenticates requests to `api.fastly.com` independently. The current
+`manage.fastly.com` authentication flow uses OIDC/OAuth and does not provide
+these legacy cookies. Fastly is actively moving customers toward dashboard
+unification. If employee access to the legacy Signal Sciences
+dashboard/session authentication path becomes unavailable, commands that
+depend on these cookies will require a replacement authentication mechanism.
 `--sigsci-corp <corp>` overrides `SIGSCI_CORP` for one run.
 Direct Inspection Service lookups use bounded concurrency; set
 `FASTLY_AUDIT_LOOKUP_CONCURRENCY` to a positive integer up to `16` to override

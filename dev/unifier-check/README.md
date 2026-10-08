@@ -12,8 +12,10 @@ Run `fastly-creds` in the same interactive shell before invoking the probe.
 That existing employee workflow exports `FASTLY_API_TOKEN`, `FASTLY_DSTOKEN`,
 and `FASTLY_VOUCH_COOKIE`. The Fastly token must be authorized to read the
 selected customer, its user list, and IAM role definitions when role IDs need
-resolution. The employee console session must be authorized to read the
-selected NGWAF corp's users. Credential presence alone does not establish
+resolution. The two cookie variables come from a legacy Signal Sciences
+dashboard session, independently of `FASTLY_API_TOKEN` and the current
+`manage.fastly.com` authentication flow. That session must be authorized to
+read the selected NGWAF corp's users. Credential presence alone does not establish
 those permissions; access failures are reported as inconclusive. The probe
 does not use `SIGSCI_EMAIL` or `SIGSCI_TOKEN` and has no credential store or
 refresh flow.

@@ -404,11 +404,13 @@ jq -e '
   and .sources.internal_ngwaf_sites.internal_ngwaf_error_type == "AUTH_REDIRECT"
   and (.sources.internal_ngwaf_sites.internal_ngwaf_error_reason | test("likely expired or invalid"))
   and (.sources.internal_ngwaf_sites.internal_ngwaf_recommended_action | test("refresh FASTLY_DSTOKEN and FASTLY_VOUCH_COOKIE"))
+  and (.sources.internal_ngwaf_sites.internal_ngwaf_recommended_action | test("legacy Signal Sciences dashboard session"))
 ' >/dev/null <<<"$redirect_sites"
 grep -F 'Internal NGWAF auth/session problem' <<<"$redirect_human" >/dev/null
 grep -F 'HTTP 302 from internal NGWAF API' <<<"$redirect_human" >/dev/null
 grep -F 'likely expired or invalid internal session cookies' <<<"$redirect_human" >/dev/null
 grep -F 'refresh FASTLY_DSTOKEN and FASTLY_VOUCH_COOKIE' <<<"$redirect_human" >/dev/null
+grep -F 'legacy Signal Sciences dashboard session' <<<"$redirect_human" >/dev/null
 ! grep -F 'secret-dstoken' <<<"$redirect_sites" >/dev/null
 ! grep -F 'secret-vouch' <<<"$redirect_sites" >/dev/null
 ! grep -F 'secret-dstoken' <<<"$redirect_human" >/dev/null
@@ -426,6 +428,7 @@ jq -e '
   and .sources.internal_ngwaf_sites.internal_ngwaf_error_type == "AUTH_FAILED"
   and (.sources.internal_ngwaf_sites.internal_ngwaf_error_reason | test("authentication failed"))
   and (.sources.internal_ngwaf_sites.internal_ngwaf_recommended_action | test("refresh FASTLY_DSTOKEN and FASTLY_VOUCH_COOKIE"))
+  and (.sources.internal_ngwaf_sites.internal_ngwaf_recommended_action | test("legacy Signal Sciences dashboard session"))
 ' >/dev/null <<<"$auth_failed_sites"
 
 export FASTLY_TEST_LEGACY_MAP_MODE=sites-403
