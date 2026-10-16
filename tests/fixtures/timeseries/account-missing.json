@@ -1,0 +1,1 @@
+{"meta":{"total":1},"data":[{"dimensions":{"time":"2026-09-01T00:00:00Z","workspace":"Production"},"values":[{"requests_total":100},{"requests_total_blocked":3}]}]}

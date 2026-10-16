@@ -1630,7 +1630,7 @@ cmd_products() {
   jq -r '
     def cfg($pid; $c):
       if $c == null then "-"
-      elif $pid == "bot_management" then "contentguard=" + (($c.contentguard // "unknown") | tostring)
+      elif $pid == "bot_management" then "contentguard=" + (if $c.contentguard == null then "unknown" else ($c.contentguard | tostring) end)
       elif $pid == "ddos_protection" then "mode=" + (($c.mode // "unknown") | tostring)
       elif $pid == "ngwaf" then
         "workspace_id=" + (($c.workspace_id // "unknown") | tostring)
@@ -1778,7 +1778,7 @@ cmd_inventory() {
   jq -r '
     def cfg($pid; $c):
       if $c == null then "-"
-      elif $pid == "bot_management" then "contentguard=" + (($c.contentguard // "unknown") | tostring)
+      elif $pid == "bot_management" then "contentguard=" + (if $c.contentguard == null then "unknown" else ($c.contentguard | tostring) end)
       elif $pid == "ddos_protection" then "mode=" + (($c.mode // "unknown") | tostring)
       elif $pid == "ngwaf" then
         "workspace_id=" + (($c.workspace_id // "unknown") | tostring)

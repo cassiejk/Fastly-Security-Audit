@@ -49,6 +49,22 @@ dispatch_flat() {
     cmd_template_audit "$@"
     return
   fi
+  if [[ "$command" == "timeseries" ]]; then
+    timeseries_parse_args "$@"
+    if [[ "${TIMESERIES_HELP:-0}" == 1 ]]; then
+      timeseries_usage
+      return
+    fi
+  fi
+  if [[ "$command" == "timeseries" || "$command" == "overview" ]]; then
+    # Keep NGWAF_DEBUG schema diagnostics free of customer and workspace IDs.
+    NGWAF_TIMESERIES_DEBUG=scope
+  fi
+
+  if [[ "$command" == "help" && "${1:-}" == "ngwaf" && "${2:-}" == "timeseries" && $# -eq 2 ]]; then
+    timeseries_usage
+    return
+  fi
 
   dispatch_preflight "$command"
 
@@ -63,6 +79,7 @@ dispatch_flat() {
     products) cmd_products "$@" ;;
     inventory) cmd_inventory "$@" ;;
     workspaces) cmd_workspaces "$@" ;;
+    link) cmd_ngwaf_link "$@" ;;
     workspace-services) cmd_workspace_services "$@" ;;
     overview) cmd_overview "$@" ;;
     timeseries) cmd_timeseries "$@" ;;
@@ -105,7 +122,16 @@ dispatch_ngwaf_namespace() {
 
   case "$subcommand" in
     help|-h|--help) ngwaf_namespace_usage ;;
-    workspaces|workspace-services|workspace|posture|rule|rules|account-rules|thresholds|lists|bot-rules|count|requests|rule-audit|template-audit|signal-count|overview|timeseries|metrics|attack-profile|attack-origins)
+    agent-diagnostic)
+      agent_diagnostic_parse_args "$@"
+      if [[ "$AGENT_DIAGNOSTIC_HELP" == 1 ]]; then
+        agent_diagnostic_usage
+        return
+      fi
+      dispatch_preflight agent-diagnostic
+      cmd_ngwaf_agent_diagnostic
+      ;;
+    workspaces|link|workspace-services|workspace|posture|rule|rules|account-rules|thresholds|lists|bot-rules|count|requests|rule-audit|template-audit|signal-count|overview|timeseries|metrics|attack-profile|attack-origins)
       dispatch_flat "$subcommand" "$@"
       ;;
     snapshot) dispatch_flat snapshot "$@" ;;
@@ -154,6 +180,25 @@ dispatch_security_namespace() {
   esac
 }
 
+dispatch_ddos_namespace() {
+  local subcommand="${1:-help}"
+  (( $# == 0 )) || shift
+  USAGE_PROGRAM="$PROGRAM_NAME ddos"
+
+  case "$subcommand" in
+    help|-h|--help) ddos_namespace_usage ;;
+    link)
+      dispatch_preflight ddos-link
+      cmd_ddos_link "$@"
+      ;;
+    export-event)
+      dispatch_preflight ddos-export-event
+      cmd_ddos_export_event "$@"
+      ;;
+    *) die "unknown DDoS command: $subcommand; run: $PROGRAM_NAME ddos help" ;;
+  esac
+}
+
 dispatch_bot_namespace() {
   local subcommand="${1:-help}"
   (( $# == 0 )) || shift
@@ -161,6 +206,7 @@ dispatch_bot_namespace() {
 
   case "$subcommand" in
     help|-h|--help) bot_namespace_usage ;;
+    workspaces) cmd_bot_workspaces "$@" ;;
     stats) dispatch_flat bot-stats "$@" ;;
     rules) dispatch_flat bot-rules "$@" ;;
     intl-stats) dispatch_flat intl-bot-stats "$@" ;;
@@ -215,6 +261,7 @@ dispatch_cli() {
 
   case "$command" in
     ngwaf) dispatch_ngwaf_namespace "$@" ;;
+    ddos) dispatch_ddos_namespace "$@" ;;
     service) dispatch_service_namespace "$@" ;;
     security) dispatch_security_namespace "$@" ;;
     bot) dispatch_bot_namespace "$@" ;;

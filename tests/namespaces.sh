@@ -97,6 +97,7 @@ unset FASTLY_TEST_HELP_CURL_LOG
 
 "$ROOT/fastly-audit" bot help >"$TEST_TMP/bot-help"
 grep -F 'stats <service_id>' "$TEST_TMP/bot-help" >/dev/null
+grep -F 'workspaces [--service-id <SID>] [--json]' "$TEST_TMP/bot-help" >/dev/null
 
 "$ROOT/fastly-audit" snapshot help >"$TEST_TMP/snapshot-help"
 grep -F 'ngwaf <workspace>' "$TEST_TMP/snapshot-help" >/dev/null

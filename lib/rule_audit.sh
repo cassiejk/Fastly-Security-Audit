@@ -252,7 +252,7 @@ rule_audit_one_rule_json() {
       | {
         rule_id: ($rule.id // $rule_id),
         description: ($rule.description // ""),
-        enabled: ($rule.enabled // null),
+        enabled: (if $rule | has("enabled") then $rule.enabled else null end),
         type: ($rule.type // null),
         action_types: [($rule.actions // [])[]? | action_type],
         total_retained_matches: $total,
@@ -262,7 +262,7 @@ rule_audit_one_rule_json() {
         configuration: {
           rule_id: ($rule.id // $rule_id),
           description: ($rule.description // ""),
-          enabled: ($rule.enabled // null),
+          enabled: (if $rule | has("enabled") then $rule.enabled else null end),
           type: ($rule.type // null),
           scope: ($rule.scope // null),
           request_logging: (
@@ -313,7 +313,7 @@ rule_audit_render_human() {
   while IFS= read -r rule; do
     rule_id="$(jq -r '.rule_id' <<<"$rule")"
     description="$(jq -r '.description // ""' <<<"$rule")"
-    enabled="$(jq -r '.enabled // "unknown"' <<<"$rule")"
+    enabled="$(jq -r 'if .enabled == null then "unknown" else (.enabled | tostring) end' <<<"$rule")"
     type="$(jq -r '.type // "unknown"' <<<"$rule")"
     actions="$(jq -r 'if (.action_types | length) > 0 then (.action_types | join(", ")) else "-" end' <<<"$rule")"
     updated="$(jq -r '.configuration.updated_at // .configuration.created_at // "-"' <<<"$rule")"

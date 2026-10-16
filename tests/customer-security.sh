@@ -9,13 +9,14 @@ mkdir -p "$TEST_TMP/bin" "$TEST_TMP/config"
 cat >"$TEST_TMP/bin/curl" <<'FAKE_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
-outfile='' url='' page=1
+outfile='' url='' page=1 query_count=0
 printf 'CALL\n' >>"$CUSTOMER_SECURITY_CURL_LOG"
 while (( $# > 0 )); do
   case "$1" in
     -o) outfile="$2"; shift 2 ;;
     --data-urlencode)
       printf '%s\n' "$2" >>"$CUSTOMER_SECURITY_CURL_LOG"
+      query_count=$((query_count + 1))
       [[ "$2" != page=* ]] || page="${2#page=}"
       shift 2 ;;
     https://*) url="$1"; shift ;;
@@ -48,7 +49,9 @@ case "$url" in
     fi ;;
   */enabled-products/v1/*/services)
     product="${url#*/enabled-products/v1/}"; product="${product%/services}"
-    if [[ "$mode" == zero || ( "$mode" == edge-zero && "$product" == ngwaf ) ]]; then
+    if [[ "$mode" == edge-one && "$product" == ngwaf ]]; then
+      printf '%s\n' '{"customer":{"id":"test-customer"},"services":["cdn"]}' >"$outfile"
+    elif [[ "$mode" == zero || ( "$mode" == edge-zero && "$product" == ngwaf ) ]]; then
       printf '%s\n' '{"customer":{"id":"test-customer"},"services":[]}' >"$outfile"
     elif [[ "$mode" == unknown || "$mode" == partial || ( "$mode" == edge-unknown && "$product" == ngwaf ) ]]; then
       status=503
@@ -98,8 +101,40 @@ case "$url" in
         else
           printf '%s\n' '{"meta":{"total":101},"data":[{"id":"workspace-101","name":"Workspace 101","customer_id":"test-customer"}]}' >"$outfile"
         fi ;;
+      agent-uid|agent-uid-mismatch)
+        printf '%s\n' '{"meta":{"total":2},"data":[{"id":"production","workspace_uid":"UID-PRODUCTION","name":"Production","customer_id":"test-customer","mode":"block"},{"id":"unattached","name":"Unattached Workspace","customer_id":"test-customer","mode":"log"}]}' >"$outfile" ;;
       *) printf '%s\n' '{"meta":{"total":2},"data":[{"id":"production","name":"Production","customer_id":"test-customer","mode":"block","default_blocking_response_code":406},{"id":"unattached","name":"Unattached Workspace","customer_id":"test-customer","mode":"log","default_blocking_response_code":403}]}' >"$outfile" ;;
     esac ;;
+  */ngwaf/v1/workspaces/*/agents)
+    if (( query_count > 0 )); then
+      status=400; printf '%s\n' '{"error":"unsupported agent query parameters"}' >"$outfile"
+    else case "$mode:$url" in
+      agent-uid:*/production/agents|agent-uid-mismatch:*/production/agents)
+        status=400; printf '%s\n' '{"error":"invalid workspace id"}' >"$outfile" ;;
+      agent-uid:*/UID-PRODUCTION/agents)
+        printf '%s\n' '{"meta":{"total":1},"data":[{"workspace_id":"UID-PRODUCTION","agent_active":true,"module_detected":true,"module_type":"nginx"}]}' >"$outfile" ;;
+      agent-uid-mismatch:*/UID-PRODUCTION/agents)
+        printf '%s\n' '{"meta":{"total":1},"data":[{"workspace_id":"other-workspace","agent_active":true,"module_detected":true}]}' >"$outfile" ;;
+      agent-failure:*/unattached/agents) status=403; printf '%s\n' '{"error":"forbidden"}' >"$outfile" ;;
+      agent-site-not-found:*/unattached/agents) status=400; printf '%s\n' '{"status":400,"title":"Bad Request","detail":"Site not found","errors":[]}' >"$outfile" ;;
+      agent-incomplete:*/unattached/agents) printf '%s\n' '{"meta":{"total":2},"data":[{"agent_active":true,"module_detected":true}]}' >"$outfile" ;;
+      agent-module:*/production/agents)
+        printf '%s\n' '{"meta":{"total":1},"data":[{"agent_active":true,"module_detected":true,"module_type":"nginx","module_server":"nginx","module_version":"1.2","host_os":"Linux"}]}' >"$outfile" ;;
+      agent-no-module:*/unattached/agents)
+        printf '%s\n' '{"meta":{"total":1},"data":[{"agent_active":true,"module_detected":false}]}' >"$outfile" ;;
+      *) printf '%s\n' '{"meta":{"total":0},"data":[]}' >"$outfile" ;;
+    esac; fi ;;
+  */corps/test-corp/cloudwafInstances)
+    if [[ "$mode" == cloud-failure ]]; then status=403; printf '%s\n' '{"error":"forbidden"}' >"$outfile"
+    elif [[ "$mode" == cloud-two ]]; then printf '%s\n' '{"data":[{"id":"cloud-1","name":"Instance One"},{"id":"cloud-2","name":"Instance Two"}]}' >"$outfile"
+    else printf '%s\n' '{"data":[{"id":"cloud-1","name":"Instance One"}]}' >"$outfile"; fi ;;
+  */corps/test-corp/cloudwafInstances/cloud-1)
+    printf '%s\n' '{"id":"cloud-1","name":"Instance One","workspaceConfigs":[{"siteName":"unattached"}]}' >"$outfile" ;;
+  */corps/test-corp/cloudwafInstances/cloud-2)
+    printf '%s\n' '{"id":"cloud-2","name":"Instance Two","workspaceConfigs":[{"siteName":"unattached"}]}' >"$outfile" ;;
+  */corps/test-corp/sites/unattached)
+    if [[ "$mode" == cloud-wrong-owner ]]; then printf '%s\n' '{"name":"unattached","customer_id":"other-customer"}' >"$outfile"
+    else printf '%s\n' '{"name":"unattached","customer_id":"test-customer"}' >"$outfile"; fi ;;
   *) status=599; printf '%s\n' '{"error":"unexpected endpoint"}' >"$outfile" ;;
 esac
 printf '%s' "$status"
@@ -139,7 +174,7 @@ run_json() {
   jq -e -s 'length == 1 and .[0].schema_version == 1' "$TEST_TMP/json" >/dev/null
 }
 run_human() {
-  "$ROOT/fastly-audit" customer security >"$TEST_TMP/human" 2>"$TEST_TMP/err"
+  "$ROOT/fastly-audit" customer security >"$TEST_TMP/human" 2>"$TEST_TMP/err" || { cat "$TEST_TMP/err" >&2; return 1; }
 }
 
 run_json
@@ -161,6 +196,10 @@ jq -e '
   and .ngwaf.attachments[1].traffic_ramp_raw == 0
   and (.ngwaf.workspaces[] | select(.id == "production") | .attachment_count) == 2
   and (.ngwaf.workspaces[] | select(.id == "unattached") | .attachment_count) == 0
+  and ([.ngwaf.workspaces[] | select(.id == "production") | .deployments[] | select(.type == "edge_waf" and .status == "confirmed")] | length) == 1
+  and (.ngwaf.workspaces[] | select(.id == "production") | .deployments[0].evidence == "2 Fastly service attachments")
+  and (.ngwaf.workspaces[] | select(.id == "unattached") | .deployments[0].type == "unknown" and .deployments[0].status == "unresolved")
+  and all(.ngwaf.deployment_sources.agents[]; .status == "complete")
   and .ngwaf.attachment_mapping_result.status == "COMPLETE"
   and .inventory_sections.ngwaf_workspaces.evidence_type == "DIRECT"
   and (has("reconciliation") | not) and (.ngwaf | has("anomalies") | not)
@@ -180,9 +219,52 @@ grep -F 'they do not count NGWAF workspaces or every NGWAF deployment method.' "
 if grep -F 'Zero Edge WAF service attachments does not mean NGWAF is undeployed.' "$TEST_TMP/human" >/dev/null; then
   printf 'customer-security: zero-attachment note appeared for nonzero attachments\n' >&2; exit 1
 fi
-for heading in 'API DISCOVERY' 'BOT MANAGEMENT' 'DDOS PROTECTION' 'EDGE WAF SERVICE ATTACHMENTS' 'NGWAF WORKSPACES'; do
+for heading in 'API DISCOVERY' 'BOT MANAGEMENT' 'DDOS PROTECTION' 'EDGE WAF SERVICE ATTACHMENTS' 'NGWAF WORKSPACES' 'NGWAF DEPLOYMENTS'; do
   grep -F "$heading" "$TEST_TMP/human" >/dev/null
 done
+
+export CUSTOMER_SECURITY_TEST_MODE=agent-module
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "production") | [.deployments[].type] | sort) == ["edge_waf","on_prem_module_agent"]
+  and (.ngwaf.workspaces[] | select(.id == "production") | .deployments[] | select(.type == "on_prem_module_agent") | .status == "inferred" and (.evidence | contains("module_type=nginx")))' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=agent-uid
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "production") | .deployment_visibility.agents.identifier_used == "workspace_uid" and any(.deployments[]; .type == "on_prem_module_agent" and .status == "inferred"))' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=agent-uid-mismatch
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "production") | .deployment_visibility.agents.status == "unavailable" and all(.deployments[]; .type != "on_prem_module_agent"))' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=agent-no-module
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") | .deployments[0].type == "agent_based_unknown" and .deployments[0].status == "unresolved")
+  and (all(.ngwaf.workspaces[].deployments[]; .type != "on_prem_reverse_proxy"))' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=agent-failure
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") | .deployments[0].type == "unknown" and (.deployments[0].evidence | contains("Agent inventory unavailable")))' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=agent-site-not-found
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") | .deployment_visibility.agents.status == "unavailable" and .deployment_visibility.agents.reason == "HTTP 400 (Site not found)" and .deployments[0].type == "unknown")' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=agent-incomplete
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") | .deployments[0].type == "unknown" and .deployment_visibility.agents.status == "unavailable")' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=edge-one
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "production") | .deployments[0].type == "edge_waf" and (.deployments[0].evidence | contains("CDN Service")))' "$TEST_TMP/json" >/dev/null
+export SIGSCI_CORP=test-corp SIGSCI_EMAIL=test@example.com SIGSCI_TOKEN=test-token
+export CUSTOMER_SECURITY_TEST_MODE=cloud-ok
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") | .deployments[0].type == "cloud_waf" and .deployments[0].status == "confirmed")' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=cloud-two
+: >"$CUSTOMER_SECURITY_CURL_LOG"
+run_json
+jq -e '([.ngwaf.workspaces[] | select(.id == "unattached") | .deployments[] | select(.type == "cloud_waf")] | length) == 2' "$TEST_TMP/json" >/dev/null
+[[ "$(grep -Fc '/corps/test-corp/sites/unattached' "$CUSTOMER_SECURITY_CURL_LOG")" == 1 ]]
+export CUSTOMER_SECURITY_TEST_MODE=cloud-failure
+run_json
+jq -e '.ngwaf.deployment_sources.cloud_waf.status == "unavailable" and (.ngwaf.workspaces[] | select(.id == "unattached") | all(.deployments[]; .type != "cloud_waf"))' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=cloud-wrong-owner
+run_json
+jq -e '.ngwaf.deployment_sources.cloud_waf.status == "unavailable" and (.ngwaf.workspaces[] | select(.id == "unattached") | all(.deployments[]; .type != "cloud_waf"))' "$TEST_TMP/json" >/dev/null
+unset SIGSCI_CORP SIGSCI_EMAIL SIGSCI_TOKEN CUSTOMER_SECURITY_TEST_MODE
 grep -E 'CDN Service.*CDN.*log.*RETRIEVED' "$TEST_TMP/human" >/dev/null
 grep -E 'Compute Service.*Compute.*Production.*0.*block.*406' "$TEST_TMP/human" >/dev/null
 grep -E 'CDN Service.*CDN.*false.*RETRIEVED' "$TEST_TMP/human" >/dev/null

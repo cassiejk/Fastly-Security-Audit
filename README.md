@@ -226,6 +226,126 @@ Because scope messages go to stderr, JSON pipelines remain safe:
 ngwaf rules Production --json | jq '.data | length'
 ```
 
+Query one NGWAF workspace's daily traffic metrics with a complete UTC-day
+window (1-30 days, default 30), or an explicit UTC RFC3339 range:
+
+```bash
+fastly-audit ngwaf timeseries vi-agent-production 7 --json
+fastly-audit ngwaf timeseries vi-agent-production --start 2026-09-01T00:00:00Z --end 2026-09-08T00:00:00Z
+```
+
+Syntax: `timeseries <workspace> [days] [--json]` or
+`timeseries <workspace> --start YYYY-MM-DDTHH:MM:SSZ [--end YYYY-MM-DDTHH:MM:SSZ] [--json]`.
+The day-count form sends `start` and `end` at UTC midnight with an inclusive
+start and exclusive end. The API documentation does not specify boundary
+inclusion for explicit ranges. `--end` is optional only with `--start`.
+Use `fastly-audit ngwaf timeseries --help` for full command help.
+
+Translate a customer-provided NGWAF request-detail URL into the corresponding
+employee navigation URL for the currently selected customer:
+
+```bash
+fastly-audit ngwaf link \
+  'https://manage.fastly.com/security/ngwaf/workspaces/example-workspace/requests/example-request-id'
+```
+
+The command accepts only the observed route
+`https://manage.fastly.com/security/ngwaf/workspaces/<workspace-id>/requests/<request-id>`.
+It verifies the workspace against the selected customer's complete workspace
+inventory, then adds the verified customer ID as the `customerId` query
+parameter. An existing matching parameter is normalized rather than duplicated;
+a conflicting or ambiguous parameter is rejected. The resulting link still
+requires normal employee authentication and authorization. This helper does not
+translate arbitrary Fastly URLs or internal SigSci console URLs, and it does not
+open a browser.
+
+Translate a customer-provided DDoS Protection event URL in the same way:
+
+```bash
+fastly-audit ddos link \
+  'https://manage.fastly.com/security/ddos/protection/events/example-event-id'
+```
+
+This command accepts only the observed DDoS event-detail route. It retrieves
+`GET /ddos-protection/v1/events/{event_id}` using the existing Fastly API token
+and compares the event's `customer_id` with the selected customer. If the event
+omits `customer_id` but includes `service_id`, the command verifies that service
+through `GET /service/{service_id}` instead. Missing, conflicting, or
+unverifiable ownership fails closed without printing a translated URL. The
+generated link does not bypass normal authentication or authorization.
+
+Export complete read-only DDoS event evidence for offline investigation:
+
+```bash
+fastly-audit ddos export-event example-event-id --output investigation.json
+fastly-audit ddos export-event example-event-id --service example-service-id --output -
+```
+
+The export command validates the selected customer scope, retrieves
+`GET /ddos-protection/v1/events/{event_id}`, verifies the event's customer or
+service ownership where the API response provides enough evidence, then reads
+the event-specific rule list with cursor pagination. For each associated rule
+ID returned by that event-rule endpoint, it retrieves current rule details and
+event/rule traffic statistics:
+
+- `GET /ddos-protection/v1/events/{event_id}`;
+- `GET /ddos-protection/v1/events/{event_id}/rules`;
+- `GET /ddos-protection/v1/rules/{rule_id}`; and
+- `GET /ddos-protection/v1/events/{event_id}/rules/{rule_id}/traffic-stats`.
+
+The command does not call DDoS write endpoints, does not infer rule association
+from service membership, and does not calculate false-positive classifications,
+mitigation advice, or aggregate traffic totals. Event-specific rule evidence,
+current rule details, and traffic-statistics responses are preserved separately.
+
+The JSON contract is `schema: "fastly-ddos-evidence"` with
+`schema_version: 1`. A sanitized envelope looks like:
+
+```json
+{
+  "schema": "fastly-ddos-evidence",
+  "schema_version": 1,
+  "collected_at": "2026-09-23T18:00:00Z",
+  "collector": {"name": "fastly-audit", "version": "24.1"},
+  "scope": {
+    "event_id": "example-event-id",
+    "requested_customer_id": "example-customer-id",
+    "customer_id": "example-customer-id",
+    "service_id": "example-service-id",
+    "requested_service_id": null
+  },
+  "collection": {
+    "status": "complete",
+    "missing_data_policy": "fail_closed",
+    "partial_evidence_supported": true,
+    "errors": [],
+    "api_access": "read_only_GET_requests"
+  },
+  "data": {
+    "event": {"response": {"id": "example-event-id"}},
+    "event_rules": {"records": [], "raw_pages": []},
+    "rule_details": [],
+    "traffic_stats": []
+  }
+}
+```
+
+`--output FILE` writes with mode `0600`, refuses to overwrite an existing path,
+and uses a temporary file plus atomic link into place. `--output -` writes one
+valid JSON document to stdout; diagnostics and customer-scope messages stay on
+stderr. A failed API request, malformed JSON response, invalid pagination
+cursor, duplicate event-rule ID, mismatched event/customer/service ID, or failed
+traffic-statistics request exits nonzero and does not publish a successful
+bundle. The contract reserves `collection.errors` for future partial-evidence
+support, but this initial implementation only emits complete bundles.
+
+The exported file is intended as input for the separate `fastly-ddos`
+investigation tool, for example:
+
+```bash
+fastly-ddos investigate investigation.json
+```
+
 Retrieve one workspace rule directly by ID without downloading the complete
 rule collection:
 
@@ -291,6 +411,8 @@ Observe workspace to CDN service mappings using existing configuration evidence:
 ```bash
 fastly-audit ngwaf workspace-services gdx-costco-stg-is --sigsci-corp costco
 fastly-audit ngwaf workspace-services --all --json --sigsci-corp costco
+CDN_SERVICE_ID='replace-with-exact-CDN-service-ID'
+fastly-audit ngwaf workspace-services --service-id "$CDN_SERVICE_ID" --json --sigsci-corp costco > workspace-services.json
 ```
 
 This reverses confirmed `security legacy-map` generated-VCL evidence and merges
@@ -300,11 +422,52 @@ deployed configuration, not an authoritative API linkage. No observed mapping
 does not prove absence of linkage. Internal site identity is reconciled to the
 workspace inventory by exact ID or a unique exact workspace name, with the
 internal site ID retained in evidence. Ambiguous or absent workspace identity
-is retained separately and makes coverage incomplete. The command scans all
-token-visible CDN services even when selecting one workspace. It uses the legacy-map internal
+is retained separately and makes coverage incomplete. The workspace-selector
+and `--all` forms scan all token-visible CDN services. They use the legacy-map internal
 authentication and corp validation requirements. Incomplete source retrieval or
 unresolved inspections produce PARTIAL/UNKNOWN output and a nonzero exit status;
 JSON includes unresolved services and source provenance.
+
+`--service-id` selects exactly one CDN/VCL service by ID and cannot be combined
+with a workspace selector or `--all`. It verifies the selected customer's
+metadata and the service's exact ID, customer ID, and VCL type before reading
+its configuration. It requires `FASTLY_API_TOKEN` for public Fastly APIs,
+`FASTLY_DSTOKEN` and `FASTLY_VOUCH_COOKIE` from a legacy Signal Sciences
+dashboard session for the internal site inventory, and `--sigsci-corp CORP`
+or `SIGSCI_CORP`. Every returned site must have a customer ID matching the
+selected Fastly customer; Inspection Service ownership is also checked before
+its metadata can confirm a mapping. JSON includes `selected_service`, `customer_id`,
+`legacy_service_evidence`, mapped `workspaces[].services[]` with
+`mapping_sources` and `mapping_evidence`, `unresolved_services`,
+`unmatched_workspace_relationships`, `unresolved_product_configurations`,
+`mapping_conflicts`, `relationship_status`, `status`, and `provenance`.
+`NO_OBSERVED_MAPPING` describes the inspected sources, not a confirmed absence
+of NGWAF attachment or deployment.
+
+The service-scoped path requests `GET /customer/{customer_id}` for scope,
+`GET /service/{service_id}` once for ownership and version, generated VCL for
+that service's active version when present, and the per-service NGWAF
+enabled-product probe. It requests the per-service product configuration only
+when the probe succeeds. If the selected VCL contains an in-band Inspection
+Service hostname, it also retrieves the shared internal NGWAF site inventory
+and makes one direct `GET /service/{serviceID}` lookup per unique site
+`serviceID`; this can still be costly when the corp has many sites. It reads
+the paginated public workspace inventory only when either source identifies a
+workspace candidate. Domain requests occur only with `--with-domains`. This
+path does not enumerate CDN services or fetch generated VCL for other CDN
+services. Incomplete or conflicting evidence is reported with a nonzero exit
+status. These mappings do not classify deployment architecture or establish
+WAFD migration eligibility.
+
+With one workspace page, an active version, and no in-band hostname, a
+negative product probe takes four requests (customer, service, generated VCL,
+product probe). A product-only mapping adds its configuration and workspace
+inventory, for six requests. An in-band mapping with a negative product probe
+takes six plus one request per unique internal site `serviceID`: customer,
+selected service, generated VCL, internal sites, product probe, workspace
+inventory, and the direct Inspection Service lookups. Additional workspace
+pages add requests. These counts describe the current mocked call path; they
+are not live Costco measurements.
 
 JSON uses `in_band_vcl_evidence` in mapping source values and the provenance key,
 and `summary.in_band_vcl_evidence_relationships` for the evidence count. These
@@ -373,7 +536,15 @@ service attachments, and the complete NGWAF workspace inventory. It reuses the
 security summary collector in its existing detailed configuration mode, so
 DDoS mode and Bot Management ContentGuard are reported when returned by the
 supported APIs. No additional product endpoints or workspace inspection calls
-are introduced.
+are introduced by the shared security summary collector. Customer security
+additionally queries the Fastly NGWAF agents endpoint for each workspace.
+When `SIGSCI_CORP`, `SIGSCI_EMAIL`, and `SIGSCI_TOKEN` are set, it also queries
+the separate Next-Gen WAF Cloud WAF API. Missing access or inconclusive data
+is reported as unavailable, not as a negative result. A Cloud WAF record needs
+an exact, unique site-to-workspace match and authenticated site metadata tying
+that site to the selected Fastly customer; the documented legacy site schema
+does not promise this customer ID, so Cloud WAF may remain unresolved even with
+valid credentials.
 
 Human output shows product counts/status, service mappings, returned configuration,
 and all workspaces, including those with zero Edge WAF attachments. Configuration
@@ -382,6 +553,15 @@ shown as `not reported`; unavailable configuration is never assigned a default.
 Workspace attachment counts become unknown or lower bounds when mapping evidence
 is incomplete. Conclusively empty product inventories are distinguished from
 `UNKNOWN` or `PARTIAL` retrieval.
+
+`NGWAF DEPLOYMENTS` reports architecture per workspace; a customer or workspace
+may have multiple methods. Edge WAF service links and verified Cloud WAF
+instance associations are `CONFIRMED`; a detected web server module is
+`INFERRED` as On-Prem module-agent; an agent without a detected module and
+workspaces without recognizable evidence remain `UNRESOLVED`. Agent telemetry
+alone does not distinguish reverse proxy, PaaS, A10, or Cloud WAF. Zero Edge WAF
+attachments do not mean no NGWAF deployment. JSON exposes stable deployment
+records in `ngwaf.workspaces[].deployments[]` and source visibility separately.
 
 JSON uses schema version 1 with `command: "customer security"`, retaining the
 existing security-summary product, result, inventory-section, and provenance
@@ -395,6 +575,36 @@ account-wide visibility. Product attachment and workspace existence do not prove
 traffic, active workspace use, per-hostname protection, enforcement, or security
 efficacy. Workspaces with no Edge WAF attachments are valid inventory context.
 The command does not perform a security assessment or traffic analysis.
+
+### One-workspace Agents API diagnostic
+
+To inspect identifier compatibility for one authorized workspace, run:
+
+```bash
+fastly-audit ngwaf agent-diagnostic 'EXACT_WORKSPACE_ID' --json
+```
+
+The argument must exactly match an `id` from the selected customer's NGWAF
+workspace inventory. The diagnostic retrieves the customer-scoped inventory,
+then `GET /ngwaf/v1/workspaces/{workspace_id}`. It validates that the detail
+record matches the selected customer and inventory before making exactly one
+`GET /ngwaf/v1/workspaces/{workspace_id}/agents` request with the detail `id`.
+It does not try `workspace_uid`, legacy site names, or legacy APIs. The JSON
+reports both identifier sets, the attempted path, HTTP status, a limited
+sanitized error, and whether returned agent records explicitly reference the
+same workspace ID. A failed Agents request or response without workspace IDs
+remains unverifiable; it does not prove no agents or deployment. Agent host
+telemetry and authentication headers are omitted. The command runs only when
+invoked explicitly and does not alter `customer security` detection.
+
+If workspace detail returns an HTTP error, the diagnostic exits nonzero with
+`status: "blocked"`. `workspace_detail_request` reports the exact GET URL and
+path (without query parameters or headers), HTTP status, sanitized `api_error`
+fields, and `error_body_format`. Its `status: "lookup_failed"` is distinct from
+`identifier_mismatch`, `workspace_uid_mismatch`, or `ownership_mismatch` after a
+successful detail response. Malformed error bodies are labeled `invalid_json`
+without printing their raw content. Every blocked result has
+`agents_request.status: "skipped"`; no Agents request is made.
 
 ### Security Product Summary
 
@@ -509,6 +719,7 @@ detection.
 | `count`, `signal-count`, `requests` | NGWAF request-search API | Retained searchable request records | Uses a rolling window ending five minutes before execution; `meta.total` may reflect sampled or mixed-storage records and is not raw traffic. `requests` returns a bounded set of actual rows separately from the total cohort size. |
 | `rule-audit` | NGWAF rule API plus request-search API | Rule configuration plus retained-search cohort counts | Retrieves live rule configuration, counts `ruleid:<id>` and selected `ruleid:<id> tag:<signal>` intersections over one shared rolling window, and emits deterministic review indicators without treating overlapping signal cohorts as additive. |
 | `template-audit` | NGWAF rules, signal thresholds, and request-search APIs | Templated signal configuration plus retained-search count | Correlates `templated_signal` tagging rules and signal thresholds into one logical control, counts retained `tag:<signal>` matches, and emits conservative review indicators without declaring remediation. |
+| `ddos export-event` | DDoS Protection Events API | Event evidence bundle | Preserves the event, event-specific rules, current rule details, traffic stats, source endpoints, and cursor-pagination metadata. Collection is complete-or-fail and does not analyze, deduplicate traffic, or recommend mitigations. |
 | `bot-stats` | Fastly Historical Stats | Daily service statistics | Bot metrics are sampled and scaled estimates; they are not directly comparable to unsampled `edge_requests`. |
 | `services`, `products`, `inventory` | Customer-scoped service search with legacy service-inventory fallback, plus service/product APIs | Token-visible selected-customer inventory | Search uses validated exact customer scope and complete cursor traversal; fallback filters locally. Neither proves complete customer visibility. |
 | `security summary`, `customer security` | Shared customer-scoped service discovery, security-product enablement/configuration APIs, and NGWAF workspaces | Cross-product configuration inventory | Service count is token-visible and selected-customer scoped; enabled does not prove traffic or enforcement; inconclusive probes remain unknown. |
@@ -780,3 +991,72 @@ fastly-audit diff before.json after.json --check --json
 Use `fastly-audit <namespace> help` for focused help. Existing commands such as
 `ngwaf rule`, `ngwaf count`, and `fastly-audit services` remain compatibility
 paths; namespacing does not alter API endpoints, scope validation, or JSON data.
+
+
+### Bot Management workspace discovery
+
+```sh
+fastly-audit bot workspaces
+fastly-audit bot workspaces --json
+fastly-audit bot workspaces --service-id ServiceAlpha --json
+```
+
+Requires `FASTLY_API_TOKEN` with access to the selected customer and resources.
+Customer scope comes from `FASTLY_CUSTOMER_ID`, or the existing saved customer
+selection when that variable is unset. The command validates that customer with
+`GET /customer/{CID}` and sends the exact `customer_id` on every workspace page.
+It does not change the customer selection or any customer configuration.
+
+With `--service-id`, a direct `GET /service/{SID}` must return the exact ID,
+selected customer ID, and CDN (`vcl`) type before collection begins. The workspace
+request is `GET /bot-management/v1/workspaces` with `customer_id`, the optional
+exact `service_id`, and `limit=100`. Additional pages use `meta.next_cursor` as
+`cursor`, preserving both filters. Pagination requires valid totals and an
+explicit terminal `next_cursor: null`; missing metadata, changing totals,
+repeated cursors, duplicate workspace IDs, or incomplete counts fail closed.
+Normal request counts are **2 + P** for one service and **1 + P** for customer-wide
+listing, where P is the number of workspace pages (at least one). Configured
+transport retries can add requests. Neither mode enumerates CDN services, reads
+generated VCL, discovers NGWAF workspaces, calls legacy Signal Sciences APIs,
+collects product configuration inventories, or retrieves historical statistics.
+
+JSON output contains `schema_version`, `customer`, `scope.service_id`,
+`result.status/count/reason`, `pagination.complete/pages_fetched/total`,
+`workspaces[]`, `provenance`, and `limitations[]`. Each workspace includes
+`workspace_id`, `name`, `protection_mode`, `services[]`, and
+`ownership_validation`. Human output shows the same workspace identifiers, names,
+protection modes, service IDs, and collection count. A complete empty collection
+succeeds with count zero and an explicit no-matches message. Authorization,
+transport, API, schema, ownership, and pagination failures exit nonzero with
+stderr diagnostics and no successful result on stdout. Scope/progress messages
+also go to stderr, preserving pipeline-safe JSON.
+
+Bot Management workspaces configure **ContentGuard pre-cache inspection** and
+are distinct from **NGWAF workspaces** and NGWAF post-cache bot rules. No category
+policy or individual bot overrides are retrieved. Association and configured
+protection mode do not prove active inspection, runtime traffic, per-hostname
+coverage, or effective enforcement. Results reflect credential-visible data.
+Explicit returned customer metadata must match selected scope. A missing optional
+workspace customer field is accepted based on the authenticated customer-filtered
+request; it is not represented as independent ownership proof. In service mode,
+the requested service association is checked against its authenticated direct
+lookup. Other associated service IDs remain API-reported and are not independently
+ownership-verified. Empty results do not establish that Bot Management is disabled.
+
+
+### Boolean configuration evidence
+
+ContentGuard mapping text preserves explicit Boolean `true`/`false` and string
+`on`/`off` values; null or missing values display as `contentguard=unknown`.
+Raw product configuration JSON, retrieval statuses, and summary counts are unchanged.
+NGWAF rule-audit JSON preserves Boolean `enabled` in both `rules[].enabled` and
+`rules[].configuration.enabled`, consistently with `configuration.raw.enabled`;
+missing or null enablement is null and displays as `unknown`.
+
+`fastly-audit bot rules <workspace> [--json]` (including the `bot-rules` aliases)
+now returns nullable `rules[].enabled`: explicit true/false remain Booleans,
+while null or missing source enablement is null, rather than an inferred false.
+The human ENABLED column displays `true`, `false`, or `unknown`. Consumers must
+check `.enabled == true` or `.enabled == false` explicitly and handle null as
+unknown/not reported. Other fields and rule match counts are unchanged. This
+change does not affect `bot workspaces` or its JSON schema.

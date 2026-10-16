@@ -46,6 +46,9 @@ for _ngwaf_module in \
   lib/account.sh \
   lib/services.sh \
   lib/security.sh \
+  lib/agent_diagnostic.sh \
+  lib/links.sh \
+  lib/ddos.sh \
   lib/ngwaf.sh \
   lib/bots.sh \
   lib/metrics.sh \

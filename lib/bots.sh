@@ -66,7 +66,7 @@ cmd_bot_rules() {
           )
         | {
             id: ($rule.id // ""),
-            enabled: ($rule.enabled // false),
+            enabled: (if $rule | has("enabled") then $rule.enabled else null end),
             actions: [($rule.actions // [])[]?.type // empty],
             bot_signals: $bot_signals,
             bot_adjacent_signals: $adjacent_signals,
@@ -126,7 +126,7 @@ cmd_bot_rules() {
     (
       .[]
       | [
-          (.enabled | tostring),
+          (if .enabled == null then "unknown" else (.enabled | tostring) end),
           (.actions | join(",")),
           ((.bot_signals + .bot_adjacent_signals) | unique | join(",")),
           (.match_basis | join(",")),
@@ -399,4 +399,133 @@ historical_bot_summary_known_service_json() {
         }
       }
     '
+}
+
+# ContentGuard workspaces use cursor pagination, unlike NGWAF workspaces.
+# Buffer the complete validated collection so failures never emit partial JSON.
+bot_workspaces_collect_json() {
+  local cid="$1" sid="$2" tmp code reason='' cursor='' next_cursor
+  local total='' page_total count fetched=0 pages=0
+  local -a args
+  local -A seen_cursors=()
+  tmp="$(mktemp -d)" || return 1
+  : >"$tmp/pages"
+  while :; do
+    if (( pages >= 1000 )); then reason='cursor pagination safety limit exceeded'; break; fi
+    args=(--data-urlencode "customer_id=$cid" --data-urlencode 'limit=100')
+    [[ -z "$sid" ]] || args+=(--data-urlencode "service_id=$sid")
+    [[ -z "$cursor" ]] || args+=(--data-urlencode "cursor=$cursor")
+    code="$(http_get_to_file /bot-management/v1/workspaces "$tmp/page" "${args[@]}")" || code=000
+    case "$code" in
+      2*) ;;
+      401|403) reason="workspace authorization failed (HTTP $code)"; break ;;
+      *) reason="workspace request failed (HTTP $code)"; break ;;
+    esac
+    if ! jq -e --arg cid "$cid" --arg sid "$sid" '
+      def text: type == "string" and length > 0 and (test("[[:cntrl:]]") | not);
+      def owner:
+        (if has("customer_id") then .customer_id == $cid else true end)
+        and (if has("customer") then
+          (.customer | type == "object" and has("id")) and .customer.id == $cid
+          else true end);
+      type == "object" and owner
+      and (.meta | type == "object" and owner
+        and (.total | type == "number" and . >= 0 and . <= 2147483647 and . == floor)
+        and has("next_cursor")
+        and (.next_cursor == null or (.next_cursor | text)))
+      and (.data | type == "array" and length <= 100)
+      and all(.data[]; type == "object" and owner
+        and (.id | text) and (.name | text)
+        and (.protection_mode == "off" or .protection_mode == "log" or .protection_mode == "block")
+        and (.services | type == "array" and all(.[]; text) and length == (unique | length))
+        and (if $sid != "" then (.services | index($sid)) != null else true end))
+    ' "$tmp/page" >/dev/null 2>&1; then
+      reason='workspace schema, ownership, service association, or pagination metadata is invalid'; break
+    fi
+    page_total="$(jq -r '.meta.total' "$tmp/page")"
+    if [[ -n "$total" && "$page_total" != "$total" ]]; then reason='workspace total changed during pagination'; break; fi
+    total="$page_total"
+    count="$(jq '.data | length' "$tmp/page")"
+    jq '.data' "$tmp/page" >>"$tmp/pages" || { reason='could not collect workspace page'; break; }
+    pages=$(( pages + 1 ))
+    fetched=$(( fetched + count ))
+    next_cursor="$(jq -r '.meta.next_cursor // ""' "$tmp/page")"
+    if (( fetched > total )); then reason='workspace count exceeds total'; break; fi
+    if [[ -z "$next_cursor" ]]; then
+      if (( fetched != total )); then reason='workspace pagination incomplete: count differs from total'; fi
+      break
+    fi
+    if (( count == 0 || fetched >= total )); then reason='workspace cursor contradicts count'; break; fi
+    if [[ -n "${seen_cursors["$next_cursor"]:-}" ]]; then reason='workspace cursor repeated'; break; fi
+    seen_cursors["$next_cursor"]=1
+    cursor="$next_cursor"
+  done
+  if [[ -z "$reason" ]] && ! jq -s -e 'add | length == (unique_by(.id) | length)' "$tmp/pages" >/dev/null; then
+    reason='duplicate workspace IDs'
+  fi
+  if [[ -n "$reason" ]]; then
+    rm -rf "$tmp"
+    printf '%s: bot workspaces: %s\n' "${PROGRAM_NAME:-fastly-audit}" "$reason" >&2
+    return 1
+  fi
+  jq -s --argjson pages "$pages" --argjson total "$total" \
+    '{pagination:{complete:true,pages_fetched:$pages,total:$total},data:(add // [])}' "$tmp/pages"
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
+}
+
+cmd_bot_workspaces() {
+  local sid='' json=false cid service collection payload
+  while (( $# > 0 )); do
+    case "$1" in
+      --json) [[ "$json" == false ]] || die 'duplicate --json'; json=true; shift ;;
+      --service-id)
+        [[ $# -ge 2 && -n "$2" && "$2" != -* && -z "$sid" ]] || die '--service-id requires one exact service ID, specified once'
+        sid="$2"; shift 2 ;;
+      help|-h|--help)
+        [[ $# == 1 && -z "$sid" && "$json" == false ]] || die 'help cannot be combined with workspace options'
+        bot_workspaces_usage; return ;;
+      *) die "unknown bot workspaces argument: $1" ;;
+    esac
+  done
+  dispatch_preflight bot-workspaces
+  cid="$(current_cid)" || return 1
+  if [[ -n "$sid" ]]; then
+    service="$(get "/service/$(urlencode "$sid")")" || return 1
+    jq -e --arg sid "$sid" --arg cid "$cid" '
+      type == "object" and .id == $sid and .customer_id == $cid and .type == "vcl"
+      and (if has("customer") then (.customer | type == "object") and .customer.id == $cid else true end)
+    ' >/dev/null <<<"$service" || die 'bot workspaces: service identity, customer ownership, or CDN type could not be verified'
+  fi
+  collection="$(bot_workspaces_collect_json "$cid" "$sid")" || return 1
+  payload="$(jq --argjson customer "$(jq '{id,name}' <<<"$NGWAF_CUSTOMER_CONTEXT_JSON")" --arg sid "$sid" '
+    {
+      schema_version:1, customer:$customer,
+      scope:{service_id:(if $sid == "" then null else $sid end)},
+      result:{status:"COMPLETE",count:(.data|length),reason:"complete customer-scoped workspace collection"},
+      pagination,
+      workspaces:[.data[] | {workspace_id:.id,name,protection_mode,services,
+        ownership_validation:{customer:"authenticated customer-scoped request; explicit metadata checked",
+          requested_service:(if $sid == "" then "not requested" else "direct service ownership and returned association verified" end),
+          other_services:"API-reported; not independently ownership-verified"}}],
+      provenance:{endpoint:"GET /bot-management/v1/workspaces",data_class:"configuration_snapshot",pagination:"cursor"},
+      limitations:["Bot Management workspaces configure ContentGuard; they are distinct from NGWAF workspaces.",
+        "Association and protection mode do not prove active traffic inspection, per-hostname coverage, or effective enforcement.",
+        "Results reflect credential-visible data within the selected customer scope."]
+    }' <<<"$collection")" || return 1
+  if [[ "$json" == true ]]; then jq . <<<"$payload"; return; fi
+  printf 'Bot Management workspaces — %s (%s)\n' \
+    "$(jq -r '.customer.name' <<<"$payload")" "$cid"
+  if [[ -n "$sid" ]]; then printf 'Service: %s\n' "$sid"; fi
+  printf 'Complete: %s workspace(s), %s page(s)\n' \
+    "$(jq '.result.count' <<<"$payload")" "$(jq '.pagination.pages_fetched' <<<"$payload")"
+  if [[ "$(jq '.result.count' <<<"$payload")" == 0 ]]; then
+    printf 'No matching Bot Management workspaces returned for this customer/service scope.\n'
+  else
+    jq -r '(["WORKSPACE ID","NAME","PROTECTION MODE","SERVICE IDS"],
+      (.workspaces[] | [.workspace_id,.name,.protection_mode,(.services|join(","))])) | @tsv' <<<"$payload" | human_table
+  fi
+  printf '\nContentGuard configuration associations; distinct from NGWAF workspaces.\n'
+  printf 'Association does not prove active inspection, hostname coverage, or enforcement effectiveness.\n'
 }

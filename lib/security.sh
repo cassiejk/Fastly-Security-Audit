@@ -1626,6 +1626,7 @@ collect_security_summary_json() {
                 | {
                     id: $workspace_row.id,
                     name: ($workspace_row.name // ""),
+                    workspace_uid: ($workspace_row.workspace_uid // null),
                     mode: (.mode // null),
                     default_blocking_response_code: (.default_blocking_response_code // null),
                     attachments: [
@@ -1846,7 +1847,7 @@ cmd_security_summary() {
     def cfg($pid; $c):
       if $c == null then "-"
       elif $pid == "bot_management" then
-        "contentguard=" + (($c.contentguard // "unknown") | tostring)
+        "contentguard=" + (if $c.contentguard == null then "unknown" else ($c.contentguard | tostring) end)
       elif $pid == "ddos_protection" then
         "mode=" + (($c.mode // "unknown") | tostring)
       elif $pid == "ngwaf" then
@@ -1990,6 +1991,193 @@ customer_security_parse_args() {
     help|-h|--help) CUSTOMER_SECURITY_MODE=help ;;
     *) die 'usage: ngwaf security [--json|help|-h|--help]' ;;
   esac
+}
+
+# Optional deployment sources are isolated from the required inventory. A failed
+# probe yields a visibility result, never a negative deployment assertion.
+customer_security_agent_error_reason() {
+  local err="$1" status
+  status="$(sed -nE 's/.*returned HTTP ([0-9]{3}).*/HTTP \1/p' "$err" | head -1)"
+  if [[ "$status" == 'HTTP 400' ]] &&
+    grep -Eq '^[[:space:]]*"detail":[[:space:]]*"Site not found"' "$err"; then
+    printf '%s\n' 'HTTP 400 (Site not found)'
+  else
+    printf '%s\n' "${status:-request failed}"
+  fi
+}
+
+customer_security_agent_inventory_json() {
+  local workspace_id="$1" workspace_uid="${2:-}" body err reason identifier_used=id
+  err="$(mktemp)"
+  if ! body="$(get "$(workspace_path "$workspace_id")/agents" 2>"$err")"; then
+    reason="$(customer_security_agent_error_reason "$err")"
+    if [[ "$reason" == HTTP\ 400* && -n "$workspace_uid" && "$workspace_uid" != "$workspace_id" ]]; then
+      : >"$err"
+      identifier_used=workspace_uid
+      if ! body="$(get "$(workspace_path "$workspace_uid")/agents" 2>"$err")"; then
+        reason="$(customer_security_agent_error_reason "$err")"
+      else
+        reason=''
+      fi
+    fi
+  else
+    reason=''
+  fi
+  if [[ -z "$reason" ]] &&
+    jq -e --arg id "$workspace_id" --arg uid "$workspace_uid" '
+      type == "object" and (.meta.total | type == "number" and . >= 0 and floor == .) and
+      (.data | type == "array") and (.meta.total == (.data | length)) and
+      all(.data[]; type == "object" and has("module_detected") and
+        (.module_detected | type == "boolean") and
+        (if has("agent_active") then (.agent_active | type == "boolean") else true end) and
+        (if has("workspace_id") then (.workspace_id == $id or ($uid != "" and .workspace_id == $uid)) else true end))
+    ' >/dev/null <<<"$body"; then
+    jq -c --arg identifier_used "$identifier_used" \
+      '{status:"complete",source:"GET /ngwaf/v1/workspaces/{workspace_id}/agents",identifier_used:$identifier_used,agents:.data}' <<<"$body"
+  else
+    jq -nc --arg reason "${reason:-request failed or incomplete data}" \
+      --arg identifier_used "$identifier_used" \
+      '{status:"unavailable",source:"GET /ngwaf/v1/workspaces/{workspace_id}/agents",identifier_used:$identifier_used,reason:$reason,agents:[]}'
+  fi
+  rm -f "$err"
+}
+
+# The legacy Cloud WAF API is a separate, opt-in credential domain. Return only
+# a response body and status; callers validate every relationship before use.
+customer_security_cloud_get() {
+  local path="$1" outfile="$2" code
+  code="$(curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+    --retry "$CURL_RETRIES" -o "$outfile" -w '%{http_code}' \
+    -H 'Accept: application/json' -H "x-api-user: $SIGSCI_EMAIL" \
+    -H "x-api-token: $SIGSCI_TOKEN" \
+    "https://dashboard.signalsciences.net/api/v0$path" 2>/dev/null)" || code=000
+  printf '%s\n' "$code"
+}
+
+customer_security_cloud_inventory_json() {
+  local cid="$1" corp="${SIGSCI_CORP:-}" tmp code list instance id site site_code
+  local records='[]' reason='' visible=false
+  local -A validated_sites=()
+  if [[ -z "$corp" || -z "${SIGSCI_EMAIL:-}" || -z "${SIGSCI_TOKEN:-}" ]]; then
+    jq -nc '{status:"unavailable",source:"GET /corps/{corpName}/cloudwafInstances",reason:"SIGSCI_CORP, SIGSCI_EMAIL, and SIGSCI_TOKEN are required",associations:[]}'
+    return
+  fi
+  tmp="$(mktemp)"
+  code="$(customer_security_cloud_get "/corps/$(urlencode "$corp")/cloudwafInstances" "$tmp")"
+  if [[ "$code" != 2* ]] || ! jq -e 'type == "object" and (.data | type == "array") and
+    all(.data[]; type == "object" and (.id | type == "string" and length > 0)) and
+    ([.data[].id] | length == (unique | length))' >/dev/null 2>&1 <"$tmp"; then
+    rm -f "$tmp"
+    jq -nc --arg reason "HTTP $code or incomplete list" '{status:"unavailable",source:"GET /corps/{corpName}/cloudwafInstances",reason:$reason,associations:[]}'
+    return
+  fi
+  list="$(cat "$tmp")"
+  visible=true
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    code="$(customer_security_cloud_get "/corps/$(urlencode "$corp")/cloudwafInstances/$(urlencode "$id")" "$tmp")"
+    if [[ "$code" != 2* ]] || ! jq -e --arg id "$id" 'type == "object" and .id == $id and
+      (.workspaceConfigs | type == "array") and
+      all(.workspaceConfigs[]; type == "object" and (.siteName | type == "string" and length > 0))' >/dev/null 2>&1 <"$tmp"; then
+      visible=false; reason="Cloud WAF instance detail HTTP $code or incomplete data"; break
+    fi
+    instance="$(cat "$tmp")"
+    while IFS= read -r site; do
+      [[ -n "$site" ]] || continue
+      if [[ -z "${validated_sites[$site]+x}" ]]; then
+        site_code="$(customer_security_cloud_get "/corps/$(urlencode "$corp")/sites/$(urlencode "$site")" "$tmp")"
+        if [[ "$site_code" != 2* ]] || ! jq -e --arg cid "$cid" --arg site "$site" '
+          type == "object" and .name == $site and .customer_id == $cid' >/dev/null 2>&1 <"$tmp"; then
+          visible=false; reason="Cloud WAF site ownership unavailable or conflicting"; break
+        fi
+        validated_sites["$site"]=1
+      fi
+      records="$(jq -nc --argjson records "$records" --arg site "$site" --arg id "$id" \
+        --arg name "$(jq -r '.name // .id' <<<"$instance")" \
+        '$records + [{site_name:$site,instance_id:$id,instance_name:$name}]')"
+    done < <(jq -r '.workspaceConfigs[].siteName' <<<"$instance")
+    [[ "$visible" == true ]] || break
+  done < <(jq -r '.data[].id' <<<"$list")
+  rm -f "$tmp"
+  if [[ "$visible" == true ]]; then
+    jq -nc --argjson records "$records" '{status:"complete",source:"GET /corps/{corpName}/cloudwafInstances/{id}",associations:$records}'
+  else
+    jq -nc --arg reason "$reason" '{status:"unavailable",source:"GET /corps/{corpName}/cloudwafInstances/{id}",reason:$reason,associations:[]}'
+  fi
+}
+
+customer_security_deployments_json() {
+  local payload="$1" cid workspace_id workspace_uid agents_tmp agent_result cloud_result
+  cid="$(jq -r '.customer.id' <<<"$payload")"
+  agents_tmp="$(mktemp)"
+  while IFS=$'\t' read -r workspace_id workspace_uid; do
+    agent_result="$(customer_security_agent_inventory_json "$workspace_id" "$workspace_uid")"
+    jq -c --arg id "$workspace_id" '{workspace_id:$id,result:.}' <<<"$agent_result" >>"$agents_tmp"
+  done < <(jq -r '
+    .ngwaf.workspaces as $all
+    | $all[] as $workspace
+    | [$workspace.id,
+       (if ($workspace.workspace_uid | type) == "string" and $workspace.workspace_uid != "" and
+          ([$all[] | select(.id == $workspace.workspace_uid or .workspace_uid == $workspace.workspace_uid)] | length) == 1
+        then $workspace.workspace_uid else "" end)] | @tsv
+  ' <<<"$payload")
+  cloud_result="$(customer_security_cloud_inventory_json "$cid")"
+  jq -s --argjson cloud "$cloud_result" \
+    --slurpfile agents "$agents_tmp" '
+      def record($type;$status;$evidence_type;$evidence;$source):
+        {type:$type,status:$status,evidence_type:$evidence_type,evidence:$evidence,source:$source};
+      .[0] as $payload | $payload
+      | .ngwaf.deployment_sources = {cloud_waf:(($cloud | del(.associations)) +
+          {unmatched_association_count: ([$cloud.associations[] | . as $association
+            | select(([$payload.ngwaf.workspaces[] |
+                select(.id == $association.site_name or .name == $association.site_name)] | length) != 1)] | length)}),
+          agents:[$agents[] | {workspace_id,status:.result.status,source:.result.source,reason:.result.reason}]}
+      | .ngwaf.workspaces |= map(
+          . as $workspace
+          | ([$payload.ngwaf.attachments[] | select(.workspace_id == $workspace.id and .configuration_status == "RETRIEVED")]) as $attachments
+          | ([$cloud.associations[] | . as $association
+              | select(([$payload.ngwaf.workspaces[] |
+                  select(.id == $association.site_name or .name == $association.site_name)] | length) == 1)
+              | select(.site_name == $workspace.id or .site_name == $workspace.name)]) as $cloud_matches
+          | ([$agents[] | select(.workspace_id == $workspace.id) | .result] | .[0]) as $agent_result
+          | (if ($attachments | length) > 0 then
+               [record("edge_waf";"confirmed";"service_attachment";
+                 (if ($attachments | length) == 1 then "Fastly service attachment: " + ($attachments[0].service_name // $attachments[0].service_id)
+                  else "\($attachments | length) Fastly service attachments" end);
+                 "GET /enabled-products/v1/ngwaf/services/{service_id}/configuration")]
+             else [] end) as $edge_records
+          | ([$cloud_matches[] | record("cloud_waf";"confirmed";"cloud_waf_instance";
+               "Cloud WAF instance: " + .instance_name;
+               "GET /corps/{corpName}/cloudwafInstances/{id}")]) as $cloud_records
+          | ([$agent_result.agents[] | select(.module_detected == true)]) as $modules
+          | ([$agent_result.agents[] | select(.module_detected == false)]) as $other_agents
+          | (if ($modules | length) > 0 then
+               [record("on_prem_module_agent";"inferred";"agent_module";
+                 ("NGWAF agent; web server module detected" +
+                   ([$modules[0] | {module_type,module_server,module_version,host_os} | to_entries[] |
+                     select(.value != null and .value != "") | "\(.key)=\(.value)"] |
+                    if length > 0 then " (" + join(", ") + ")" else "" end));
+                 "GET /ngwaf/v1/workspaces/{workspace_id}/agents")]
+             else [] end) as $module_records
+          | (if ($other_agents | length) > 0 then
+               [record("agent_based_unknown";"unresolved";"agent_present";
+                 (if any($other_agents[]; .agent_active == true) then "Active NGWAF agent; no module detected" else "NGWAF agent; no module detected" end);
+                 "GET /ngwaf/v1/workspaces/{workspace_id}/agents")]
+             else [] end) as $agent_records
+          | .deployments = ($edge_records + $cloud_records + $module_records + $agent_records)
+          | if (.deployments | length) == 0 then
+              .deployments = [record("unknown";"unresolved";"none";
+                (if $agent_result.status == "unavailable" then "Agent inventory unavailable: " + $agent_result.reason
+                 else "No recognized deployment evidence" end);"deployment inventory")]
+            else . end
+          | .deployment_visibility = {agents:($agent_result | del(.agents)),cloud_waf:($cloud | del(.associations))}
+        )
+      | .limitations += [
+          "NGWAF deployment architecture is reported per workspace; a workspace may have multiple methods.",
+          "Unresolved deployment architecture means available APIs do not safely identify the method."
+        ]
+    ' <<<"$payload"
+  rm -f "$agents_tmp"
 }
 
 customer_security_payload_json() {
@@ -2140,14 +2328,40 @@ PRODUCTS
   if [[ "$(jq -r '.ngwaf.attachment_mapping_result.status' <<<"$payload")" != COMPLETE ]]; then
     printf '\nWorkspace attachment counts are inconclusive; observed counts are lower bounds.\n'
   fi
+  printf '\n'
+  ui_heading 'NGWAF DEPLOYMENTS'
+  if [[ "$(jq '.ngwaf.workspace_count' <<<"$payload")" == 0 ]]; then
+    printf 'No NGWAF workspaces found in the complete inventory.\n'
+  else
+    jq -r '
+      def deployment_label:
+        {edge_waf:"Edge WAF",cloud_waf:"Cloud WAF",
+         on_prem_module_agent:"On-Prem module-agent",
+         agent_based_unknown:"Agent-based deployment",unknown:"Unknown"}[.] // .;
+      ["WORKSPACE","DEPLOYMENT","EVIDENCE","STATUS"],
+      (.ngwaf.workspaces | sort_by(.name,.id) | .[] as $workspace
+       | $workspace.deployments[]
+       | [$workspace.name, (.type | deployment_label), .evidence, (.status | ascii_upcase)])
+      | @tsv
+    ' <<<"$payload" | human_table
+  fi
+  jq -r '
+    (if .ngwaf.deployment_sources.cloud_waf.status == "unavailable" then
+       "Cloud WAF deployment visibility unavailable: " + .ngwaf.deployment_sources.cloud_waf.reason
+     else empty end),
+    (.ngwaf.deployment_sources.agents[] | select(.status == "unavailable") |
+      "Agent inventory unavailable for workspace " + .workspace_id + ": " + .reason)
+  ' <<<"$payload" >&2
   printf '\nScope: Token-visible services do not prove complete account-wide visibility.\n'
   printf 'Configuration and workspace presence do not prove traffic, per-hostname protection, enforcement, or efficacy.\n'
-  printf 'A workspace with zero Edge WAF attachments is valid inventory context.\n'
+  printf 'Deployment architecture is per workspace; a customer and a workspace may use multiple methods.\n'
+  printf 'Zero Edge WAF attachments do not prove a workspace is undeployed; unresolved means available APIs cannot safely identify the method.\n'
 }
 
 cmd_customer_security() {
   local payload
   payload="$(collect_security_summary_json detailed true | customer_security_payload_json)"
+  payload="$(customer_security_deployments_json "$payload")"
   if [[ "$CUSTOMER_SECURITY_MODE" == json ]]; then
     jq . <<<"$payload"
   else

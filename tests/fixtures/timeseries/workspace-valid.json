@@ -1,0 +1,1 @@
+{"meta":{"total":2},"data":[{"timestamp":"2026-09-01T00:00:00Z","requests_total":100,"requests_attack":4,"requests_total_blocked":3},{"timestamp":"2026-09-02T00:00:00Z","requests_total":0,"requests_attack":0,"requests_total_blocked":0}]}

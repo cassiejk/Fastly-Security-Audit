@@ -39,7 +39,9 @@ workspace_services_payload_json() {
        | sort_by(.workspace_id, .service_id) | group_by([.workspace_id, .service_id])
        | map(.[0] + {mapping_sources: (map(.mapping_source) | unique),
            mapping_evidence: (map({source: .mapping_source, evidence: .mapping_evidence}) | unique)})) as $relationships
-    | (if $in_band_evidence.summary.sites_inventory_status != "COMPLETE" or $product.status == "UNKNOWN" or $product.status == "FAILED" then "UNKNOWN"
+    | (if (($in_band_evidence.summary.sites_inventory_status != "COMPLETE") and
+          ($in_band_evidence.summary.sites_inventory_status != "NOT_REQUIRED")) or
+          $product.status == "UNKNOWN" or $product.status == "FAILED" then "UNKNOWN"
        elif ($unresolved | length) > 0 or ($unconfigured | length) > 0 or $product.status != "COMPLETE" or
          (($product.result.rejected_service_ids // []) | length) > 0 or
          ([$old[], $new[]] | any(.workspace_id as $id | $ids | index($id) == null)) then "PARTIAL"
@@ -104,8 +106,207 @@ workspace_services_with_domains_json() {
   '
 }
 
+# The service-scoped path uses the existing per-service enablement API. It never
+# lists product attachments for the customer or probes unrelated CDN services.
+workspace_services_product_for_service_json() {
+  local service="$1" cid="$2" sid path body code status=UNKNOWN reason=''
+  local configuration='null' configuration_status=NOT_REQUESTED configuration_source=''
+  local config_file config_code
+  sid="$(jq -r .id <<<"$service")"
+  path="/enabled-products/v1/ngwaf/services/$(urlencode "$sid")"
+  body="$(mktemp)"
+  code="$(http_get_to_file "$path" "$body")"
+  case "$code" in
+    2*)
+      if [[ ! -s "$body" ]] || jq -e --arg sid "$sid" --arg cid "$cid" '
+        type == "object" and
+        (if (.service | type) == "object" and (.service | has("id")) then .service.id == $sid else true end) and
+        (if has("service_id") then .service_id == $sid else true end) and
+        (if has("customer_id") then .customer_id == $cid else true end) and
+        (if (.customer | type) == "object" and (.customer | has("id")) then .customer.id == $cid else true end)
+      ' "$body" >/dev/null 2>&1; then
+        status=COMPLETE
+        reason='per-service NGWAF enablement returned'
+        configuration_source="$path/configuration"
+        config_file="$(mktemp)"
+        config_code="$(http_get_to_file "$configuration_source" "$config_file")"
+        if [[ "$config_code" == 2* ]] && jq -e --arg sid "$sid" --arg cid "$cid" '
+          type == "object" and (.configuration | type) == "object" and
+          (if .configuration | has("workspace_id") then
+            (.configuration.workspace_id == null or (.configuration.workspace_id | type) == "string")
+           else true end) and
+          (if has("service_id") then .service_id == $sid else true end) and
+          (if has("customer_id") then .customer_id == $cid else true end) and
+          (if (.service | type) == "object" and (.service | has("id")) then .service.id == $sid else true end) and
+          (if (.customer | type) == "object" and (.customer | has("id")) then .customer.id == $cid else true end)
+        ' "$config_file" >/dev/null 2>&1; then
+          configuration="$(jq -c .configuration "$config_file")"
+          configuration_status=RETRIEVED
+        else
+          configuration_status=UNAVAILABLE
+          reason="NGWAF configuration unavailable or invalid (HTTP $config_code)"
+        fi
+        rm -f "$config_file"
+      else
+        reason='per-service NGWAF enablement response was malformed or conflicted with selected service/customer'
+      fi
+      ;;
+    404) status=COMPLETE; reason='no enabled-product relationship reported for this service' ;;
+    *) reason="per-service NGWAF enablement unavailable (HTTP $code)" ;;
+  esac
+  rm -f "$body"
+  printf '%s\n%s\n' "$service" "$configuration" |
+    jq -s --arg status "$status" --arg reason "$reason" --arg code "$code" \
+    --arg source "GET /enabled-products/v1/ngwaf/services/{service_id}" \
+    --arg configuration_source "$configuration_source" \
+    --arg configuration_status "$configuration_status" '
+      .[0] as $service | .[1] as $configuration
+      | {status:$status,
+       result:{status:$status,source:$source,reason:$reason,http_status:($code // null),
+         fallback_used:false,configuration:{status:$configuration_status,
+           source:(if $configuration_source == "" then null else "GET /enabled-products/v1/ngwaf/services/{service_id}/configuration" end)}},
+       services:(if ($code | startswith("2")) and $status == "COMPLETE" then
+         [$service + {configuration:$configuration,configuration_status:$configuration_status,
+           configuration_source:(if $configuration_source == "" then null else "GET /enabled-products/v1/ngwaf/services/{service_id}/configuration" end)}]
+         else [] end)}'
+}
+
+workspace_services_scoped_payload_json() {
+  local payload="$1" service="$2" legacy="$3" workspaces_requested="$4"
+  printf '%s\n%s\n%s\n' "$payload" "$service" "$legacy" |
+    jq -s --argjson workspaces_requested "$workspaces_requested" '
+      .[0] as $mapping | .[1] as $service | .[2] as $legacy
+      | $mapping
+      | ([.workspaces[] | select(any(.services[]; .mapping_sources | index("in_band_vcl_evidence") != null)) | .workspace_id] | unique) as $in_band_ids
+      | ([.workspaces[] | select(any(.services[]; .mapping_sources | index("enabled_product_api") != null)) | .workspace_id] | unique) as $product_ids
+      | .mapping_conflicts = (if ($in_band_ids | length) > 0 and ($product_ids | length) > 0 and
+            (($product_ids - $in_band_ids) | length) > 0 then
+          [{type:"source_workspace_disagreement",in_band_workspace_ids:$in_band_ids,
+            enabled_product_workspace_ids:$product_ids}] else [] end)
+      | if (.mapping_conflicts | length) > 0 and .status == "COMPLETE" then .status = "PARTIAL" else . end
+      | .scope = "service_id"
+      | .selected_service = {id:$service.id,name:$service.name,customer_id:$service.customer_id,
+          active_version:$service.active_version}
+      | .legacy_service_evidence = $legacy.mappings
+      | .workspaces |= map(select(.service_count > 0))
+      | .summary |= del(.workspaces_with_no_observed_mapping)
+      | .summary.scanned_cdn_services = 1
+      | .relationship_status = (if (.mapping_conflicts | length) > 0 then "CONFLICTING"
+          elif (.workspaces | length) > 0 then "MAPPED"
+          elif (.unresolved_services | length) > 0 or (.unmatched_workspace_relationships | length) > 0 or
+               (.unresolved_product_configurations | length) > 0 or .status != "COMPLETE" then "UNRESOLVED"
+          else "NO_OBSERVED_MAPPING" end)
+      | .coverage_scope = "one verified CDN service; shared site and workspace inventories used only for exact reconciliation"
+      | .provenance.service_detail = {source:"GET /service/{service_id}",ownership_validation:"exact service ID and customer ID"}
+      | .provenance.workspace_inventory = {source:"GET /ngwaf/v1/workspaces",requested:$workspaces_requested}
+      | .limitations = [
+          "A missing observed mapping does not prove NGWAF is disabled or unattached.",
+          "This maps CDN services to workspaces; it does not classify deployment architecture or establish WAFD migration eligibility.",
+          "In-band evidence depends on generated VCL, internal NGWAF site inventory, and direct Inspection Service lookups."
+        ]'
+}
+
+cmd_workspace_services_service_id() {
+  local sid="$1" corp="$2" json="$3" with_domains="$4" cid customer corp_source=cli
+  local service_file code service inventory normalized vcl sites inspection_services='[]'
+  local rows legacy product workspaces payload workspaces_requested
+  internal_ngwaf_require_credentials 'in-band workspace-service mapping' || return 1
+  if [[ -z "$corp" ]]; then
+    corp="${SIGSCI_CORP:-}"
+    corp_source='env'
+  fi
+  [[ -n "$corp" ]] || die 'SIGSCI_CORP is required for internal NGWAF site inventory; use --sigsci-corp <corp> for this run'
+  cid="$(current_cid)"
+  load_customer_context || return 1
+  customer="$(jq -c '{id,name}' <<<"$NGWAF_CUSTOMER_CONTEXT_JSON")"
+
+  service_file="$(mktemp)"
+  code="$(http_get_to_file "/service/$(urlencode "$sid")" "$service_file")"
+  if [[ "$code" != 2* ]] || ! jq -e --arg sid "$sid" --arg cid "$cid" '
+    type == "object" and .id == $sid and .customer_id == $cid and .type == "vcl" and
+    (.name | type == "string" and length > 0)
+  ' "$service_file" >/dev/null 2>&1; then
+    rm -f "$service_file"
+    die "workspace-services: service ownership, identity, or CDN type could not be verified (HTTP $code)"
+  fi
+  service="$(jq -c . "$service_file")"
+  rm -f "$service_file"
+  inventory="$(jq -nc --argjson service "$service" '{meta:{source:"GET /service/{service_id}",status:"COMPLETE",count:1},data:[$service]}')"
+  normalized="$(normalize_services_for_vcl_size_json "$inventory" | jq -c '.[0]')" || return 1
+  vcl="$(legacy_map_extract_ess_host_json "$normalized")" || return 1
+
+  if [[ "$(jq -r .status <<<"$vcl")" == COMPLETE ]]; then
+    sites="$(legacy_map_fetch_sites_json "$corp")" || return 1
+    sites="$(legacy_map_validate_sites_customer_json "$sites" "$cid" "$(jq -r .name <<<"$customer")" "$corp" "$corp_source")" || return 1
+    if [[ "$(jq -r .status <<<"$sites")" == COMPLETE ]]; then
+      jq -e --arg cid "$cid" '
+        all(.data[]; (.customer_id // .customerID // .customerId // .customer.id // null) == $cid)
+      ' >/dev/null <<<"$sites" || die 'workspace-services: one or more internal NGWAF site customer IDs are missing or conflict with the selected customer'
+      inspection_services="$(legacy_map_resolve_inspection_services_json "$sites" "$inventory")" || return 1
+      inspection_services="$(jq --arg cid "$cid" '
+        map(if .status == "COMPLETE" and .service.customer_id != $cid then
+          .status = "UNKNOWN" | .reason = "Inspection Service customer ownership could not be verified" | .service = null
+        else . end)
+      ' <<<"$inspection_services")" || return 1
+    fi
+  else
+    sites="$(jq -nc --arg corp "$corp" --arg cid "$cid" '
+      {status:"NOT_REQUIRED",evidence_type:"INFORMATIONAL",
+       source:"GET internal-ngwaf/v0/corps/{corp}/sites",reason:"no usable generated-VCL Inspection Service hostname to resolve",
+       sigsci_corp:$corp,selected_customer_id:$cid,data:[]}')"
+  fi
+  rows="$(legacy_map_rows_for_service_json "$normalized" "$vcl" "$sites" "$inspection_services")" || return 1
+  legacy="$(legacy_map_payload_json "$customer" "$inventory" "$sites" "$rows" "$sid")" || return 1
+  product="$(workspace_services_product_for_service_json "$normalized" "$cid")" || return 1
+
+  if jq -e --argjson product "$product" '
+    any(.mappings[]; .status == "CONFIRMED") or
+    any($product.services[]; (.configuration.workspace_id // "") != "")
+  ' >/dev/null <<<"$legacy"; then
+    workspaces="$(get_all_pages /ngwaf/v1/workspaces --data-urlencode "customer_id=$cid")" ||
+      die 'workspace-services: workspace inventory unavailable; cannot verify the selected service mapping'
+    jq -e --arg cid "$cid" '
+      type == "object" and (.data | type) == "array" and
+      all(.data[]; type == "object" and (.id | type == "string" and length > 0) and
+        (.name | type == "string" and length > 0) and
+        (if has("customer_id") then .customer_id == $cid else true end) and
+        (if (.customer | type) == "object" and (.customer | has("id")) then .customer.id == $cid else true end)) and
+      ([.data[].id] | length == (unique | length))
+    ' >/dev/null <<<"$workspaces" || die 'workspace-services: workspace inventory identity or ownership is unverified'
+    workspaces_requested=true
+  else
+    workspaces='{"meta":{"total":0,"pages_fetched":0},"data":[]}'
+    workspaces_requested=false
+  fi
+  payload="$(workspace_services_payload_json "$legacy" "$product" "$workspaces" '')" || return 1
+  payload="$(workspace_services_scoped_payload_json "$payload" "$normalized" "$legacy" "$workspaces_requested")" || return 1
+  if [[ "$with_domains" == true ]]; then
+    payload="$(workspace_services_with_domains_json "$payload")" || return 1
+  fi
+  if [[ "$json" == true ]]; then
+    jq . <<<"$payload"
+  else
+    jq -r '
+      "CDN service: \(.selected_service.name) (\(.selected_service.id))",
+      "Active version: \(.selected_service.active_version // "UNKNOWN")",
+      "Mapping status: \(.status); relationship: \(.relationship_status)",
+      (.workspaces[] | "Workspace: \(.workspace) (\(.workspace_id)); sources: \([.services[].mapping_sources[]] | unique | join(", "))"),
+      (if .provenance.in_band_vcl_evidence.internal_ngwaf_sites.status == "UNKNOWN" then
+        "Internal NGWAF site inventory: \(.provenance.in_band_vcl_evidence.internal_ngwaf_sites.reason // "unavailable")" else empty end),
+      (if .provenance.enabled_product_api.status != "COMPLETE" then
+        "Enabled-product check: \(.provenance.enabled_product_api.reason // "unavailable")" else empty end),
+      (.unresolved_services[] | "Unresolved in-band evidence: \(.status): \(.reason // "unknown")"),
+      (.unresolved_product_configurations[] | "Enabled-product configuration unresolved for service \(.id): \(.configuration_status)"),
+      (.unmatched_workspace_relationships[] | "Unmatched workspace relationship: \(.workspace_id)"),
+      (.mapping_conflicts[] | "Conflicting mapping sources: in-band=\(.in_band_workspace_ids | join(",")); enabled-product=\(.enabled_product_workspace_ids | join(","))"),
+      (if .relationship_status == "NO_OBSERVED_MAPPING" then "NO OBSERVED WORKSPACE MAPPING" else empty end)
+    ' <<<"$payload"
+  fi
+  [[ "$(jq -r .status <<<"$payload")" == COMPLETE ]]
+}
+
 cmd_workspace_services() {
-  local selector='' all=false json=false corp='' cid resolved selected_id=''
+  local selector='' service_id='' all=false json=false corp='' cid resolved selected_id=''
   local workspaces in_band_evidence inventory product payload with_domains=false
   local -a in_band_args=(--json)
   while (( $# > 0 )); do
@@ -113,6 +314,11 @@ cmd_workspace_services() {
       --all) all=true; shift ;;
       --json) json=true; shift ;;
       --with-domains) with_domains=true; shift ;;
+      --service-id)
+        (( $# >= 2 )) || die '--service-id requires an exact CDN service ID'
+        [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]] || die '--service-id requires an exact CDN service ID'
+        [[ -z "$service_id" ]] || die 'specify --service-id only once'
+        service_id="$2"; shift 2 ;;
       --sigsci-corp)
         (( $# >= 2 )) || die '--sigsci-corp requires a corp slug'
         corp="$2"; in_band_args+=(--sigsci-corp "$corp"); shift 2 ;;
@@ -120,6 +326,11 @@ cmd_workspace_services() {
       *) [[ -z "$selector" ]] || die 'specify one workspace or --all'; selector="$1"; shift ;;
     esac
   done
+  if [[ -n "$service_id" ]]; then
+    [[ "$all" == false && -z "$selector" ]] || die 'specify --service-id, one workspace, or --all'
+    cmd_workspace_services_service_id "$service_id" "$corp" "$json" "$with_domains"
+    return
+  fi
   if [[ "$all" == true ]]; then
     [[ -z "$selector" ]] || die 'specify one workspace or --all'
   else

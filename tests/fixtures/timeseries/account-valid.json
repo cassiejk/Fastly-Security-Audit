@@ -1,0 +1,1 @@
+{"meta":{"total":2},"data":[{"dimensions":{"time":"2026-09-01T00:00:00Z","workspace":"Production"},"values":[{"requests_total":100},{"requests_attack":4},{"requests_total_blocked":3}]},{"dimensions":{"time":"2026-09-02T00:00:00Z","workspace":"Production"},"values":[{"requests_total":0},{"requests_attack":0},{"requests_total_blocked":0}]}]}

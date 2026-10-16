@@ -197,6 +197,14 @@ debug_get_request() {
   shift
   local arg expect_value=false
 
+  # Timeseries debug output is intended to be shareable for schema diagnosis.
+  # Do not include workspace IDs, customer IDs, or query values here.
+  if [[ -n "${NGWAF_TIMESERIES_DEBUG:-}" ]]; then
+    printf '%s: debug: GET NGWAF %s timeseries (scope and query values redacted)\n' \
+      "${PROGRAM_NAME:-ngwaf}" "$NGWAF_TIMESERIES_DEBUG" >&2
+    return 0
+  fi
+
   printf '%s: debug: GET %s%s\n' "${PROGRAM_NAME:-ngwaf}" "$API_BASE" "$path" >&2
   for arg in "$@"; do
     if [[ "$expect_value" == "true" ]]; then
@@ -449,6 +457,11 @@ get() {
       progress_stop error
       printf '%s: Fastly API returned HTTP %s%s: GET %s\n' \
         "${PROGRAM_NAME:-ngwaf}" "$code" "$elapsed_text" "$path" >&2
+      if [[ "$code" == 400 && "${NGWAF_HTTP_ERROR_CONTEXT:-}" == timeseries ]] &&
+        jq -e 'tostring | test("(start|end)"; "i")' "$tmp" >/dev/null 2>&1; then
+        printf '%s: timeseries date parameters were rejected; use --start and optional --end as UTC RFC3339 timestamps, or use a 1-30 day count\n' "${PROGRAM_NAME:-ngwaf}" >&2
+        printf '%s: example: %s ngwaf timeseries vi-agent-production 7 --json\n' "${PROGRAM_NAME:-ngwaf}" "${PROGRAM_NAME:-fastly-audit}" >&2
+      fi
       print_http_status_hint "$code"
       printf '%s: response body:\n' "${PROGRAM_NAME:-ngwaf}" >&2
       print_response_body "$tmp"
