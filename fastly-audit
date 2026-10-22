@@ -50,6 +50,7 @@ for _ngwaf_module in \
   lib/links.sh \
   lib/ddos.sh \
   lib/ngwaf.sh \
+  lib/ngwaf_architecture.sh \
   lib/bots.sh \
   lib/metrics.sh \
   lib/request_search.sh \

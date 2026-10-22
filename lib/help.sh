@@ -234,6 +234,7 @@ Service inventory:
   fastly-audit service products [--json]
   fastly-audit service inventory [--json]
   fastly-audit service vcl-size <service> [--json]
+  fastly-audit service ngwaf-architecture <service-id-or-name> [--version N] [--show-vcl] [--json]
   fastly-audit service domains <service> [--version N] [--json]
 
 Security products:
@@ -413,6 +414,8 @@ fastly-audit service — selected-customer edge-service inspection
   inventory [--json] Combined service, product, and NGWAF inventory
   vcl-size <service> [--json]
                       Read-only active generated VCL size for one VCL/CDN service
+  ngwaf-architecture <service-id-or-name> [--version N] [--show-vcl] [--json]
+                      Inspect generated VCL parameter and scoped Edge WAF enablement
   domains <service> [--version N] [--json]
                       Configured Fastly domain objects; active version by default
 

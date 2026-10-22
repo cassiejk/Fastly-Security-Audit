@@ -157,6 +157,10 @@ dispatch_service_namespace() {
       dispatch_preflight services
       cmd_service_vcl_size "$@"
       ;;
+    ngwaf-architecture)
+      dispatch_preflight services
+      cmd_service_ngwaf_architecture "$@"
+      ;;
     *) die "unknown service command: $subcommand; run: $PROGRAM_NAME service help" ;;
   esac
 }
