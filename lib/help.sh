@@ -22,7 +22,7 @@ Customer / auth and account inventory:
 30-day-style analytics:
   ngwaf overview [days] [--json]
   ngwaf timeseries <workspace> [days] [--json]
-  ngwaf metrics <metric1,metric2,...> [days] [--json]
+  ngwaf metrics <metric1,metric2,...> [days|--start UTC --end UTC] [--json] [--diagnose-intervals]
   ngwaf attack-profile [days] [--json]
   ngwaf attack-profile <FROM> <TO> [--json]
   ngwaf attack-origins [days] [--json]
@@ -62,7 +62,7 @@ Examples:
   ngwaf setup --customer-id CUSTOMER_ID
   ngwaf doctor --json
   ngwaf doctor --verbose
-  ngwaf use 6C07TtEzfBKdmffwdcdHLD
+  ngwaf use <CUSTOMER_ID>
   ngwaf overview
   ngwaf overview 30 --json
   ngwaf timeseries ngwaf-production 30
@@ -94,13 +94,13 @@ Examples:
   ngwaf inventory
   ngwaf account-rules
   ngwaf posture production
-  ngwaf rule Production 6047e66c33e0b901e666e36a
+  ngwaf rule Production <RULE_ID>
   ngwaf lists production
   ngwaf bot-rules production
   ngwaf signal-count production SUSPECTED-BAD-BOT 7
-  ngwaf count production 'ruleid:6047e66d33e0b901e666e424' 7
-  ngwaf requests production 'ruleid:6047e66d33e0b901e666e424 tag:SQLI' 7 --limit 25
-  ngwaf rule-audit production 6047e66d33e0b901e666e424 --days 7 --json
+  ngwaf count production 'ruleid:<RULE_ID>' 7
+  ngwaf requests production 'ruleid:<RULE_ID> tag:SQLI' 7 --limit 25
+  ngwaf rule-audit production <RULE_ID> --days 7 --json
   ngwaf template-audit production "Registration Attempt" --json
 
   # Snapshots use mode 0600 and redact list entries unless explicitly included:
@@ -129,8 +129,9 @@ Notes:
     missing-data policy. Missing requested metrics are not replaced with zero.
   - attack-profile defaults to 30 complete UTC days; exact FROM/TO windows up to
     31 days are allowed for calendar-month slide validation. It ranks production
-    workspaces by requests_attack and sums attack signals across the same top five.
-    TO is exclusive.
+    workspaces by requests_attack and uses the signals report for the same top
+    five. Signals missing a selected workspace have unavailable counts, not zero.
+    Timeseries TO is exclusive; signals report boundary semantics are undocumented.
   - attack-origins is intentionally limited to 30 days for this workflow. It
     resolves the selected customer workspace list first, queries each workspace
     top-attacks endpoint with customer_id + field=remote_country_code, aggregates country counts, and
@@ -197,7 +198,8 @@ Notes:
     Attempt -> REGATTEMPT. It fails on ambiguity instead of guessing. Threshold
     relationship indicators are conservative review prompts, not remediation
     advice.
-  - API calls show an interactive progress indicator on stderr. Set
+  - API calls show interactive progress on stderr. Long-running inventory
+    commands add phases, elapsed time, and idle heartbeats. Set
     NGWAF_PROGRESS=never to disable it, or NGWAF_PROGRESS=always to force it.
     Set NGWAF_DEBUG=1 to show request paths and query parameters (never tokens).
   - Human output uses TTY-only color and status badges. Set NGWAF_COLOR=never
@@ -226,6 +228,7 @@ Core:
   fastly-audit customer use <customer_id>
   fastly-audit customer whoami
   fastly-audit customer security [--json]
+    Summarize security products, service attachments, workspaces, and deployment evidence.
   fastly-audit customer vcl-size [--json]
   fastly-audit inventory [--json]
 
@@ -243,7 +246,9 @@ Security products:
 
 Next-Gen WAF:
   fastly-audit ngwaf workspaces
+    List configured NGWAF workspaces.
   fastly-audit ngwaf agent-diagnostic <workspace-id> [--json]
+    Inspect workspace identity and agent counts; does not confirm deployment type.
   fastly-audit ngwaf link '<customer-request-url>'
   fastly-audit ngwaf workspace <workspace>
   fastly-audit ngwaf posture <workspace>
@@ -259,7 +264,7 @@ Next-Gen WAF:
   fastly-audit ngwaf signal-count <workspace> <signal> [days]
   fastly-audit ngwaf overview [days] [--json]
   fastly-audit ngwaf timeseries <workspace> [days] [--json]
-  fastly-audit ngwaf metrics <metrics> [days] [--json]
+  fastly-audit ngwaf metrics <metrics> [days|--start UTC --end UTC] [--json] [--diagnose-intervals]
   fastly-audit ngwaf attack-profile [days|FROM TO] [--json]
   fastly-audit ngwaf attack-origins [days|FROM TO] [--json]
 
@@ -285,6 +290,11 @@ Safety contract:
   API operations are read-only. Customer scope is confirmed before scoped
   requests, ambiguous names fail closed, JSON remains pipeline-safe, and
   analytical results retain window and provenance metadata.
+
+Progress:
+  Long-running inventory commands show phases and idle heartbeats on terminal
+  stderr. Set NGWAF_PROGRESS=never to disable or =always to force redirected
+  progress. JSON on stdout stays machine-readable.
 HELP
 }
 
@@ -293,10 +303,13 @@ ngwaf_namespace_usage() {
 fastly-audit ngwaf — Next-Gen WAF inspection
 
   workspaces
+    List configured NGWAF workspaces.
   agent-diagnostic <workspace-id> [--json]
+    Check workspace identity and Agents API response; not deployment classification.
   link '<customer-request-url>'
   workspace-services <workspace>|--all [--json] [--sigsci-corp CORP] [--with-domains]
   workspace-services --service-id <exact-CDN-service-ID> [--json] [--sigsci-corp CORP] [--with-domains]
+    Reconcile enabled-product and legacy CDN-to-workspace mapping evidence.
   workspace <workspace>
   posture <workspace>
   rule <workspace> <rule_id>
@@ -312,11 +325,18 @@ fastly-audit ngwaf — Next-Gen WAF inspection
   signal-count <workspace> <signal> [days]
   overview [days] [--json]
   timeseries <workspace> [days] [--json]
-  metrics <metrics> [days] [--json]
+  metrics <metrics> [days|--start UTC --end UTC] [--json] [--diagnose-intervals]
   attack-profile [days|FROM TO] [--json]
   attack-origins [days|FROM TO] [--json]
   snapshot <workspace> [--output FILE] [--include-list-entries] [--json]
+
+Progress for NGWAF workspaces uses terminal stderr. Set NGWAF_PROGRESS=never
+to disable or =always to force it; stdout remains pipeline-safe.
 HELP
+}
+
+workspaces_usage() {
+  printf 'Usage: %s workspaces\nList configured NGWAF workspaces (human-readable output).\n' "$USAGE_PROGRAM"
 }
 
 timeseries_usage() {
@@ -388,6 +408,10 @@ Options:
   help, -h, --help
             Show this help without credentials or API requests.
 
+Progress appears on terminal stderr, including idle heartbeats. Set
+NGWAF_PROGRESS=never to disable or =always to force redirected progress.
+JSON remains on stdout without progress text.
+
 Scope and limits:
   Running the report requires FASTLY_API_TOKEN and a selected customer.
   Services use customer-scoped Fastly service search with cursor pagination,
@@ -418,6 +442,10 @@ fastly-audit service — selected-customer edge-service inspection
                       Inspect generated VCL parameter and scoped Edge WAF enablement
   domains <service> [--version N] [--json]
                       Configured Fastly domain objects; active version by default
+
+Service list, products, and inventory show progress on terminal stderr.
+Set NGWAF_PROGRESS=never to disable or =always to force redirected progress.
+JSON remains on stdout without progress text.
 
 Generated VCL content is not printed. Compute services are not applicable.
 Domains do not prove identical NGWAF behavior for every hostname/path.
@@ -472,21 +500,25 @@ configuration and complete NGWAF workspace inventory:
   - Service mappings, returned DDoS mode and Bot Management configuration,
     Edge WAF workspace/ramp mapping, and workspace mode/default block response.
   - Workspaces with or without observed Edge WAF attachments.
-  - Per-workspace NGWAF deployment evidence from attachments, agents, and
-    optional Cloud WAF instance associations. Multiple methods can coexist.
+  - Per-workspace NGWAF deployment evidence from attachments, supplemental
+    agent observations, and optional Cloud WAF instance associations.
+    Multiple methods can coexist.
 
 Options:
   --json          Versioned JSON with provenance, completeness, and scope limits.
   help, -h, --help Show help without credentials, customer selection, or API access.
 
+Progress phases and idle heartbeats appear on terminal stderr. Set
+NGWAF_PROGRESS=never to disable or =always to force redirected progress.
+JSON remains on stdout without progress text.
+
 The report requires FASTLY_API_TOKEN and a selected customer. It reuses the
 security summary inventory, including its supported per-service configuration
 retrieval. Inconclusive checks remain UNKNOWN/PARTIAL, not disabled or zero.
 Workspace attachment counts are exact only when mapping evidence is complete.
-Deployment status is CONFIRMED for explicit Edge WAF or Cloud WAF links,
-INFERRED for detected web server modules, and UNRESOLVED when architecture
-cannot be safely identified. Agents without modules do not identify reverse
-proxy, PaaS, A10, or Cloud WAF. Cloud WAF lookup requires SIGSCI_CORP,
+Deployment status is CONFIRMED for explicit Edge WAF or Cloud WAF links.
+Agent and module observations remain UNRESOLVED until deployment architecture
+is independently verified. Cloud WAF lookup requires SIGSCI_CORP,
 SIGSCI_EMAIL, and SIGSCI_TOKEN for the separate Next-Gen WAF API; unavailable
 visibility is reported rather than treated as absence. Cloud WAF confirmation
 also requires site metadata that links the site to the selected Fastly customer.
@@ -499,6 +531,8 @@ traffic, active use, per-hostname protection, enforcement, or security efficacy.
 A workspace with zero Edge WAF attachments is valid inventory context.
 Zero attachments do not prove a workspace is undeployed. Unresolved deployment
 evidence does not establish that no deployment exists.
+Agent counts describe records returned in data and the raw API meta.total;
+neither their equality nor their difference establishes list completeness.
 This command provides configuration inventory, not a security assessment.
 
 Examples:

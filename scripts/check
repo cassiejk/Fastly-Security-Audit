@@ -53,6 +53,7 @@ printf 'CLI smoke tests...\n'
 [[ "$("$ROOT/ngwaf" version)" == 'ngwaf 24.1' ]]
 "$ROOT/fastly-audit" help >/dev/null
 "$ROOT/ngwaf" help >/dev/null
+"$BASH" "$ROOT/tests/cli-reference.sh"
 
 printf 'Behavior tests...\n'
 "$ROOT/tests/runtime.sh"
@@ -72,15 +73,18 @@ printf 'Behavior tests...\n'
 "$ROOT/tests/template-audit.sh"
 "$ROOT/tests/snapshots.sh"
 "$ROOT/tests/namespaces.sh"
+"$ROOT/tests/progress.sh"
 "$BASH" "$ROOT/tests/bot-workspaces.sh"
 "$ROOT/tests/service-inventory.sh"
 "$ROOT/tests/service-search.sh"
 "$ROOT/tests/vcl-size.sh"
 "$ROOT/tests/service-domains.sh"
+"$BASH" "$ROOT/tests/ngwaf-architecture.sh"
 "$ROOT/tests/security.sh"
 "$ROOT/tests/customer-security.sh"
 "$ROOT/tests/agent-diagnostic.sh"
 "$ROOT/tests/legacy-map.sh"
+"$BASH" "$ROOT/tests/mapping-ownership.sh"
 "$BASH" "$ROOT/tests/workspace-services.sh"
 "$BASH" "$ROOT/tests/workspace-services-service-id.sh"
 "$ROOT/tests/json-transport.sh"

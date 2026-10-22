@@ -1,10 +1,71 @@
 # shellcheck shell=bash
 # Sourced by the ngwaf entry point; do not execute directly.
 
+attack_profile_signal_summary() {
+  local report="$1" selected="$2" workspace_ids="$3" result error
+  result="$(json_stream "$report" "$selected" "$workspace_ids" | jq -sc '
+    .[0] as $report | .[1] as $selected | .[2] as $ids |
+    def count: type == "number" and . >= 0 and . == floor;
+    if ($report.data | type) != "array" or ($selected | type) != "array" or ($ids | type) != "object" then
+      {error:"malformed signals report"}
+    elif (($report.meta? | type) == "object" and ($report.meta | has("total")) and
+          (($report.meta.total | count | not) or $report.meta.total != ($report.data | length))) then
+      {error:"signals report meta.total differs from returned row count"}
+    elif (($report.meta.next_cursor? // $report.meta.next? // $report.next? // null) != null) then
+      {error:"signals report indicates another page"}
+    elif ([$report.data[] | select(type != "object" or (.name | type) != "string" or
+          (.name | length) == 0 or (.count | count | not) or
+          (.top_workspaces | type) != "array")] | length) > 0 then
+      {error:"malformed signals report entry"}
+    elif ([$report.data[].name] | length) != ([$report.data[].name] | unique | length) then
+      {error:"duplicate signal in signals report"}
+    elif ([$report.data[].top_workspaces[] | select(type != "object" or
+          (.id | type) != "string" or (.id | length) == 0 or
+          (.name | type) != "string" or (.name | length) == 0 or
+          (.count | count | not))] | length) > 0 then
+      {error:"malformed signals report workspace"}
+    elif ([$report.data[] | .top_workspaces | [.[] | select($ids[.name] == .id) | .id] as $names |
+          select(($names | length) != ($names | unique | length))] | length) > 0 then
+      {error:"duplicate workspace in signals report"}
+    elif ([$report.data[] | select(([.top_workspaces[] |
+          select($ids[.name] == .id) | .count] | add // 0) > .count)] | length) > 0 then
+      {error:"signals report workspace counts exceed signal count"}
+    else
+      ([$report.data[].top_workspaces[] | select($ids[.name] != .id) | .id] | unique) as $unmatched |
+      ($report | .data |= map(.top_workspaces |= map(select($ids[.name] == .id)))) as $matched |
+      [{metric:"SQLI",label:"SQL Injection"},
+       {metric:"TRAVERSAL",label:"Directory Traversal"},
+       {metric:"XSS",label:"Cross-Site Scripting"},
+       {metric:"CMDEXE",label:"Command Execution"},
+       {metric:"AWS-SSRF",label:"AWS Server-Side Request Forgery"}] as $signals |
+      {data: [$signals[] as $signal |
+        ([$matched.data[] | select(.name == $signal.metric)] | first) as $row |
+        if ($selected | length) == 0 then
+          $signal + {requests:null,status:"no_selected_workspaces"}
+        elif $row == null then
+          $signal + {requests:null,status:"not_reported"}
+        else
+          ([$selected[] as $name | [$row.top_workspaces[] |
+            select(.id == $ids[$name]) | .count] | first]) as $counts |
+          if any($counts[]; . == null) then
+            $signal + {requests:null,status:"selected_workspace_not_reported"}
+          else
+            $signal + {requests:($counts | add),status:"complete"}
+          end
+        end] | sort_by(.requests // -1) | reverse,
+       diagnostics: {unmatched_workspace_count: ($unmatched | length),
+                     unmatched_workspace_ids: $unmatched}}
+    end
+  ')" || die 'attack profile could not parse signals report'
+  error="$(jq -r '.error // empty' <<<"$result")"
+  [[ -z "$error" ]] || die "attack profile: $error"
+  printf '%s\n' "$result"
+}
+
 cmd_attack_profile() {
   local format=""
-  local cid customer body workspace_summary top_workspace_names signal_summary
-  local metrics="requests_attack,SQLI,TRAVERSAL,XSS,CMDEXE,AWS-SSRF"
+  local cid customer body workspace_summary top_workspace_names signal_summary signal_result signal_diagnostics validation workspace_ids report unavailable_count unmatched_count
+  local metrics="requests_attack"
   local prod_regex='(^|[-_])(prd|prod|production)([-_]|$)'
   local span_days=""
   local top_n=5
@@ -68,7 +129,13 @@ cmd_attack_profile() {
       --data-urlencode "granularity=86400"
   )"
 
-  validate_timeseries_response "$body" "$metrics" "attack profile"
+  body="$(normalize_account_timeseries_response "$body" "$metrics" "attack profile")"
+  validation="$(timeseries_integrity "$body" account "$TS_FROM" "$TS_TO" "attack profile")"
+  workspace_ids="$(account_timeseries_workspace_ids "$body" "$cid" "attack profile")"
+  body="$(exclude_account_end_boundary_rows "$body" "$TS_TO")"
+  timeseries_warn_excluded_end "$validation" "attack profile"
+  validation="$(timeseries_attach_workspace_inventory "$validation" "$workspace_ids")"
+  timeseries_warn_gaps "$validation" "attack profile"
 
   # First rank production workspaces by requests_attack for the selected window.
   workspace_summary="$(
@@ -96,28 +163,25 @@ cmd_attack_profile() {
     jq --argjson n "$top_n" '[.[:$n][].workspace]' <<<"$workspace_summary"
   )"
 
-  signal_summary="$(
-    jq --argjson top_workspaces "$top_workspace_names" '
-      def n: tonumber;
-
-      [
-        .data[]
-        | select(.dimensions.workspace as $w | $top_workspaces | index($w))
-        | (.values[0] // {})
-      ] as $rows
-      | [
-          {metric: "SQLI", label: "SQL Injection", requests: ($rows | map(.SQLI | n) | add // 0)},
-          {metric: "TRAVERSAL", label: "Directory Traversal", requests: ($rows | map(.TRAVERSAL | n) | add // 0)},
-          {metric: "XSS", label: "Cross-Site Scripting", requests: ($rows | map(.XSS | n) | add // 0)},
-          {metric: "CMDEXE", label: "Command Execution", requests: ($rows | map(.CMDEXE | n) | add // 0)},
-          {metric: "AWS-SSRF", label: "AWS Server-Side Request Forgery", requests: ($rows | map(."AWS-SSRF" | n) | add // 0)}
-        ]
-      | sort_by(-.requests)
-    ' <<<"$body"
-  )"
+  report="$(get "/ngwaf/v1/reports/signals" \
+    --data-urlencode "from=$TS_FROM" \
+    --data-urlencode "to=$TS_TO")"
+  signal_result="$(attack_profile_signal_summary "$report" "$top_workspace_names" "$workspace_ids")"
+  signal_summary="$(jq '.data' <<<"$signal_result")"
+  signal_diagnostics="$(jq '.diagnostics' <<<"$signal_result")"
+  unmatched_count="$(jq '.unmatched_workspace_count' <<<"$signal_diagnostics")"
+  if (( unmatched_count > 0 )); then
+    printf '%s: attack profile: excluded %s unmatched signals-report workspace ID(s); see signal_report_diagnostics\n' \
+      "${PROGRAM_NAME:-ngwaf}" "$unmatched_count" >&2
+  fi
+  unavailable_count="$(jq '[.[] | select(.status != "complete")] | length' <<<"$signal_summary")"
+  if (( unavailable_count > 0 )); then
+    printf '%s: attack profile: %s signal count(s) unavailable for the selected workspaces; see attack_signals status\n' \
+      "${PROGRAM_NAME:-ngwaf}" "$unavailable_count" >&2
+  fi
 
   if [[ "$format" == "--json" ]]; then
-    json_stream "$workspace_summary" "$top_workspace_names" "$signal_summary" |
+    json_stream "$workspace_summary" "$top_workspace_names" "$signal_summary" "$validation" "$signal_diagnostics" |
       jq -s \
       --arg customer "$customer" \
       --arg customer_id "$cid" \
@@ -129,6 +193,8 @@ cmd_attack_profile() {
       .[0] as $production_workspaces
       | .[1] as $selected_workspaces
       | .[2] as $attack_signals
+      | .[3] as $validation
+      | .[4] as $signal_report_diagnostics
       | {
         customer: $customer,
         customer_id: $customer_id,
@@ -151,18 +217,24 @@ cmd_attack_profile() {
         selected_workspaces: $selected_workspaces,
         production_workspaces: $production_workspaces[:$top_n],
         attack_signals: $attack_signals,
+        validation: $validation,
+        signal_report_diagnostics: $signal_report_diagnostics,
         provenance: {
-          endpoint: "GET /ngwaf/v1/timeseries",
-          data_class: "ngwaf_timeseries_with_name_based_workspace_filter",
-          aggregation: "sum_of_daily_rows_for_selected_workspaces",
-          missing_data_policy: "fail_closed"
+          ranking_endpoint: "GET /ngwaf/v1/timeseries",
+          signal_endpoint: "GET /ngwaf/v1/reports/signals",
+          data_class: "ngwaf_timeseries_and_signals_report",
+          aggregation: "timeseries_ranking_and_explicit_report_workspace_counts",
+          missing_data_policy: "report_unobserved_intervals_without_zero_substitution",
+          workspace_identity: "current_customer_inventory_name_match",
+          signal_report_boundary_semantics: "undocumented",
+          completeness: "unknown"
         }
       }'
     return
   fi
 
   printf '%s — NGWAF attack profile\n' "$customer"
-  printf '%s → %s UTC (TO is exclusive; %s days)\n\n' "$TS_FROM" "$TS_TO" "$span_days"
+  printf '%s → %s UTC (timeseries TO is exclusive; signals report boundary semantics undocumented; %s days)\n\n' "$TS_FROM" "$TS_TO" "$span_days"
 
   printf 'Top %s production workspaces by attack-signaled requests\n' "$top_n"
   jq -r --argjson n "$top_n" '
@@ -193,14 +265,14 @@ cmd_attack_profile() {
     ["SIGNAL", "METRIC", "REQUESTS"],
     (
       .[]
-      | [.label, .metric, (.requests | human)]
+      | [.label, .metric, (if .requests == null then "unavailable" else (.requests | human) end)]
     )
     | @tsv
   ' <<<"$signal_summary" | human_table
 
   printf '\nScope / validation notes:\n'
   printf '  - Workspace ranking: top %s production workspaces matched by name using %s.\n' "$top_n" "$prod_regex"
-  printf '  - Attack-signal totals: summed across exactly those same top %s workspaces.\n' "$top_n"
+  printf '  - Attack-signal totals: summed only when the signals report explicitly lists all selected workspaces.\n'
   printf '  - Selected workspaces: %s\n' "$(jq -r 'join(", ")' <<<"$top_workspace_names")"
   printf '  - Signals can overlap; signal counts are not mutually exclusive and should not be summed as unique attacked requests.\n'
   if (( span_days == 31 )); then

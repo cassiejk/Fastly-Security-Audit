@@ -53,6 +53,13 @@ export NGWAF_CURL_RETRIES=0
 "$ROOT/fastly-audit" help >"$TEST_TMP/help"
 grep -F 'fastly-audit ngwaf rule <workspace> <rule_id>' "$TEST_TMP/help" >/dev/null
 grep -F 'original flat commands remain supported' "$TEST_TMP/help" >/dev/null
+grep -F 'List configured NGWAF workspaces.' "$TEST_TMP/help" >/dev/null
+grep -F 'does not confirm deployment type.' "$TEST_TMP/help" >/dev/null
+grep -F 'service attachments, workspaces, and deployment evidence.' "$TEST_TMP/help" >/dev/null
+for help_flag in -h --help; do
+  "$ROOT/fastly-audit" "$help_flag" >"$TEST_TMP/top-help"
+  cmp -s "$TEST_TMP/help" "$TEST_TMP/top-help"
+done
 
 "$ROOT/ngwaf" help >"$TEST_TMP/legacy-help"
 grep -F 'ngwaf rule <workspace> <rule_id>' "$TEST_TMP/legacy-help" >/dev/null
@@ -62,6 +69,60 @@ grep -F 'ngwaf rule <workspace> <rule_id>' "$TEST_TMP/fastly-legacy-help" >/dev/
 
 "$ROOT/fastly-audit" ngwaf help >"$TEST_TMP/ngwaf-help"
 grep -F 'rule <workspace> <rule_id>' "$TEST_TMP/ngwaf-help" >/dev/null
+grep -F 'not deployment classification.' "$TEST_TMP/ngwaf-help" >/dev/null
+"$ROOT/fastly-audit" ngwaf -h >"$TEST_TMP/ngwaf-short-help"
+cmp -s "$TEST_TMP/ngwaf-help" "$TEST_TMP/ngwaf-short-help"
+NGWAF_PROGRESS=always "$ROOT/fastly-audit" ngwaf workspaces \
+  >"$TEST_TMP/workspaces" 2>"$TEST_TMP/workspaces-err"
+grep -F 'Total NGWAF workspaces: 1' "$TEST_TMP/workspaces" >/dev/null
+grep -F 'Workspaces discovered: 1' "$TEST_TMP/workspaces-err" >/dev/null
+grep -F 'Completed successfully' "$TEST_TMP/workspaces-err" >/dev/null
+
+# Validate argument-free routes before authentication or any API request.
+export FASTLY_TEST_HELP_CURL_LOG="$TEST_TMP/invalid-curl-log"
+for route in 'ngwaf workspaces' 'workspaces' 'version' 'customer show' 'whoami'; do
+  read -r -a command_args <<<"$route"
+  if env -u FASTLY_API_TOKEN -u FASTLY_CUSTOMER_ID "$ROOT/fastly-audit" "${command_args[@]}" --json \
+    >"$TEST_TMP/invalid-out" 2>"$TEST_TMP/invalid-err"; then
+    printf 'namespace test: %s --json unexpectedly succeeded\n' "$route" >&2
+    exit 1
+  fi
+  [[ ! -s "$TEST_TMP/invalid-out" ]]
+  grep -F "unsupported option '--json'" "$TEST_TMP/invalid-err" >/dev/null
+  grep -F 'for usage.' "$TEST_TMP/invalid-err" >/dev/null
+  [[ ! -e "$FASTLY_TEST_HELP_CURL_LOG" ]]
+done
+for extra in --bogus unexpected; do
+  if env -u FASTLY_API_TOKEN -u FASTLY_CUSTOMER_ID "$ROOT/fastly-audit" ngwaf workspaces "$extra" \
+    >"$TEST_TMP/invalid-out" 2>"$TEST_TMP/invalid-err"; then
+    printf 'namespace test: workspaces %s unexpectedly succeeded\n' "$extra" >&2
+    exit 1
+  fi
+  [[ ! -s "$TEST_TMP/invalid-out" && ! -e "$FASTLY_TEST_HELP_CURL_LOG" ]]
+done
+for route in rules thresholds; do
+  if env -u FASTLY_API_TOKEN -u FASTLY_CUSTOMER_ID "$ROOT/fastly-audit" ngwaf "$route" Production --bogus \
+    >"$TEST_TMP/invalid-out" 2>"$TEST_TMP/invalid-err"; then
+    printf 'namespace test: %s --bogus unexpectedly succeeded\n' "$route" >&2
+    exit 1
+  fi
+  [[ ! -s "$TEST_TMP/invalid-out" && ! -e "$FASTLY_TEST_HELP_CURL_LOG" ]]
+  grep -F "unsupported option '--bogus'" "$TEST_TMP/invalid-err" >/dev/null
+done
+if env -u FASTLY_API_TOKEN -u FASTLY_CUSTOMER_ID "$ROOT/fastly-audit" ngwaf overview 30 --json --bogus \
+  >"$TEST_TMP/invalid-out" 2>"$TEST_TMP/invalid-err"; then
+  printf 'namespace test: overview trailing option unexpectedly succeeded\n' >&2
+  exit 1
+fi
+[[ ! -s "$TEST_TMP/invalid-out" && ! -e "$FASTLY_TEST_HELP_CURL_LOG" ]]
+grep -F "unsupported option '--bogus'" "$TEST_TMP/invalid-err" >/dev/null
+for help_flag in -h --help; do
+  env -u FASTLY_API_TOKEN -u FASTLY_CUSTOMER_ID "$ROOT/fastly-audit" ngwaf workspaces "$help_flag" \
+    >"$TEST_TMP/workspaces-help" 2>"$TEST_TMP/workspaces-help-err"
+  grep -F 'Usage: fastly-audit ngwaf workspaces' "$TEST_TMP/workspaces-help" >/dev/null
+  [[ ! -s "$TEST_TMP/workspaces-help-err" && ! -e "$FASTLY_TEST_HELP_CURL_LOG" ]]
+done
+unset FASTLY_TEST_HELP_CURL_LOG
 
 "$ROOT/fastly-audit" service help >"$TEST_TMP/service-help"
 grep -F 'list [--json]' "$TEST_TMP/service-help" >/dev/null

@@ -5,6 +5,16 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/helpers.sh"
 test_init
 
+assert_absent() {
+  local status=0
+  grep "$@" || status=$?
+  case "$status" in
+    0) printf 'legacy-map: unexpected forbidden match\n' >&2; return 1 ;;
+    1) return 0 ;;
+    *) printf 'legacy-map: grep assertion failed (%s)\n' "$status" >&2; return "$status" ;;
+  esac
+}
+
 mkdir -p "$TEST_TMP/bin"
 
 cat >"$TEST_TMP/bin/curl" <<'FAKE_CURL'
@@ -75,7 +85,7 @@ lookup_started
 if [[ -n "$direct_service_id" && "$mode" == "parallel-order" ]]; then
   case "$direct_service_id" in
     ess-prod) sleep 0.20 ;;
-    NqBYffdR4mOhuGwMfOnldY) sleep 0.05 ;;
+    TESTSERVICE00000000001) sleep 0.05 ;;
     ess-qa) sleep 0.15 ;;
     ess-mismatch) sleep 0.01 ;;
     ess-amb-1) sleep 0.12 ;;
@@ -105,13 +115,13 @@ case "$url" in
     }' >"$outfile"
     ;;
   */service/cdn-prod/version/10/generated_vcl)
-    printf '%s\n' '{"content":"set req.backend = F_se--costco--prod.edgecompute.app;"}' >"$outfile"
+    printf '%s\n' '{"content":"set req.backend = F_se--samplecorp--prod.edgecompute.app;"}' >"$outfile"
     ;;
   */service/cdn-live/version/18/generated_vcl)
-    printf '%s\n' '{"content":"set req.backend = F_se--costco--69a8b42409aacb23a10bf0ca.edgecompute.app;"}' >"$outfile"
+    printf '%s\n' '{"content":"set req.backend = F_se--samplecorp--aaaaaaaaaaaaaaaaaaaaaaaa.edgecompute.app;"}' >"$outfile"
     ;;
   */service/cdn-qa-1/version/11/generated_vcl|*/service/cdn-qa-2/version/12/generated_vcl|*/service/cdn-qa-3/version/13/generated_vcl)
-    printf '%s\n' '{"content":"call se--costco--qa.edgecompute.app;"}' >"$outfile"
+    printf '%s\n' '{"content":"call se--samplecorp--qa.edgecompute.app;"}' >"$outfile"
     ;;
   */service/cdn-no-host/version/14/generated_vcl)
     printf '%s\n' '{"content":"sub vcl_recv { set req.http.X-Test = \"none\"; }"}' >"$outfile"
@@ -121,12 +131,12 @@ case "$url" in
     status=503
     ;;
   */service/cdn-mismatch/version/16/generated_vcl)
-    printf '%s\n' '{"content":"set req.http.host = \"se--costco--mismatch.edgecompute.app\";"}' >"$outfile"
+    printf '%s\n' '{"content":"set req.http.host = \"se--samplecorp--mismatch.edgecompute.app\";"}' >"$outfile"
     ;;
   */service/cdn-ambiguous/version/17/generated_vcl)
-    printf '%s\n' '{"content":"set req.http.host = \"se--costco--amb.edgecompute.app\";"}' >"$outfile"
+    printf '%s\n' '{"content":"set req.http.host = \"se--samplecorp--amb.edgecompute.app\";"}' >"$outfile"
     ;;
-  */v0/corps/costco/sites|*/v0/corps/test-corp/sites)
+  */v0/corps/samplecorp/sites|*/v0/corps/test-corp/sites)
     if [[ "$mode" == "sites-302" ]]; then
       printf '%s\n' '{"error":"redirected"}' >"$outfile"
       status=302
@@ -148,34 +158,34 @@ case "$url" in
     elif [[ "$mode" == "multi-customer" ]]; then
       printf '%s\n' '{
         "data":[
-          {"id":"site-prod","name":"gdx-costco-prd-is","customer_id":"test-customer","serviceID":"ess-prod"},
+          {"id":"site-prod","name":"gdx-samplecorp-prd-is","customer_id":"test-customer","serviceID":"ess-prod"},
           {"id":"site-other","name":"other","customer_id":"other-customer","serviceID":"ess-qa"}
         ]
       }' >"$outfile"
     elif [[ "$mode" == "missing-customer" ]]; then
       printf '%s\n' '{
         "data":[
-          {"id":"site-prod","name":"gdx-costco-prd-is","serviceID":"ess-prod"}
+          {"id":"site-prod","name":"gdx-samplecorp-prd-is","serviceID":"ess-prod"}
         ]
       }' >"$outfile"
     elif [[ "$mode" == "duplicate-serviceids" ]]; then
       printf '%s\n' '{
         "data":[
-          {"id":"site-prod","name":"gdx-costco-prd-is","customer_id":"test-customer","serviceID":"ess-prod"},
-          {"id":"site-prod-copy","name":"gdx-costco-prd-is-copy","customer_id":"test-customer","serviceID":"ess-prod"},
-          {"id":"site-live","name":"gdx-costco-prd-is-live","customer_id":"test-customer","serviceID":"NqBYffdR4mOhuGwMfOnldY"}
+          {"id":"site-prod","name":"gdx-samplecorp-prd-is","customer_id":"test-customer","serviceID":"ess-prod"},
+          {"id":"site-prod-copy","name":"gdx-samplecorp-prd-is-copy","customer_id":"test-customer","serviceID":"ess-prod"},
+          {"id":"site-live","name":"gdx-samplecorp-prd-is-live","customer_id":"test-customer","serviceID":"TESTSERVICE00000000001"}
         ]
       }' >"$outfile"
     else
       printf '%s\n' '{
         "data":[
-          {"id":"site-prod","name":"gdx-costco-prd-is","customer_id":"test-customer","serviceID":"ess-prod"},
-          {"id":"site-live","name":"gdx-costco-prd-is-live","customer_id":"test-customer","serviceID":"NqBYffdR4mOhuGwMfOnldY"},
-          {"id":"site-qa","name":"gdx-costco-qa-is","customer_id":"test-customer","serviceID":"ess-qa"},
-          {"id":"site-null","name":"gdx-costco-null","customer_id":"test-customer","serviceID":null},
-          {"id":"site-mismatch","name":"gdx-costco-mismatch","customer_id":"test-customer","serviceID":"ess-mismatch"},
-          {"id":"site-amb-1","name":"gdx-costco-amb-1","customer_id":"test-customer","serviceID":"ess-amb-1"},
-          {"id":"site-amb-2","name":"gdx-costco-amb-2","customer_id":"test-customer","serviceID":"ess-amb-2"}
+          {"id":"site-prod","name":"gdx-samplecorp-prd-is","customer_id":"test-customer","serviceID":"ess-prod"},
+          {"id":"site-live","name":"gdx-samplecorp-prd-is-live","customer_id":"test-customer","serviceID":"TESTSERVICE00000000001"},
+          {"id":"site-qa","name":"gdx-samplecorp-qa-is","customer_id":"test-customer","serviceID":"ess-qa"},
+          {"id":"site-null","name":"gdx-samplecorp-null","customer_id":"test-customer","serviceID":null},
+          {"id":"site-mismatch","name":"gdx-samplecorp-mismatch","customer_id":"test-customer","serviceID":"ess-mismatch"},
+          {"id":"site-amb-1","name":"gdx-samplecorp-amb-1","customer_id":"test-customer","serviceID":"ess-amb-1"},
+          {"id":"site-amb-2","name":"gdx-samplecorp-amb-2","customer_id":"test-customer","serviceID":"ess-amb-2"}
         ]
       }' >"$outfile"
     fi
@@ -188,27 +198,33 @@ case "$url" in
     }' >"$outfile"
     ;;
   */service/ess-prod)
-    printf '%s\n' '{"id":"ess-prod","name":"se--costco--prod","customer_id":"test-customer","type":"wasm"}' >"$outfile"
+    if [[ "$mode" == "ess-owner-foreign" ]]; then
+      printf '%s\n' '{"id":"ess-prod","name":"se--samplecorp--prod","customer_id":"other-customer","type":"wasm"}' >"$outfile"
+    elif [[ "$mode" == "ess-owner-missing" ]]; then
+      printf '%s\n' '{"id":"ess-prod","name":"se--samplecorp--prod","type":"wasm"}' >"$outfile"
+    else
+      printf '%s\n' '{"id":"ess-prod","name":"se--samplecorp--prod","customer_id":"test-customer","type":"wasm"}' >"$outfile"
+    fi
     ;;
-  */service/NqBYffdR4mOhuGwMfOnldY)
+  */service/TESTSERVICE00000000001)
     if [[ "$mode" == "ess-lookup-fail" ]]; then
       printf '%s\n' '{"error":"service unavailable"}' >"$outfile"
       status=503
     else
-      printf '%s\n' '{"Name":"se--costco--69a8b42409aacb23a10bf0ca","ServiceID":"NqBYffdR4mOhuGwMfOnldY","Type":"wasm"}' >"$outfile"
+      printf '%s\n' '{"Name":"se--samplecorp--aaaaaaaaaaaaaaaaaaaaaaaa","ServiceID":"TESTSERVICE00000000001","Type":"wasm","CustomerID":"test-customer"}' >"$outfile"
     fi
     ;;
   */service/ess-qa)
-    printf '%s\n' '{"id":"ess-qa","name":"se--costco--qa","customer_id":"test-customer","type":"wasm"}' >"$outfile"
+    printf '%s\n' '{"id":"ess-qa","name":"se--samplecorp--qa","customer_id":"test-customer","type":"wasm"}' >"$outfile"
     ;;
   */service/ess-mismatch)
-    printf '%s\n' '{"id":"ess-mismatch","name":"se--costco--different","customer_id":"test-customer","type":"wasm"}' >"$outfile"
+    printf '%s\n' '{"id":"ess-mismatch","name":"se--samplecorp--different","customer_id":"test-customer","type":"wasm"}' >"$outfile"
     ;;
   */service/ess-amb-1)
-    printf '%s\n' '{"id":"ess-amb-1","name":"se--costco--amb","customer_id":"test-customer","type":"wasm"}' >"$outfile"
+    printf '%s\n' '{"id":"ess-amb-1","name":"se--samplecorp--amb","customer_id":"test-customer","type":"wasm"}' >"$outfile"
     ;;
   */service/ess-amb-2)
-    printf '%s\n' '{"id":"ess-amb-2","name":"se--costco--amb","customer_id":"test-customer","type":"wasm"}' >"$outfile"
+    printf '%s\n' '{"id":"ess-amb-2","name":"se--samplecorp--amb","customer_id":"test-customer","type":"wasm"}' >"$outfile"
     ;;
   *)
     printf '%s\n' '{"error":"unhandled fake endpoint"}' >"$outfile"
@@ -225,7 +241,7 @@ export FASTLY_API_TOKEN="test-token"
 export FASTLY_CUSTOMER_ID="test-customer"
 export FASTLY_DSTOKEN="secret-dstoken"
 export FASTLY_VOUCH_COOKIE="secret-vouch"
-export SIGSCI_CORP="costco"
+export SIGSCI_CORP="samplecorp"
 export NGWAF_PROGRESS=never
 export NGWAF_COLOR=never
 export NGWAF_CURL_RETRIES=0
@@ -240,47 +256,54 @@ jq -e '
   and .summary.unresolved == 1
   and .summary.ambiguous == 1
   and .sources.internal_ngwaf_sites.status == "COMPLETE"
-  and .summary.sigsci_corp == "costco"
+  and .summary.sigsci_corp == "samplecorp"
   and .summary.sigsci_corp_source == "env"
   and .summary.selected_customer_id == "test-customer"
   and .summary.sigsci_customer_id == "test-customer"
   and .summary.corp_validation_status == "VALID"
   and .sources.internal_ngwaf_sites.corp_validation_status == "VALID"
-  and any(.mappings[]; .source_service_id == "cdn-prod" and .status == "CONFIRMED" and .evidence_type == "DIRECT" and .legacy_inspection_service_host == "se--costco--prod.edgecompute.app" and .inspection_service_id == "ess-prod" and .workspace_name == "gdx-costco-prd-is")
+  and any(.mappings[]; .source_service_id == "cdn-prod" and .status == "CONFIRMED" and .evidence_type == "DIRECT" and .legacy_inspection_service_host == "se--samplecorp--prod.edgecompute.app" and .inspection_service_id == "ess-prod" and .workspace_name == "gdx-samplecorp-prd-is")
   and any(.mappings[]; .source_service_id == "cdn-prod" and .legacy_ess_hostname == .legacy_inspection_service_host and .ess_service_id == .inspection_service_id)
-  and any(.mappings[]; .source_service_id == "cdn-live" and .status == "CONFIRMED" and .evidence_type == "DIRECT" and .inspection_service_host == "se--costco--69a8b42409aacb23a10bf0ca.edgecompute.app" and .inspection_service_name == "se--costco--69a8b42409aacb23a10bf0ca" and .inspection_service_id == "NqBYffdR4mOhuGwMfOnldY" and .workspace_name == "gdx-costco-prd-is-live")
-  and ([.mappings[] | select(.workspace_name == "gdx-costco-qa-is" and .status == "CONFIRMED")] | length) == 3
+  and any(.mappings[]; .source_service_id == "cdn-live" and .status == "CONFIRMED" and .evidence_type == "DIRECT" and .inspection_service_host == "se--samplecorp--aaaaaaaaaaaaaaaaaaaaaaaa.edgecompute.app" and .inspection_service_name == "se--samplecorp--aaaaaaaaaaaaaaaaaaaaaaaa" and .inspection_service_id == "TESTSERVICE00000000001" and .workspace_name == "gdx-samplecorp-prd-is-live")
+  and ([.mappings[] | select(.workspace_name == "gdx-samplecorp-qa-is" and .status == "CONFIRMED")] | length) == 3
   and any(.mappings[]; .source_service_id == "cdn-no-host" and .status == "NOT_FOUND")
   and any(.mappings[]; .source_service_id == "cdn-vcl-fail" and .status == "UNKNOWN" and (.reason | test("HTTP 503")))
   and any(.mappings[]; .source_service_id == "cdn-mismatch" and .status == "UNRESOLVED")
   and any(.mappings[]; .source_service_id == "cdn-ambiguous" and .status == "AMBIGUOUS" and (.candidates | length) == 2)
   and all(.mappings[]; .source_service_id != "foreign-cdn")
 ' >/dev/null <<<"$json"
-! grep -F 'secret-dstoken' <<<"$json" >/dev/null
-! grep -F 'secret-vouch' <<<"$json" >/dev/null
-! grep -F 'secret-dstoken' "$TEST_TMP/json-err" >/dev/null
-! grep -F 'secret-vouch' "$TEST_TMP/json-err" >/dev/null
+assert_absent -F 'secret-dstoken' <<<"$json" >/dev/null
+assert_absent -F 'secret-vouch' <<<"$json" >/dev/null
+assert_absent -F 'secret-dstoken' "$TEST_TMP/json-err" >/dev/null
+assert_absent -F 'secret-vouch' "$TEST_TMP/json-err" >/dev/null
+
+for owner_mode in ess-owner-foreign ess-owner-missing; do
+  owner_json="$(FASTLY_TEST_LEGACY_MAP_MODE="$owner_mode" "$ROOT/fastly-audit" security legacy-map cdn-prod --format json 2>"$TEST_TMP/owner-err")"
+  owner_kind=ownership_mismatch
+  [[ "$owner_mode" == ess-owner-missing ]] && owner_kind=ownership_unverified
+  jq -e --arg kind "$owner_kind" 'any(.mappings[]; .source_service_id == "cdn-prod" and .status != "CONFIRMED" and .candidates == [] and .lookup_failures[0].failure.failure_kind == $kind)' <<<"$owner_json" >/dev/null
+done
 
 lookup_log="$TEST_TMP/inspection-lookups.log"
 FASTLY_TEST_LEGACY_MAP_LOOKUP_LOG="$lookup_log" "$ROOT/fastly-audit" security legacy-map --format json >"$TEST_TMP/lookup-json" 2>"$TEST_TMP/lookup-err"
-for service_id in ess-prod NqBYffdR4mOhuGwMfOnldY ess-qa ess-mismatch ess-amb-1 ess-amb-2; do
+for service_id in ess-prod TESTSERVICE00000000001 ess-qa ess-mismatch ess-amb-1 ess-amb-2; do
   [[ "$(grep -c "^start $service_id " "$lookup_log")" == "1" ]]
   [[ "$(grep -c "^end $service_id " "$lookup_log")" == "1" ]]
 done
 [[ "$(grep -c '^start ' "$lookup_log")" == "6" ]]
-! grep -F '/service' "$lookup_log" >/dev/null
+assert_absent -F '/service' "$lookup_log" >/dev/null
 jq -e '
   any(.mappings[]; .source_service_id == "cdn-ambiguous" and .status == "AMBIGUOUS" and (.candidates | length) == 2)
 ' >/dev/null <"$TEST_TMP/lookup-json"
-! grep -F 'secret-dstoken' "$lookup_log" >/dev/null
-! grep -F 'secret-vouch' "$lookup_log" >/dev/null
+assert_absent -F 'secret-dstoken' "$lookup_log" >/dev/null
+assert_absent -F 'secret-vouch' "$lookup_log" >/dev/null
 
 duplicate_log="$TEST_TMP/inspection-lookups-duplicates.log"
 FASTLY_TEST_LEGACY_MAP_MODE=duplicate-serviceids \
 FASTLY_TEST_LEGACY_MAP_LOOKUP_LOG="$duplicate_log" \
   "$ROOT/fastly-audit" security legacy-map cdn-prod --format json >"$TEST_TMP/duplicate-json" 2>"$TEST_TMP/duplicate-err"
 [[ "$(grep -c '^start ess-prod ' "$duplicate_log")" == "1" ]]
-[[ "$(grep -c '^start NqBYffdR4mOhuGwMfOnldY ' "$duplicate_log")" == "1" ]]
+[[ "$(grep -c '^start TESTSERVICE00000000001 ' "$duplicate_log")" == "1" ]]
 [[ "$(grep -c '^start ' "$duplicate_log")" == "2" ]]
 
 bounded_log="$TEST_TMP/inspection-lookups-bounded.log"
@@ -298,8 +321,8 @@ grep -F 'direct lookups completed: 6' "$TEST_TMP/bounded-err-a" >/dev/null
 grep -F 'direct lookup failures: 0' "$TEST_TMP/bounded-err-a" >/dev/null
 grep -F 'worker process failures: 0' "$TEST_TMP/bounded-err-a" >/dev/null
 grep -F 'Inspection Service resolver completed in ' "$TEST_TMP/bounded-err-a" >/dev/null
-! grep -F 'secret-dstoken' "$TEST_TMP/bounded-err-a" >/dev/null
-! grep -F 'secret-vouch' "$TEST_TMP/bounded-err-a" >/dev/null
+assert_absent -F 'secret-dstoken' "$TEST_TMP/bounded-err-a" >/dev/null
+assert_absent -F 'secret-vouch' "$TEST_TMP/bounded-err-a" >/dev/null
 
 FASTLY_TEST_LEGACY_MAP_MODE=parallel-order \
 FASTLY_AUDIT_LOOKUP_CONCURRENCY=2 \
@@ -324,21 +347,21 @@ live="$("$ROOT/fastly-audit" security legacy-map prod-is --format json 2>"$TEST_
 jq -e '
   (.mappings | length) == 1
   and .mappings[0].source_service_id == "cdn-live"
-  and .mappings[0].inspection_service_host == "se--costco--69a8b42409aacb23a10bf0ca.edgecompute.app"
-  and .mappings[0].inspection_service_name == "se--costco--69a8b42409aacb23a10bf0ca"
-  and .mappings[0].legacy_inspection_service_name == "se--costco--69a8b42409aacb23a10bf0ca"
-  and .mappings[0].legacy_ess_service_name == "se--costco--69a8b42409aacb23a10bf0ca"
-  and .mappings[0].inspection_service_id == "NqBYffdR4mOhuGwMfOnldY"
-  and .mappings[0].ess_service_id == "NqBYffdR4mOhuGwMfOnldY"
-  and .mappings[0].workspace_name == "gdx-costco-prd-is-live"
+  and .mappings[0].inspection_service_host == "se--samplecorp--aaaaaaaaaaaaaaaaaaaaaaaa.edgecompute.app"
+  and .mappings[0].inspection_service_name == "se--samplecorp--aaaaaaaaaaaaaaaaaaaaaaaa"
+  and .mappings[0].legacy_inspection_service_name == "se--samplecorp--aaaaaaaaaaaaaaaaaaaaaaaa"
+  and .mappings[0].legacy_ess_service_name == "se--samplecorp--aaaaaaaaaaaaaaaaaaaaaaaa"
+  and .mappings[0].inspection_service_id == "TESTSERVICE00000000001"
+  and .mappings[0].ess_service_id == "TESTSERVICE00000000001"
+  and .mappings[0].workspace_name == "gdx-samplecorp-prd-is-live"
   and .mappings[0].evidence_type == "DIRECT"
   and .mappings[0].status == "CONFIRMED"
-  and .mappings[0].candidates[0].inspection_service_name == "se--costco--69a8b42409aacb23a10bf0ca"
+  and .mappings[0].candidates[0].inspection_service_name == "se--samplecorp--aaaaaaaaaaaaaaaaaaaaaaaa"
 ' >/dev/null <<<"$live"
 
-override="$(SIGSCI_CORP="cassie_keller" "$ROOT/fastly-audit" security legacy-map prod-is --sigsci-corp costco --format json 2>"$TEST_TMP/override-err")"
+override="$(SIGSCI_CORP="cassie_keller" "$ROOT/fastly-audit" security legacy-map prod-is --sigsci-corp samplecorp --format json 2>"$TEST_TMP/override-err")"
 jq -e '
-  .summary.sigsci_corp == "costco"
+  .summary.sigsci_corp == "samplecorp"
   and .summary.sigsci_corp_source == "cli"
   and .summary.corp_validation_status == "VALID"
   and .mappings[0].status == "CONFIRMED"
@@ -351,9 +374,9 @@ fi
 grep -F 'SIGSCI corp/customer mismatch' "$TEST_TMP/wrong-corp-err" >/dev/null
 grep -F 'queried SIGSCI corp: cassie_keller (env)' "$TEST_TMP/wrong-corp-err" >/dev/null
 grep -F 'returned site customer_id: wrong-customer' "$TEST_TMP/wrong-corp-err" >/dev/null
-! grep -F 'UNRESOLVED' "$TEST_TMP/wrong-corp-out" >/dev/null
-! grep -F 'secret-dstoken' "$TEST_TMP/wrong-corp-err" >/dev/null
-! grep -F 'secret-vouch' "$TEST_TMP/wrong-corp-err" >/dev/null
+assert_absent -F 'UNRESOLVED' "$TEST_TMP/wrong-corp-out" >/dev/null
+assert_absent -F 'secret-dstoken' "$TEST_TMP/wrong-corp-err" >/dev/null
+assert_absent -F 'secret-vouch' "$TEST_TMP/wrong-corp-err" >/dev/null
 
 export FASTLY_TEST_LEGACY_MAP_MODE=multi-customer
 if "$ROOT/fastly-audit" security legacy-map prod-is --format json >"$TEST_TMP/multi-customer-out" 2>"$TEST_TMP/multi-customer-err"; then
@@ -363,7 +386,7 @@ fi
 unset FASTLY_TEST_LEGACY_MAP_MODE
 grep -F 'validation status: AMBIGUOUS' "$TEST_TMP/multi-customer-err" >/dev/null
 grep -F 'returned site customer_id: other-customer,test-customer' "$TEST_TMP/multi-customer-err" >/dev/null
-! grep -F 'UNRESOLVED' "$TEST_TMP/multi-customer-out" >/dev/null
+assert_absent -F 'UNRESOLVED' "$TEST_TMP/multi-customer-out" >/dev/null
 
 export FASTLY_TEST_LEGACY_MAP_MODE=missing-customer
 if "$ROOT/fastly-audit" security legacy-map prod-is --format json >"$TEST_TMP/missing-customer-out" 2>"$TEST_TMP/missing-customer-err"; then
@@ -373,7 +396,7 @@ fi
 unset FASTLY_TEST_LEGACY_MAP_MODE
 grep -F 'validation status: UNKNOWN' "$TEST_TMP/missing-customer-err" >/dev/null
 grep -F 'returned site customer_id: none' "$TEST_TMP/missing-customer-err" >/dev/null
-! grep -F 'UNRESOLVED' "$TEST_TMP/missing-customer-out" >/dev/null
+assert_absent -F 'UNRESOLVED' "$TEST_TMP/missing-customer-out" >/dev/null
 
 compute="$("$ROOT/fastly-audit" security legacy-map compute-source --format json 2>"$TEST_TMP/compute-err")"
 jq -e '
@@ -411,14 +434,14 @@ grep -F 'HTTP 302 from internal NGWAF API' <<<"$redirect_human" >/dev/null
 grep -F 'likely expired or invalid internal session cookies' <<<"$redirect_human" >/dev/null
 grep -F 'refresh FASTLY_DSTOKEN and FASTLY_VOUCH_COOKIE' <<<"$redirect_human" >/dev/null
 grep -F 'legacy Signal Sciences dashboard session' <<<"$redirect_human" >/dev/null
-! grep -F 'secret-dstoken' <<<"$redirect_sites" >/dev/null
-! grep -F 'secret-vouch' <<<"$redirect_sites" >/dev/null
-! grep -F 'secret-dstoken' <<<"$redirect_human" >/dev/null
-! grep -F 'secret-vouch' <<<"$redirect_human" >/dev/null
-! grep -F 'secret-dstoken' "$TEST_TMP/sites-302-json-err" >/dev/null
-! grep -F 'secret-vouch' "$TEST_TMP/sites-302-json-err" >/dev/null
-! grep -F 'secret-dstoken' "$TEST_TMP/sites-302-human-err" >/dev/null
-! grep -F 'secret-vouch' "$TEST_TMP/sites-302-human-err" >/dev/null
+assert_absent -F 'secret-dstoken' <<<"$redirect_sites" >/dev/null
+assert_absent -F 'secret-vouch' <<<"$redirect_sites" >/dev/null
+assert_absent -F 'secret-dstoken' <<<"$redirect_human" >/dev/null
+assert_absent -F 'secret-vouch' <<<"$redirect_human" >/dev/null
+assert_absent -F 'secret-dstoken' "$TEST_TMP/sites-302-json-err" >/dev/null
+assert_absent -F 'secret-vouch' "$TEST_TMP/sites-302-json-err" >/dev/null
+assert_absent -F 'secret-dstoken' "$TEST_TMP/sites-302-human-err" >/dev/null
+assert_absent -F 'secret-vouch' "$TEST_TMP/sites-302-human-err" >/dev/null
 
 export FASTLY_TEST_LEGACY_MAP_MODE=sites-401
 auth_failed_sites="$("$ROOT/fastly-audit" security legacy-map cdn-prod --format json 2>"$TEST_TMP/sites-401-err")"
@@ -453,8 +476,8 @@ jq -e '
 ' >/dev/null <<<"$not_found_sites"
 grep -F 'Internal NGWAF request problem' <<<"$not_found_human" >/dev/null
 grep -F 'HTTP 404 from internal NGWAF API' <<<"$not_found_human" >/dev/null
-! grep -F 'refresh FASTLY_DSTOKEN' <<<"$not_found_human" >/dev/null
-! grep -F 'refresh FASTLY_VOUCH_COOKIE' <<<"$not_found_human" >/dev/null
+assert_absent -F 'refresh FASTLY_DSTOKEN' <<<"$not_found_human" >/dev/null
+assert_absent -F 'refresh FASTLY_VOUCH_COOKIE' <<<"$not_found_human" >/dev/null
 
 export FASTLY_TEST_LEGACY_MAP_MODE=sites-500
 server_error_sites="$("$ROOT/fastly-audit" security legacy-map cdn-prod --format json 2>"$TEST_TMP/sites-500-err")"
@@ -467,8 +490,8 @@ jq -e '
 ' >/dev/null <<<"$server_error_sites"
 
 for artifact in "$auth_failed_sites" "$access_denied_sites" "$not_found_sites" "$server_error_sites"; do
-  ! grep -F 'secret-dstoken' <<<"$artifact" >/dev/null
-  ! grep -F 'secret-vouch' <<<"$artifact" >/dev/null
+  assert_absent -F 'secret-dstoken' <<<"$artifact" >/dev/null
+  assert_absent -F 'secret-vouch' <<<"$artifact" >/dev/null
 done
 
 export FASTLY_TEST_LEGACY_MAP_MODE=ess-lookup-fail
@@ -479,20 +502,20 @@ jq -e '
   and .mappings[0].evidence_type == "UNKNOWN"
   and (.mappings[0].reason | test("direct Fastly Inspection Service lookups were unavailable"))
   and (.mappings[0].lookup_failures | length) == 1
-  and .mappings[0].lookup_failures[0].serviceID == "NqBYffdR4mOhuGwMfOnldY"
+  and .mappings[0].lookup_failures[0].serviceID == "TESTSERVICE00000000001"
   and (.mappings[0].lookup_failures[0].reason | test("HTTP 503"))
 ' >/dev/null <<<"$failed_ess"
 grep -F 'direct lookup failures: 1' "$TEST_TMP/ess-fail-err" >/dev/null
 grep -F 'worker process failures: 1' "$TEST_TMP/ess-fail-err" >/dev/null
-! grep -F 'secret-dstoken' "$TEST_TMP/ess-fail-err" >/dev/null
-! grep -F 'secret-vouch' "$TEST_TMP/ess-fail-err" >/dev/null
+assert_absent -F 'secret-dstoken' "$TEST_TMP/ess-fail-err" >/dev/null
+assert_absent -F 'secret-vouch' "$TEST_TMP/ess-fail-err" >/dev/null
 
 csv="$("$ROOT/fastly-audit" security legacy-map cdn-prod --format csv 2>"$TEST_TMP/csv-err")"
 grep -F '"cdn_service","service_id","active_version","inspection_service_host","inspection_service_id","workspace","evidence","status","reason"' <<<"$csv" >/dev/null
-grep -F '"prd-usbcwww","cdn-prod","10","se--costco--prod.edgecompute.app","ess-prod","gdx-costco-prd-is","DIRECT","CONFIRMED"' <<<"$csv" >/dev/null
-! grep -F $'\033[' <<<"$csv" >/dev/null
-! grep -F 'secret-dstoken' <<<"$csv" >/dev/null
-! grep -F 'secret-vouch' <<<"$csv" >/dev/null
+grep -F '"prd-usbcwww","cdn-prod","10","se--samplecorp--prod.edgecompute.app","ess-prod","gdx-samplecorp-prd-is","DIRECT","CONFIRMED"' <<<"$csv" >/dev/null
+assert_absent -F $'\033[' <<<"$csv" >/dev/null
+assert_absent -F 'secret-dstoken' <<<"$csv" >/dev/null
+assert_absent -F 'secret-vouch' <<<"$csv" >/dev/null
 
 out_file="$TEST_TMP/legacy-map-output.json"
 written="$("$ROOT/fastly-audit" security legacy-map cdn-prod --format json --output "$out_file" 2>"$TEST_TMP/output-err")"

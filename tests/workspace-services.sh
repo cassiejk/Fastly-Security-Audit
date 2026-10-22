@@ -13,14 +13,14 @@ source "$ROOT/lib/services.sh"
 export FASTLY_DSTOKEN=preflight-dstoken-secret
 export FASTLY_VOUCH_COOKIE=preflight-vouch-secret
 
-in_band_evidence='{"customer":{"id":"c","name":"Costco"},"summary":{"sites_inventory_status":"COMPLETE"},"sources":{},"mappings":[{"status":"CONFIRMED","workspace_id":"w","workspace_name":"workspace","source_service_id":"s1","source_service_name":"staging","active_version":111,"inspection_service_id":"i"}]}'
+in_band_evidence='{"customer":{"id":"c","name":"Example Customer"},"summary":{"sites_inventory_status":"COMPLETE"},"sources":{},"mappings":[{"status":"CONFIRMED","workspace_id":"w","workspace_name":"workspace","source_service_id":"s1","source_service_name":"staging","active_version":111,"inspection_service_id":"i"}]}'
 product='{"status":"COMPLETE","result":{},"services":[]}'
 workspaces='{"data":[{"id":"w","name":"workspace"},{"id":"empty","name":"empty"}]}'
 result="$(workspace_services_payload_json "$in_band_evidence" "$product" "$workspaces" w)"
 jq -e '.status == "COMPLETE" and .service_count == 1 and .services[0].active_version == 111 and .services[0].mapping_sources == ["in_band_vcl_evidence"] and (.services[0] | has("architecture_status") | not) and (.provenance | has("legacy_generated_vcl") | not)' <<<"$result" >/dev/null
 result="$(workspace_services_payload_json \
   "$(jq '.mappings[0].workspace_id = "internal-site"' <<<"$in_band_evidence")" "$product" "$workspaces" w)"
-jq -e '.service_count == 1 and .services[0].mapping_evidence[0].evidence.internal_site_id == "internal-site" and .services[0].mapping_evidence[0].evidence.workspace_resolution == "unique_exact_workspace_name"' <<<"$result" >/dev/null
+jq -e '.status == "PARTIAL" and .service_count == 0 and (.unmatched_workspace_relationships | length) == 1 and .unmatched_workspace_relationships[0].mapping_evidence.workspace_resolution == "UNRESOLVED"' <<<"$result" >/dev/null
 result="$(workspace_services_payload_json \
   "$(jq '.mappings[0].workspace_id = "internal-site"' <<<"$in_band_evidence")" "$product" \
   "$(jq '.data += [{id:"other",name:"workspace"}]' <<<"$workspaces")" w)"
@@ -34,7 +34,7 @@ result="$(workspace_services_payload_json "$in_band_evidence" "$product" "$works
 jq -e '.status == "PARTIAL" and .unresolved_services[0].source_service_id == "bad"' <<<"$result" >/dev/null
 product="$(jq '.status = "UNKNOWN"' <<<"$product")"
 result="$(workspace_services_payload_json "$in_band_evidence" "$product" "$workspaces" w)"
-jq -e '.status == "UNKNOWN"' <<<"$result" >/dev/null
+jq -e '.status == "PARTIAL"' <<<"$result" >/dev/null
 result="$(workspace_services_payload_json \
   "$(jq '.mappings = []' <<<"$in_band_evidence")" \
   '{"status":"COMPLETE","result":{},"services":[]}' "$workspaces" empty)"
@@ -88,7 +88,7 @@ fi
 [[ ! -s "$TEST_TMP/calls" ]] || fail 'all-workspaces preflight performed collection work'
 if cmd_workspace_services invalid --json >/dev/null 2>&1; then fail 'invalid workspace accepted'; fi
 if cmd_workspace_services workspace --json >"$TEST_TMP/partial.json"; then fail 'incomplete mapping succeeded'; fi
-jq -e '.status == "UNKNOWN" and .service_count == 2' "$TEST_TMP/partial.json" >/dev/null
+jq -e '.status == "PARTIAL" and .service_count == 2' "$TEST_TMP/partial.json" >/dev/null
 in_band_evidence="$(jq 'del(.mappings[-1])' <<<"$in_band_evidence")"
 product="$(jq '.status = "COMPLETE"' <<<"$product")"
 fixture_in_band_evidence="$in_band_evidence"

@@ -77,6 +77,12 @@ ui_phase() {
   local current="$1"
   local total="$2"
   shift 2
+  if [[ -n "${NGWAF_PROGRESS_JOB_STATE:-}" ]]; then
+    [[ -z "${NGWAF_PROGRESS_PHASE_TOTAL:-}" ]] || total="$NGWAF_PROGRESS_PHASE_TOTAL"
+    progress_job_phase "[$current/$total] $*"
+    return
+  fi
+  [[ -z "${NGWAF_PROGRESS_COMMAND:-}" ]] || return 0
   printf '%s %s\n' "$(ui_paint '1;36' "[$current/$total]")" "$*" >&2
 }
 
@@ -129,6 +135,160 @@ progress_enabled() {
   esac
 }
 
+# Command-level progress shares NGWAF_PROGRESS with the existing HTTP spinner.
+# Its state file lets helpers running in command substitutions report the active
+# phase/API operation without changing their stdout or return values.
+progress_job_elapsed() {
+  local elapsed=$(( $(date +%s) - NGWAF_PROGRESS_JOB_STARTED ))
+  printf '%02d:%02d' "$((elapsed / 60))" "$((elapsed % 60))"
+}
+
+progress_job_phase() {
+  [[ -n "${NGWAF_PROGRESS_JOB_STATE:-}" ]] || return 0
+  local label="$1" now
+  now="$(date +%s)"
+  printf '%s\t%s\t\n' "$now" "$label" >"$NGWAF_PROGRESS_JOB_STATE"
+  printf '[%s] %s\n' "$(progress_job_elapsed)" "$label" >&2
+}
+
+progress_job_note() {
+  [[ -n "${NGWAF_PROGRESS_JOB_STATE:-}" ]] || return 0
+  local message="$1" last phase api now
+  IFS=$'\t' read -r last phase api <"$NGWAF_PROGRESS_JOB_STATE" || return 0
+  now="$(date +%s)"
+  printf '%s\t%s\t%s\n' "$now" "$phase" "$api" >"$NGWAF_PROGRESS_JOB_STATE"
+  printf '[%s] %s\n' "$(progress_job_elapsed)" "$message" >&2
+}
+
+progress_job_milestone() {
+  [[ -n "${NGWAF_PROGRESS_JOB_STATE:-}" ]] || return 0
+  local label="$1" current="$2" total="$3" last phase api now interval="${NGWAF_PROGRESS_MILESTONE_SECONDS:-10}"
+  [[ "$current" =~ ^[0-9]+$ && "$total" =~ ^[1-9][0-9]*$ ]] || return 0
+  [[ "$interval" =~ ^[1-9][0-9]*$ ]] || interval=10
+  IFS=$'\t' read -r last phase api <"$NGWAF_PROGRESS_JOB_STATE" || return 0
+  now="$(date +%s)"
+  if (( current >= total || now - last >= interval )); then
+    progress_job_note "$label: $current/$total"
+  fi
+}
+
+progress_safe_path() {
+  local path="${1%%\?*}"
+  if [[ "$path" =~ ^/[A-Za-z0-9/_{}.-]+$ ]]; then
+    printf '%s' "$path"
+  else
+    printf '[redacted path]'
+  fi
+}
+
+progress_job_api_start() {
+  [[ -n "${NGWAF_PROGRESS_JOB_STATE:-}" ]] || return 0
+  local last phase api
+  IFS=$'\t' read -r last phase api <"$NGWAF_PROGRESS_JOB_STATE" || return 0
+  printf '%s\t%s\tGET %s\n' "$last" "$phase" "$(progress_safe_path "$1")" >"$NGWAF_PROGRESS_JOB_STATE"
+}
+
+progress_job_api_end() {
+  [[ -n "${NGWAF_PROGRESS_JOB_STATE:-}" ]] || return 0
+  local last phase api
+  IFS=$'\t' read -r last phase api <"$NGWAF_PROGRESS_JOB_STATE" || return 0
+  printf '%s\t%s\t\n' "$last" "$phase" >"$NGWAF_PROGRESS_JOB_STATE"
+}
+
+progress_http_timing() {
+  local path="$1" elapsed="$2" code="$3" threshold="${NGWAF_PROGRESS_SLOW_SECONDS:-10}"
+  progress_enabled || return 0
+  [[ "$threshold" =~ ^[1-9][0-9]*$ ]] || threshold=10
+  (( elapsed >= threshold )) || return 0
+  printf '[%s] Slow API request: GET %s (%ss, HTTP %s)\n' \
+    "$(if [[ -n "${NGWAF_PROGRESS_JOB_STATE:-}" ]]; then progress_job_elapsed; else printf '%02d:%02d' "$((elapsed / 60))" "$((elapsed % 60))"; fi)" \
+    "$(progress_safe_path "$path")" "$elapsed" "$code" >&2
+}
+
+progress_job_finish() {
+  [[ -n "${NGWAF_PROGRESS_JOB_STATE:-}" ]] || return 0
+  local outcome="$1" code="${2:-0}" last phase api
+  IFS=$'\t' read -r last phase api <"$NGWAF_PROGRESS_JOB_STATE" || phase='current operation'
+  kill "${NGWAF_PROGRESS_JOB_PID:-}" 2>/dev/null || true
+  wait "${NGWAF_PROGRESS_JOB_PID:-}" 2>/dev/null || true
+  rm -f "$NGWAF_PROGRESS_JOB_STATE"
+  unset NGWAF_PROGRESS_JOB_STATE NGWAF_PROGRESS_JOB_STARTED NGWAF_PROGRESS_JOB_PID NGWAF_PROGRESS_PHASE_TOTAL NGWAF_PROGRESS_COMMAND
+  trap - EXIT INT TERM
+  case "$outcome" in
+    success) printf '[%s] Completed successfully\n' "${NGWAF_PROGRESS_JOB_FINAL_TIME:-00:00}" >&2 ;;
+    interrupted) printf '[%s] Interrupted by user (SIG%s)\n' "${NGWAF_PROGRESS_JOB_FINAL_TIME:-00:00}" "$code" >&2 ;;
+    *) printf '[%s] Failed: %s (exit=%s)\n' "${NGWAF_PROGRESS_JOB_FINAL_TIME:-00:00}" "$phase" "$code" >&2 ;;
+  esac
+  unset NGWAF_PROGRESS_JOB_FINAL_TIME
+}
+
+progress_job_exit() {
+  local code="$1"
+  NGWAF_PROGRESS_JOB_FINAL_TIME="$(progress_job_elapsed)"
+  if (( code == 0 )); then progress_job_finish success 0
+  else progress_job_finish failure "$code"; fi
+}
+
+progress_job_signal() {
+  local signal="$1" code=130
+  [[ "$signal" != TERM ]] || code=143
+  NGWAF_PROGRESS_JOB_FINAL_TIME="$(progress_job_elapsed)"
+  progress_job_finish interrupted "$signal"
+  exit "$code"
+}
+
+progress_job_begin() {
+  local label="$1" owner interval
+  progress_enabled || return 0
+  [[ -z "${NGWAF_PROGRESS_JOB_STATE:-}" ]] || die 'progress job already active'
+  interval="${NGWAF_PROGRESS_HEARTBEAT_SECONDS:-10}"
+  [[ "$interval" =~ ^[1-9][0-9]*$ ]] || interval=10
+  NGWAF_PROGRESS_JOB_STARTED="$(date +%s)"
+  NGWAF_PROGRESS_JOB_STATE="$(mktemp)" || return 1
+  export NGWAF_PROGRESS_JOB_STARTED NGWAF_PROGRESS_JOB_STATE
+  printf '%s\t%s\t\n' "$NGWAF_PROGRESS_JOB_STARTED" "$label" >"$NGWAF_PROGRESS_JOB_STATE"
+  printf '[%s] Starting %s\n' "$(progress_job_elapsed)" "$label" >&2
+  owner="$BASHPID"
+  (
+    local last_emitted="$NGWAF_PROGRESS_JOB_STARTED" last phase api now sleeper=''
+    trap 'if [[ -n "$sleeper" ]]; then kill "$sleeper" 2>/dev/null || true; wait "$sleeper" 2>/dev/null || true; fi; exit 0' INT TERM HUP
+    while :; do
+      sleep 2 &
+      sleeper=$!
+      wait "$sleeper" 2>/dev/null || true
+      sleeper=''
+      kill -0 "$owner" 2>/dev/null || exit 0
+      IFS=$'\t' read -r last phase api <"$NGWAF_PROGRESS_JOB_STATE" || continue
+      [[ "$last" =~ ^[0-9]+$ && -n "$phase" ]] || continue
+      if (( last > last_emitted )); then last_emitted="$last"; fi
+      now="$(date +%s)"
+      if (( now - last_emitted >= interval )); then
+        printf '[%s] Still working: %s%s\n' \
+          "$(progress_job_elapsed)" "$phase" "${api:+; $api}" >&2
+        last_emitted="$now"
+      fi
+    done
+  ) &
+  NGWAF_PROGRESS_JOB_PID=$!
+  trap 'progress_job_exit $?' EXIT
+  trap 'progress_job_signal INT' INT
+  trap 'progress_job_signal TERM' TERM
+}
+
+progress_run() {
+  local label="$1"
+  shift
+  NGWAF_PROGRESS_COMMAND=1
+  export NGWAF_PROGRESS_COMMAND
+  progress_job_begin "$label"
+  "$@"
+  if [[ -n "${NGWAF_PROGRESS_JOB_STATE:-}" ]]; then
+    NGWAF_PROGRESS_JOB_FINAL_TIME="$(progress_job_elapsed)"
+    progress_job_finish success 0
+  fi
+  unset NGWAF_PROGRESS_COMMAND
+}
+
 _ngwaf_progress_pid=""
 _ngwaf_progress_label=""
 _ngwaf_progress_started=0
@@ -141,6 +301,7 @@ progress_start() {
   _ngwaf_progress_label="$label"
   _ngwaf_progress_started="$(date +%s)"
 
+  [[ -z "${NGWAF_PROGRESS_JOB_STATE:-}" ]] || return 0
   progress_enabled || return 0
 
   printf '\r%s: %s %s (0s)' "${PROGRAM_NAME:-ngwaf}" "${frames:0:1}" "$label" >&2
@@ -161,7 +322,7 @@ progress_start() {
 
 progress_stop() {
   local outcome="${1:-success}"
-  local now elapsed
+  local now elapsed slow_threshold="${NGWAF_PROGRESS_SLOW_SECONDS:-10}"
 
   [[ -n "$_ngwaf_progress_pid" ]] || return 0
 
@@ -171,6 +332,7 @@ progress_stop() {
 
   now="$(date +%s)"
   elapsed=$((now - _ngwaf_progress_started))
+  [[ "$slow_threshold" =~ ^[1-9][0-9]*$ ]] || slow_threshold=10
 
   if [[ -t 2 ]]; then
     printf '\r\033[2K' >&2
@@ -178,7 +340,7 @@ progress_stop() {
     printf '\n' >&2
   fi
 
-  if [[ "$outcome" == "success" && "$elapsed" -ge 2 ]]; then
+  if [[ "$outcome" == "success" && "$elapsed" -ge 2 && "$elapsed" -lt "$slow_threshold" ]]; then
     printf '%s: %s %s in %ss\n' \
       "${PROGRAM_NAME:-ngwaf}" \
       "$(ui_paint '1;32' 'completed')" \
@@ -378,7 +540,7 @@ print_curl_failure() {
       ;;
   esac
 
-  if [[ -s "$errfile" ]]; then
+  if [[ -s "$errfile" && "${NGWAF_HTTP_REDACT_CURL_STDERR:-0}" != 1 ]]; then
     sed "s/^/${PROGRAM_NAME:-ngwaf}: curl: /" "$errfile" >&2
   fi
 
@@ -411,6 +573,7 @@ get() {
   fi
 
   progress_start "${NGWAF_PROGRESS_LABEL:-querying Fastly API: $path}"
+  progress_job_api_start "$path"
   started_at="$(date +%s)"
 
   if code="$(
@@ -432,9 +595,11 @@ get() {
   fi
   elapsed=$(( $(date +%s) - started_at ))
   elapsed_text=" after ${elapsed}s"
+  progress_job_api_end
 
   if (( curl_rc != 0 )); then
     progress_stop error
+    progress_http_timing "$path" "$elapsed" 000
     print_curl_failure "$curl_rc" "$path" "$err_tmp" "$elapsed"
     rm -f "$tmp" "$err_tmp"
     exit 1
@@ -443,6 +608,7 @@ get() {
   case "$code" in
     2*)
       progress_stop success
+      progress_http_timing "$path" "$elapsed" "$code"
       if ! jq -e . "$tmp" >/dev/null 2>&1; then
         printf '%s: Fastly API returned invalid JSON%s: GET %s\n' \
           "${PROGRAM_NAME:-ngwaf}" "$elapsed_text" "$path" >&2
@@ -455,6 +621,7 @@ get() {
       ;;
     *)
       progress_stop error
+      progress_http_timing "$path" "$elapsed" "$code"
       printf '%s: Fastly API returned HTTP %s%s: GET %s\n' \
         "${PROGRAM_NAME:-ngwaf}" "$code" "$elapsed_text" "$path" >&2
       if [[ "$code" == 400 && "${NGWAF_HTTP_ERROR_CONTEXT:-}" == timeseries ]] &&
@@ -504,6 +671,7 @@ http_get_to_file() {
   fi
 
   progress_start "${NGWAF_PROGRESS_LABEL:-querying Fastly API: $path}"
+  progress_job_api_start "$path"
   started_at="$(date +%s)"
 
   if code="$(
@@ -524,9 +692,11 @@ http_get_to_file() {
     curl_rc=$?
   fi
   elapsed=$(( $(date +%s) - started_at ))
+  progress_job_api_end
 
   if (( curl_rc != 0 )); then
     progress_stop error
+    progress_http_timing "$path" "$elapsed" 000
     print_curl_failure "$curl_rc" "$path" "$err_tmp" "$elapsed"
     rm -f "$err_tmp"
     printf '000\n'
@@ -537,6 +707,7 @@ http_get_to_file() {
     2*) progress_stop success ;;
     *) progress_stop error ;;
   esac
+  progress_http_timing "$path" "$elapsed" "$code"
 
   rm -f "$err_tmp"
   printf '%s\n' "$code"
@@ -599,6 +770,9 @@ get_all_pages() {
     jq '.data' <<<"$body" >>"$pages_tmp"
     fetched=$(( fetched + count ))
     pages_fetched=$(( pages_fetched + 1 ))
+    if (( total > 0 )); then
+      progress_job_milestone 'List records retrieved' "$fetched" "$total"
+    fi
 
     if (( total > 0 && fetched >= total )); then
       break
@@ -772,6 +946,36 @@ resolve_workspace_json() {
     "$(jq -r '.id' <<<"$resolved")" \
     "$(jq -r '.resolved_by' <<<"$resolved")" >&2
   printf '%s\n' "$resolved"
+}
+
+normalize_account_timeseries_response() {
+  [[ $# -eq 3 ]] || die 'normalize_account_timeseries_response requires <body> <metrics> <context>'
+
+  local body="$1" metrics="$2" context="$3" duplicates missing
+
+  jq -e '.data | type == "array" and length > 0' >/dev/null <<<"$body" ||
+    die "$context returned no timeseries rows; refusing to treat missing data as zero"
+  jq -e 'all(.data[]; (.dimensions.workspace | type) == "string" and
+    (.values | type) == "array" and all(.values[]; type == "object"))' >/dev/null <<<"$body" ||
+    die "$context returned malformed timeseries rows or metric values"
+
+  duplicates="$(jq -r '[.data[] | [.values[] | keys[]] | group_by(.)[] |
+    select(length > 1) | .[0]] | unique | join(",")' <<<"$body")"
+  [[ -z "$duplicates" ]] ||
+    die "$context returned duplicate metric key(s): $duplicates; refusing to overwrite values"
+
+  missing="$(jq -r --arg metrics "$metrics" '
+    def numeric: (type == "number") or
+      (type == "string" and test("^-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?$") and (tonumber? != null));
+    ($metrics | split(",")) as $names
+    | [.data[] | (reduce .values[] as $metric ({}; . + $metric)) as $values
+      | $names[] | select((($values[.]? | numeric) | not))]
+    | unique | join(",")
+  ' <<<"$body")"
+  [[ -z "$missing" ]] ||
+    die "$context omitted or returned non-numeric requested metric(s): $missing; refusing to substitute zero"
+
+  jq '.data |= map(.values |= [reduce .[] as $metric ({}; . + $metric)])' <<<"$body"
 }
 
 validate_timeseries_response() {

@@ -9,7 +9,7 @@ mkdir -p "$TEST_TMP/bin" "$TEST_TMP/config"
 cat >"$TEST_TMP/bin/curl" <<'FAKE_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
-outfile='' url='' page=1 query_count=0
+outfile='' url='' page=1 query_count=0 query_value=''
 printf 'CALL\n' >>"$CUSTOMER_SECURITY_CURL_LOG"
 while (( $# > 0 )); do
   case "$1" in
@@ -17,6 +17,7 @@ while (( $# > 0 )); do
     --data-urlencode)
       printf '%s\n' "$2" >>"$CUSTOMER_SECURITY_CURL_LOG"
       query_count=$((query_count + 1))
+      query_value="$2"
       [[ "$2" != page=* ]] || page="${2#page=}"
       shift 2 ;;
     https://*) url="$1"; shift ;;
@@ -65,6 +66,8 @@ case "$url" in
         if [[ "$mode" == edge-config-unavailable ]]; then
           status=503
           printf '%s\n' '{"error":"unavailable"}' >"$outfile"
+        elif [[ "$mode" == edge-missing-workspace && "$url" == */cdn/configuration ]]; then
+          printf '%s\n' '{"configuration":{"workspace_id":"missing-workspace","traffic_ramp":100}}' >"$outfile"
         elif [[ "$url" == */cdn/configuration ]]; then
           printf '%s\n' '{"configuration":{"workspace_id":"production","traffic_ramp":100}}' >"$outfile"
         else
@@ -106,8 +109,8 @@ case "$url" in
       *) printf '%s\n' '{"meta":{"total":2},"data":[{"id":"production","name":"Production","customer_id":"test-customer","mode":"block","default_blocking_response_code":406},{"id":"unattached","name":"Unattached Workspace","customer_id":"test-customer","mode":"log","default_blocking_response_code":403}]}' >"$outfile" ;;
     esac ;;
   */ngwaf/v1/workspaces/*/agents)
-    if (( query_count > 0 )); then
-      status=400; printf '%s\n' '{"error":"unsupported agent query parameters"}' >"$outfile"
+    if (( query_count != 1 )) || [[ "$query_value" != 'customer_id=test-customer' ]]; then
+      status=400; printf '%s\n' '{"title":"The request is not valid","detail":"Site not found"}' >"$outfile"
     else case "$mode:$url" in
       agent-uid:*/production/agents|agent-uid-mismatch:*/production/agents)
         status=400; printf '%s\n' '{"error":"invalid workspace id"}' >"$outfile" ;;
@@ -118,8 +121,14 @@ case "$url" in
       agent-failure:*/unattached/agents) status=403; printf '%s\n' '{"error":"forbidden"}' >"$outfile" ;;
       agent-site-not-found:*/unattached/agents) status=400; printf '%s\n' '{"status":400,"title":"Bad Request","detail":"Site not found","errors":[]}' >"$outfile" ;;
       agent-incomplete:*/unattached/agents) printf '%s\n' '{"meta":{"total":2},"data":[{"agent_active":true,"module_detected":true}]}' >"$outfile" ;;
+      agent-incomplete-invalid:*/unattached/agents) printf '%s\n' '{"meta":{"total":2},"data":[{"agent_active":true}]}' >"$outfile" ;;
+      agent-incomplete-foreign:*/unattached/agents) printf '%s\n' '{"meta":{"total":2},"data":[{"workspace_id":"other-workspace","module_detected":true}]}' >"$outfile" ;;
+      agent-incomplete-empty:*/unattached/agents) printf '%s\n' '{"meta":{"total":2},"data":[]}' >"$outfile" ;;
+      agent-overcount:*/unattached/agents) printf '%s\n' '{"meta":{"total":0},"data":[{"agent_active":true,"module_detected":true}]}' >"$outfile" ;;
       agent-module:*/production/agents)
         printf '%s\n' '{"meta":{"total":1},"data":[{"agent_active":true,"module_detected":true,"module_type":"nginx","module_server":"nginx","module_version":"1.2","host_os":"Linux"}]}' >"$outfile" ;;
+      agent-revproxy:*/unattached/agents)
+        printf '%s\n' '{"meta":{"total":1},"data":[{"agent_active":true,"module_detected":true,"module_type":"sigsci-agent-revproxy"}]}' >"$outfile" ;;
       agent-no-module:*/unattached/agents)
         printf '%s\n' '{"meta":{"total":1},"data":[{"agent_active":true,"module_detected":false}]}' >"$outfile" ;;
       *) printf '%s\n' '{"meta":{"total":0},"data":[]}' >"$outfile" ;;
@@ -153,6 +162,8 @@ for launcher in fastly-audit ngwaf; do
     env -u FASTLY_API_TOKEN -u FASTLY_CUSTOMER_ID "$ROOT/$launcher" customer security "$flag" >"$TEST_TMP/help" 2>"$TEST_TMP/err"
     grep -F "$launcher customer security [--json]" "$TEST_TMP/help" >/dev/null
     grep -F 'configuration overview' "$TEST_TMP/help" >/dev/null
+    grep -F 'supplemental' "$TEST_TMP/help" >/dev/null
+    grep -F 'neither their equality nor their difference establishes list completeness.' "$TEST_TMP/help" >/dev/null
     [[ ! -s "$TEST_TMP/err" && ! -e "$CUSTOMER_SECURITY_CURL_LOG" ]]
   done
   for args in '--detailed' '--bogus' 'help --json' '--json --json'; do
@@ -177,7 +188,13 @@ run_human() {
   "$ROOT/fastly-audit" customer security >"$TEST_TMP/human" 2>"$TEST_TMP/err" || { cat "$TEST_TMP/err" >&2; return 1; }
 }
 
-run_json
+NGWAF_PROGRESS=always run_json
+grep -F 'Starting customer security audit' "$TEST_TMP/err" >/dev/null
+grep -F 'Services retrieved: 2' "$TEST_TMP/err" >/dev/null
+grep -F 'Security product checks: 4/4' "$TEST_TMP/err" >/dev/null
+grep -F 'Workspaces discovered: 2' "$TEST_TMP/err" >/dev/null
+grep -F 'Workspace checks: 2/2' "$TEST_TMP/err" >/dev/null
+grep -F 'Completed successfully' "$TEST_TMP/err" >/dev/null
 cp "$TEST_TMP/json" "$TEST_TMP/complete-json"
 jq -e '
   .command == "customer security" and .customer.id == "test-customer"
@@ -199,8 +216,17 @@ jq -e '
   and ([.ngwaf.workspaces[] | select(.id == "production") | .deployments[] | select(.type == "edge_waf" and .status == "confirmed")] | length) == 1
   and (.ngwaf.workspaces[] | select(.id == "production") | .deployments[0].evidence == "2 Fastly service attachments")
   and (.ngwaf.workspaces[] | select(.id == "unattached") | .deployments[0].type == "unknown" and .deployments[0].status == "unresolved")
-  and all(.ngwaf.deployment_sources.agents[]; .status == "complete")
+  and all(.ngwaf.deployment_sources.agents[]; .status == "returned" and .total_matches_returned_count == true)
   and .ngwaf.attachment_mapping_result.status == "COMPLETE"
+  and .ngwaf.attachment_mapping_result.discovery_method == "ngwaf_product_enablement"
+  and .ngwaf.attachment_mapping_result.completeness_scope == "product_enabled_service_attachments_only"
+  and .ngwaf.attachment_mapping_result.other_deployment_methods_included == false
+  and .ngwaf.attachment_mapping_result.configured_attachment_count == 2
+  and .ngwaf.attachment_mapping_result.resolved_mapping_count == 2
+  and all(.ngwaf.attachments[]; .mapping_validation.status == "RESOLVED" and .mapping_validation.workspace_match_count == 1)
+  and .summary.ngwaf_service_attachment_scope == "product_enabled_service_attachments_only"
+  and .inventory_sections.ngwaf_service_attachments.completeness_scope == "product_enabled_service_attachments_only"
+  and .ngwaf.service_attachment_result.completeness_scope == "product_enabled_service_attachments_only"
   and .inventory_sections.ngwaf_workspaces.evidence_type == "DIRECT"
   and (has("reconciliation") | not) and (.ngwaf | has("anomalies") | not)
 ' "$TEST_TMP/json" >/dev/null
@@ -225,27 +251,67 @@ done
 
 export CUSTOMER_SECURITY_TEST_MODE=agent-module
 run_json
-jq -e '(.ngwaf.workspaces[] | select(.id == "production") | [.deployments[].type] | sort) == ["edge_waf","on_prem_module_agent"]
-  and (.ngwaf.workspaces[] | select(.id == "production") | .deployments[] | select(.type == "on_prem_module_agent") | .status == "inferred" and (.evidence | contains("module_type=nginx")))' "$TEST_TMP/json" >/dev/null
+jq -e '(.ngwaf.workspaces[] | select(.id == "production") | [.deployments[].type] | sort) == ["agent_based_unknown","edge_waf"]
+  and (.ngwaf.workspaces[] | select(.id == "production") | .deployments[] | select(.evidence_type == "agent_module") |
+    .type == "agent_based_unknown" and .status == "unresolved" and (.evidence | contains("module_type=nginx")))' "$TEST_TMP/json" >/dev/null
 export CUSTOMER_SECURITY_TEST_MODE=agent-uid
 run_json
-jq -e '(.ngwaf.workspaces[] | select(.id == "production") | .deployment_visibility.agents.identifier_used == "workspace_uid" and any(.deployments[]; .type == "on_prem_module_agent" and .status == "inferred"))' "$TEST_TMP/json" >/dev/null
+jq -e '(.ngwaf.workspaces[] | select(.id == "production") | .deployment_visibility.agents.identifier_used == "workspace_uid" and any(.deployments[]; .evidence_type == "agent_module" and .type == "agent_based_unknown" and .status == "unresolved"))' "$TEST_TMP/json" >/dev/null
 export CUSTOMER_SECURITY_TEST_MODE=agent-uid-mismatch
 run_json
-jq -e '(.ngwaf.workspaces[] | select(.id == "production") | .deployment_visibility.agents.status == "unavailable" and all(.deployments[]; .type != "on_prem_module_agent"))' "$TEST_TMP/json" >/dev/null
+jq -e '(.ngwaf.workspaces[] | select(.id == "production") | .deployment_visibility.agents.status == "unavailable" and all(.deployments[]; .evidence_type != "agent_module"))' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=agent-revproxy
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") |
+  any(.deployments[]; .type == "agent_based_unknown" and .status == "unresolved" and
+    .evidence_type == "agent_module" and (.evidence | contains("module_type=sigsci-agent-revproxy")))) and
+  all(.ngwaf.workspaces[].deployments[]; .type != "on_prem_module_agent")' "$TEST_TMP/json" >/dev/null
 export CUSTOMER_SECURITY_TEST_MODE=agent-no-module
 run_json
 jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") | .deployments[0].type == "agent_based_unknown" and .deployments[0].status == "unresolved")
   and (all(.ngwaf.workspaces[].deployments[]; .type != "on_prem_reverse_proxy"))' "$TEST_TMP/json" >/dev/null
 export CUSTOMER_SECURITY_TEST_MODE=agent-failure
 run_json
-jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") | .deployments[0].type == "unknown" and (.deployments[0].evidence | contains("Agent inventory unavailable")))' "$TEST_TMP/json" >/dev/null
+jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") |
+  .deployments[0].type == "unknown" and .deployments[0].evidence == "No recognized deployment evidence" and
+  .deployment_visibility.agents.status == "unavailable")' "$TEST_TMP/json" >/dev/null
+jq -e '(.ngwaf.workspaces[] | select(.id == "production") |
+  any(.deployments[]; .type == "edge_waf" and .status == "confirmed"))' "$TEST_TMP/json" >/dev/null
 export CUSTOMER_SECURITY_TEST_MODE=agent-site-not-found
 run_json
 jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") | .deployment_visibility.agents.status == "unavailable" and .deployment_visibility.agents.reason == "HTTP 400 (Site not found)" and .deployments[0].type == "unknown")' "$TEST_TMP/json" >/dev/null
 export CUSTOMER_SECURITY_TEST_MODE=agent-incomplete
 run_json
-jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") | .deployments[0].type == "unknown" and .deployment_visibility.agents.status == "unavailable")' "$TEST_TMP/json" >/dev/null
+jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") |
+  .deployment_visibility.agents.status == "returned" and
+  .deployment_visibility.agents.total_matches_returned_count == false and
+  .deployment_visibility.agents.returned_agent_count == 1 and
+  .deployment_visibility.agents.reported_total == 2 and
+  any(.deployments[]; .type == "agent_based_unknown" and .evidence_type == "agent_module" and .status == "unresolved"))' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=agent-incomplete-invalid
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") |
+  .deployment_visibility.agents.status == "unavailable" and
+  all(.deployments[]; .evidence_type != "agent_module"))' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=agent-incomplete-foreign
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") |
+  .deployment_visibility.agents.status == "unavailable" and
+  all(.deployments[]; .evidence_type != "agent_module"))' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=agent-incomplete-empty
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") |
+  .deployment_visibility.agents.status == "returned" and
+  .deployment_visibility.agents.total_matches_returned_count == false and
+  .deployment_visibility.agents.returned_agent_count == 0 and
+  .deployments[0].type == "unknown" and
+  .deployments[0].evidence == "No recognized deployment evidence")' "$TEST_TMP/json" >/dev/null
+export CUSTOMER_SECURITY_TEST_MODE=agent-overcount
+run_json
+jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") |
+  .deployment_visibility.agents.status == "returned" and
+  .deployment_visibility.agents.total_matches_returned_count == false and
+  any(.deployments[]; .type == "agent_based_unknown" and .evidence_type == "agent_module" and .status == "unresolved"))' "$TEST_TMP/json" >/dev/null
 export CUSTOMER_SECURITY_TEST_MODE=edge-one
 run_json
 jq -e '(.ngwaf.workspaces[] | select(.id == "production") | .deployments[0].type == "edge_waf" and (.deployments[0].evidence | contains("CDN Service")))' "$TEST_TMP/json" >/dev/null
@@ -295,7 +361,12 @@ for mode in zero unknown partial edge-zero edge-unknown edge-config-unavailable 
   case "$mode" in
     zero)
       jq -e 'all(.products[]; .result.status == "COMPLETE" and .result.count == 0) and all(.ngwaf.workspaces[]; .attachment_count == 0)' "$TEST_TMP/json" >/dev/null
-      [[ "$(grep -Fc 'No configured service mappings found.' "$TEST_TMP/human")" == 4 ]] ;;
+      jq -e '.ngwaf.workspace_count == 2 and .summary.ngwaf_service_attachments == 0
+        and .ngwaf.attachment_mapping_result.status == "COMPLETE"
+        and .ngwaf.attachment_mapping_result.completeness_scope == "product_enabled_service_attachments_only"
+        and .ngwaf.attachment_mapping_result.other_deployment_methods_included == false' "$TEST_TMP/json" >/dev/null
+      [[ "$(grep -Fc 'No configured service mappings found.' "$TEST_TMP/human")" == 3 ]]
+      grep -F 'No NGWAF product-enabled service attachments found; other deployment methods may still be present.' "$TEST_TMP/human" >/dev/null ;;
     unknown)
       jq -e 'all(.products[]; .result.status == "UNKNOWN" and .result.count == null and .result.count_lower_bound == null)' "$TEST_TMP/json" >/dev/null
       [[ "$(grep -Fc 'Retrieval was inconclusive (UNKNOWN)' "$TEST_TMP/human")" == 4 ]]
@@ -324,6 +395,56 @@ for mode in zero unknown partial edge-zero edge-unknown edge-config-unavailable 
     workspace-empty) grep -F 'No NGWAF workspaces found in the complete inventory.' "$TEST_TMP/human" >/dev/null ;;
   esac
 done
+
+export CUSTOMER_SECURITY_TEST_MODE=edge-missing-workspace
+run_json
+jq -e '(.products[] | select(.id == "ngwaf") | .result.count == 2)
+  and .summary.ngwaf_service_attachments == 2
+  and .ngwaf.attachment_mapping_result.status == "PARTIAL"
+  and .ngwaf.attachment_mapping_result.configured_attachment_count == 2
+  and .ngwaf.attachment_mapping_result.resolved_mapping_count == 1
+  and .ngwaf.attachment_mapping_result.unresolved_attachments == [{service_id:"cdn",workspace_id:"missing-workspace",reason_codes:["workspace_not_found"]}]
+  and any(.ngwaf.attachments[]; .service_id == "cdn" and .workspace_id == "missing-workspace"
+    and .configuration_status == "RETRIEVED" and .mapping_validation.status == "UNRESOLVED"
+    and (.anomalies | index("workspace_not_found") != null))
+  and (.ngwaf.workspaces[] | select(.id == "production") | .attachment_count == null and .attachment_count_lower_bound == 1)
+  and ([.ngwaf.workspaces[].deployments[] | select(.type == "edge_waf" and .status == "confirmed")] | length) == 1' "$TEST_TMP/json" >/dev/null
+
+# Exercise projection validation against inconsistent synthetic summary rows.
+# The authenticated workspace inventory collector rejects duplicate and foreign
+# rows before projection; these cases must also fail closed if they reach it.
+# shellcheck disable=SC1091
+source "$ROOT/lib/security.sh"
+export CUSTOMER_SECURITY_TEST_MODE=ok
+"$ROOT/fastly-audit" security summary --detailed --json >"$TEST_TMP/mapping-summary" 2>"$TEST_TMP/err"
+jq '.ngwaf.workspaces += [(.ngwaf.workspaces[0] | .name = "Duplicate Production")]
+  | .ngwaf.workspace_count = 3' "$TEST_TMP/mapping-summary" | customer_security_payload_json >"$TEST_TMP/projected"
+jq -e '.ngwaf.attachment_mapping_result.status == "PARTIAL"
+  and .ngwaf.attachment_mapping_result.resolved_mapping_count == 0
+  and all(.ngwaf.attachments[]; .mapping_validation.status == "UNRESOLVED"
+    and .mapping_validation.workspace_match_count == 2
+    and (.mapping_validation.reason_codes | index("ambiguous_workspace_id") != null))' "$TEST_TMP/projected" >/dev/null
+jq '.ngwaf.workspaces[1].workspace_uid = "production"' "$TEST_TMP/mapping-summary" |
+  customer_security_payload_json >"$TEST_TMP/projected"
+jq -e '.ngwaf.attachment_mapping_result.status == "PARTIAL"
+  and all(.ngwaf.attachments[]; .mapping_validation.status == "UNRESOLVED"
+    and (.mapping_validation.reason_codes | index("conflicting_workspace_identifier") != null))' "$TEST_TMP/projected" >/dev/null
+jq '.ngwaf.attachments[0].workspace_id = "unattached"' "$TEST_TMP/mapping-summary" |
+  customer_security_payload_json >"$TEST_TMP/projected"
+jq -e '.ngwaf.attachment_mapping_result.status == "PARTIAL"
+  and any(.ngwaf.attachments[]; .service_id == "cdn" and .workspace_id == "unattached"
+    and .mapping_validation.status == "UNRESOLVED"
+    and (.mapping_validation.reason_codes | index("conflicting_workspace_identifier") != null))' "$TEST_TMP/projected" >/dev/null
+jq '(.products[] | select(.id == "ngwaf") | .services[0].customer_id) = "other-customer"' "$TEST_TMP/mapping-summary" |
+  customer_security_payload_json >"$TEST_TMP/projected"
+jq -e '.ngwaf.attachment_mapping_result.status == "PARTIAL"
+  and any(.ngwaf.attachments[]; .service_id == "cdn" and .mapping_validation.status == "UNRESOLVED"
+    and (.mapping_validation.reason_codes | index("ownership_conflict") != null))' "$TEST_TMP/projected" >/dev/null
+jq '.ngwaf.workspace_inventory_result.status = "PARTIAL"' "$TEST_TMP/mapping-summary" |
+  customer_security_payload_json >"$TEST_TMP/projected"
+jq -e '.ngwaf.attachment_mapping_result.status == "PARTIAL"
+  and all(.ngwaf.attachments[]; .mapping_validation.status == "UNRESOLVED"
+    and (.mapping_validation.reason_codes | index("workspace_inventory_incomplete") != null))' "$TEST_TMP/projected" >/dev/null
 
 for mode in customer-mismatch service-failure workspace-failure workspace-incomplete workspace-mismatch workspace-duplicate; do
   export CUSTOMER_SECURITY_TEST_MODE="$mode"

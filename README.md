@@ -13,6 +13,15 @@ complete `ngwaf` compatibility interface remain supported.
 
 ## Layout
 
+For current commands, selectors, JSON modes, API scope, and source locations,
+see the [CLI command reference](docs/cli-reference.md). For verified fixes,
+open questions, and evidence or performance limits, see the
+[known limitations register](docs/known-limitations.md).
+
+See [NGWAF deployment architecture and resource identity](docs/ngwaf-deployment-architecture.md)
+for the five deployment types, Edge inspection and management methods,
+resource ownership, and the API evidence each relationship requires.
+
 ```text
 ngwaf-helper/
 ├── install.sh             # GitHub Release installer for first-time users
@@ -241,6 +250,71 @@ start and exclusive end. The API documentation does not specify boundary
 inclusion for explicit ranges. `--end` is optional only with `--start`.
 Use `fastly-audit ngwaf timeseries --help` for full command help.
 
+Account `metrics`, `overview`, and `attack-profile` validate each returned
+workspace/day key before summing. They reject malformed or out-of-window daily
+timestamps, duplicate keys, incomplete `meta.total` when supplied, a signaled
+next page, and current workspace inventory name collisions. JSON includes a
+`validation` object with requested and observed interval counts, dates not
+observed for each returned workspace, and inventory workspaces with no rows.
+An unobserved interval is not assigned zero:
+the NGWAF timeseries documentation does not establish whether a zero-traffic day
+must appear as a row. `validation.completeness` therefore remains `unknown`
+even when all requested dates appear. Workspace IDs in account summaries are
+matched to the selected customer's current inventory by display name; this
+cannot establish historical identity across workspace renames.
+The reference describes timestamps as RFC 3339 data-point times but does not
+say whether they mark bucket starts or ends. Calendar-day validation uses the
+midnight bucket-start convention shown in the repository fixtures and labels
+that inference in `validation.timestamp_interpretation`. Equivalent RFC 3339
+offsets and zero fractional seconds are compared as the same UTC instant.
+Account responses observed with rows timestamped exactly at the requested `to`
+boundary exclude those rows from aggregation and count them in
+`validation.excluded_end_boundary_rows`; a warning is printed to stderr.
+Rows before `from` or after `to` still fail. This boundary handling does not
+establish whether Fastly labels buckets by their starts or ends, and totals
+remain uncertified for completeness.
+For `metrics`, add `--diagnose-intervals` to print out-of-window timestamps,
+workspace names, and the requested window to stderr when that check fails.
+This opt-in output contains no credentials, metric values, or response body;
+the command still rejects the response.
+
+For a repeatable complete UTC-day account query, use an explicit window:
+
+```bash
+fastly-audit ngwaf metrics requests_attack \
+  --start 2026-09-16T00:00:00Z --end 2026-10-16T00:00:00Z --json
+```
+
+`metrics` includes every returned workspace. Filter production names with your
+`prd` or `prod` naming convention when preparing a production-only
+report, and review `validation.workspace_intervals` for those workspaces.
+
+`attack-profile` ranks production workspaces using the validated
+`requests_attack` timeseries. It obtains per-signal counts from
+`GET /ngwaf/v1/reports/signals`, whose response lists signal counts by workspace
+ID. The report has no documented `customer_id` parameter, so every reported
+workspace ID and name is checked against the selected customer's inventory.
+For each signal, the top production workspace total is emitted only when
+every selected workspace ID (up to five) appears in that signal's
+`top_workspaces` list.
+An absent signal or workspace is reported with `requests: null` and an
+availability status; it is never assigned zero. Fastly calls this a *top*
+workspace list, so the command does not assume it enumerates every workspace.
+Report workspace entries whose ID and name do not both match the selected
+customer's current inventory are excluded. JSON lists their unique IDs and
+count in `signal_report_diagnostics`, and stderr prints a concise warning.
+The attack-signal totals have no per-day interval metadata; the timeseries
+`validation` object applies to the ranking only.
+Fastly does not document whether the signals report treats `to` as inclusive
+or exclusive. Review this boundary limitation before using its counts in a
+customer-facing period comparison.
+
+For a selected reporting window, save the JSON outside the repository:
+
+```bash
+fa ngwaf attack-profile 2026-01-01 2026-01-30 --json > ~/Desktop/attack-profile.json
+```
+
 Translate a customer-provided NGWAF request-detail URL into the corresponding
 employee navigation URL for the currently selected customer:
 
@@ -350,7 +424,7 @@ Retrieve one workspace rule directly by ID without downloading the complete
 rule collection:
 
 ```bash
-ngwaf rule Production 6047e66c33e0b901e666e36a
+ngwaf rule Production RULE_ID
 ```
 
 The response preserves the rule object at the top level and adds `context` and
@@ -382,8 +456,8 @@ content only; JSON response overhead and HTTP headers are not counted.
 ```bash
 fastly-audit service domains staging-is
 fastly-audit service domains staging-is --version 111 --json
-fastly-audit ngwaf workspace-services gdx-costco-stg-is --sigsci-corp costco --with-domains
-fastly-audit ngwaf workspace-services --all --sigsci-corp costco --with-domains --json
+fastly-audit ngwaf workspace-services WORKSPACE_ID --sigsci-corp examplecorp --with-domains
+fastly-audit ngwaf workspace-services --all --sigsci-corp examplecorp --with-domains --json
 ```
 
 Domain discovery reads `GET /service/{service_id}/version/{version}/domain`
@@ -409,10 +483,10 @@ when otherwise complete mappings have incomplete domain retrieval.
 Observe workspace to CDN service mappings using existing configuration evidence:
 
 ```bash
-fastly-audit ngwaf workspace-services gdx-costco-stg-is --sigsci-corp costco
-fastly-audit ngwaf workspace-services --all --json --sigsci-corp costco
+fastly-audit ngwaf workspace-services WORKSPACE_ID --sigsci-corp examplecorp
+fastly-audit ngwaf workspace-services --all --json --sigsci-corp examplecorp
 CDN_SERVICE_ID='replace-with-exact-CDN-service-ID'
-fastly-audit ngwaf workspace-services --service-id "$CDN_SERVICE_ID" --json --sigsci-corp costco > workspace-services.json
+fastly-audit ngwaf workspace-services --service-id "$CDN_SERVICE_ID" --json --sigsci-corp examplecorp > workspace-services.json
 ```
 
 This reverses confirmed `security legacy-map` generated-VCL evidence and merges
@@ -420,21 +494,24 @@ Edge WAF enabled-product configuration relationships. Each relationship retains
 `mapping_sources` and source-specific evidence. In-band VCL evidence is observed
 deployed configuration, not an authoritative API linkage. No observed mapping
 does not prove absence of linkage. Internal site identity is reconciled to the
-workspace inventory by exact ID or a unique exact workspace name, with the
-internal site ID retained in evidence. Ambiguous or absent workspace identity
-is retained separately and makes coverage incomplete. The workspace-selector
+workspace inventory only by exact ID. A matching display name alone is retained
+as unresolved legacy evidence and makes coverage incomplete. The workspace-selector
 and `--all` forms scan all token-visible CDN services. They use the legacy-map internal
 authentication and corp validation requirements. Incomplete source retrieval or
 unresolved inspections produce PARTIAL/UNKNOWN output and a nonzero exit status;
 JSON includes unresolved services and source provenance.
+`legacy_service_evidence[].status = "CONFIRMED"` confirms the generated-VCL to
+internal-site join; it does not by itself verify the public workspace identity.
 
 `--service-id` selects exactly one CDN/VCL service by ID and cannot be combined
 with a workspace selector or `--all`. It verifies the selected customer's
 metadata and the service's exact ID, customer ID, and VCL type before reading
 its configuration. It requires `FASTLY_API_TOKEN` for public Fastly APIs,
-`FASTLY_DSTOKEN` and `FASTLY_VOUCH_COOKIE` from a legacy Signal Sciences
-dashboard session for the internal site inventory, and `--sigsci-corp CORP`
-or `SIGSCI_CORP`. Every returned site must have a customer ID matching the
+and uses `FASTLY_DSTOKEN` and `FASTLY_VOUCH_COOKIE` from a legacy Signal Sciences
+dashboard session plus `--sigsci-corp CORP` or `SIGSCI_CORP` when querying the
+internal site inventory. Missing legacy credentials leave that evidence
+unavailable; they do not prevent a verified enabled-product mapping. Every
+returned site must have a customer ID matching the
 selected Fastly customer; Inspection Service ownership is also checked before
 its metadata can confirm a mapping. JSON includes `selected_service`, `customer_id`,
 `legacy_service_evidence`, mapped `workspaces[].services[]` with
@@ -467,7 +544,7 @@ takes six plus one request per unique internal site `serviceID`: customer,
 selected service, generated VCL, internal sites, product probe, workspace
 inventory, and the direct Inspection Service lookups. Additional workspace
 pages add requests. These counts describe the current mocked call path; they
-are not live Costco measurements.
+are not live customer measurements.
 
 JSON uses `in_band_vcl_evidence` in mapping source values and the provenance key,
 and `summary.in_band_vcl_evidence_relationships` for the evidence count. These
@@ -554,19 +631,38 @@ Workspace attachment counts become unknown or lower bounds when mapping evidence
 is incomplete. Conclusively empty product inventories are distinguished from
 `UNKNOWN` or `PARTIAL` retrieval.
 
+`ngwaf.attachment_mapping_result.status` applies only to NGWAF product-enabled
+service attachments. `COMPLETE` means that product inventory was retrieved and
+each returned service's configured `workspace_id` resolved uniquely in the
+selected-customer workspace inventory. An empty product-enable result can be
+`COMPLETE` within that scope while other deployment methods remain unverified.
+The product-enable attachment counts are preserved even when a workspace join
+fails. In that case, `ngwaf.attachments[]` retains the configured ID and reports
+`mapping_validation.status: UNRESOLVED` with reason codes; workspace attachment counts
+become lower bounds and the unresolved link cannot confirm an Edge deployment.
+
 `NGWAF DEPLOYMENTS` reports architecture per workspace; a customer or workspace
 may have multiple methods. Edge WAF service links and verified Cloud WAF
-instance associations are `CONFIRMED`; a detected web server module is
-`INFERRED` as On-Prem module-agent; an agent without a detected module and
-workspaces without recognizable evidence remain `UNRESOLVED`. Agent telemetry
-alone does not distinguish reverse proxy, PaaS, A10, or Cloud WAF. Zero Edge WAF
+instance associations are `CONFIRMED`. Agents with or without a reported module
+remain `agent_based_unknown / UNRESOLVED` until architecture is independently
+verified. In particular, `sigsci-agent-revproxy` does not by itself establish
+customer-managed On-Prem deployment. Zero Edge WAF
 attachments do not mean no NGWAF deployment. JSON exposes stable deployment
 records in `ngwaf.workspaces[].deployments[]` and source visibility separately.
+Agents probes include the selected `customer_id`; failed or empty results remain
+separate from workspace existence and service attachment evidence.
+For a valid Agents response, `returned_agent_count` and the API's `reported_total`
+are shown separately, with `total_matches_returned_count`. Their relationship
+does not establish whether the list is complete because the published Agents
+API does not define the meaning of `meta.total`. Returned records can support
+positive agent or module observations; an empty array cannot prove absence.
+Invalid records or conflicting workspace IDs remain unavailable.
 
 JSON uses schema version 1 with `command: "customer security"`, retaining the
 existing security-summary product, result, inventory-section, and provenance
-structures. It projects the configuration facts without reconciliation findings
-or anomaly classifications. JSON goes to stdout; diagnostics and progress go
+structures. It omits detailed reconciliation findings but retains mapping
+anomalies on configured attachments and an unresolved-attachment summary. JSON
+goes to stdout; diagnostics and progress go
 to stderr. Help (`help`, `-h`, or `--help`) works without credentials or customer
 selection. The report requires the existing token and selected customer.
 
@@ -586,9 +682,14 @@ fastly-audit ngwaf agent-diagnostic 'EXACT_WORKSPACE_ID' --json
 
 The argument must exactly match an `id` from the selected customer's NGWAF
 workspace inventory. The diagnostic retrieves the customer-scoped inventory,
-then `GET /ngwaf/v1/workspaces/{workspace_id}`. It validates that the detail
-record matches the selected customer and inventory before making exactly one
-`GET /ngwaf/v1/workspaces/{workspace_id}/agents` request with the detail `id`.
+then `GET /ngwaf/v1/workspaces/{workspace_id}?customer_id=...`. A verified
+detail record supplies the ID for exactly one
+`GET /ngwaf/v1/workspaces/{workspace_id}/agents?customer_id=...` request.
+If detail returns HTTP 404 `Site not found`, the diagnostic uses the exact ID
+from the validated selected-customer inventory and still reports the detail
+failure. Both the diagnostic and `customer security` use
+the selected `customer_id` for Agents requests. A successful empty response
+does not establish that a workspace has no NGWAF deployment.
 It does not try `workspace_uid`, legacy site names, or legacy APIs. The JSON
 reports both identifier sets, the attempted path, HTTP status, a limited
 sanitized error, and whether returned agent records explicitly reference the
@@ -597,9 +698,10 @@ remains unverifiable; it does not prove no agents or deployment. Agent host
 telemetry and authentication headers are omitted. The command runs only when
 invoked explicitly and does not alter `customer security` detection.
 
-If workspace detail returns an HTTP error, the diagnostic exits nonzero with
-`status: "blocked"`. `workspace_detail_request` reports the exact GET URL and
-path (without query parameters or headers), HTTP status, sanitized `api_error`
+If workspace detail fails for another reason, or returns conflicting identity
+or ownership metadata, the diagnostic exits nonzero with `status: "blocked"`.
+`workspace_detail_request` reports the GET URL including
+the selected-customer query parameter, path, HTTP status, sanitized `api_error`
 fields, and `error_body_format`. Its `status: "lookup_failed"` is distinct from
 `identifier_mismatch`, `workspace_uid_mismatch`, or `ownership_mismatch` after a
 successful detail response. Malformed error bodies are labeled `invalid_json`
@@ -663,9 +765,9 @@ Inspection Services and internal NGWAF workspaces:
 
 ```bash
 fastly-audit security legacy-map
-fastly-audit security legacy-map prd-usbcwww
-fastly-audit security legacy-map prd-usbcwww --format json
-fastly-audit security legacy-map prod-is --sigsci-corp costco
+fastly-audit security legacy-map example-cdn-service
+fastly-audit security legacy-map example-cdn-service --format json
+fastly-audit security legacy-map example-cdn-service --sigsci-corp examplecorp
 fastly-audit security legacy-map --format csv --output legacy-map.csv
 ```
 
@@ -715,7 +817,8 @@ detection.
 | Command family | Primary source | Data class | Important interpretation |
 |---|---|---|---|
 | `workspace`, `rule`, `rules`, `thresholds`, `lists`, `posture` | NGWAF configuration APIs | Point-in-time configuration | Single-rule responses are identity-checked; paginated collections complete or fail; rule summaries do not simulate rule precedence. |
-| `overview`, `timeseries`, `metrics`, `attack-profile` | NGWAF timeseries API | Aggregated timeseries | Uses complete UTC days; `to` is exclusive; every requested metric must be present and numeric in every returned row. |
+| `overview`, `timeseries`, `metrics` | NGWAF timeseries API | Aggregated timeseries | Uses complete UTC days; `to` is exclusive; every requested metric must be present and numeric in every returned row. |
+| `attack-profile` | NGWAF timeseries and signals report APIs | Attack ranking and explicitly reported per-workspace signal counts | Timeseries ranking retains interval validation. Missing report signal or workspace counts are unavailable, not zero. |
 | `count`, `signal-count`, `requests` | NGWAF request-search API | Retained searchable request records | Uses a rolling window ending five minutes before execution; `meta.total` may reflect sampled or mixed-storage records and is not raw traffic. `requests` returns a bounded set of actual rows separately from the total cohort size. |
 | `rule-audit` | NGWAF rule API plus request-search API | Rule configuration plus retained-search cohort counts | Retrieves live rule configuration, counts `ruleid:<id>` and selected `ruleid:<id> tag:<signal>` intersections over one shared rolling window, and emits deterministic review indicators without treating overlapping signal cohorts as additive. |
 | `template-audit` | NGWAF rules, signal thresholds, and request-search APIs | Templated signal configuration plus retained-search count | Correlates `templated_signal` tagging rules and signal thresholds into one logical control, counts retained `tag:<signal>` matches, and emits conservative review indicators without declaring remediation. |
@@ -766,7 +869,7 @@ Retrieve actual retained request-search rows for a bounded cohort:
 
 ```bash
 fastly-audit ngwaf requests production \
-  'ruleid:6047e66c33e0b901e666e368 tag:SQLI' 7 --limit 25
+  'ruleid:RULE_ID tag:SQLI' 7 --limit 25
 ```
 
 The command uses the same workspace resolution, `rule:` to `ruleid:`
@@ -805,7 +908,7 @@ Automate the manual rule-analysis workflow for one or more rule IDs:
 
 ```bash
 fastly-audit ngwaf rule-audit production \
-  6047e66c33e0b901e666e368 \
+  RULE_ID \
   --days 7
 ```
 

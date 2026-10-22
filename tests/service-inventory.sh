@@ -165,6 +165,23 @@ jq -e '
   )
 ' >/dev/null <<<"$products"
 
+for route in list products inventory; do
+  NGWAF_PROGRESS=always "$ROOT/fastly-audit" service "$route" --json \
+    >"$TEST_TMP/progress-json" 2>"$TEST_TMP/progress-err"
+  jq -e 'type == "object"' "$TEST_TMP/progress-json" >/dev/null
+  grep -F 'Starting ' "$TEST_TMP/progress-err" >/dev/null
+  grep -F 'Services retrieved: 3' "$TEST_TMP/progress-err" >/dev/null
+  grep -F 'Completed successfully' "$TEST_TMP/progress-err" >/dev/null
+done
+grep -F 'Product checks: 11/11' "$TEST_TMP/progress-err" >/dev/null
+NGWAF_PROGRESS=always "$ROOT/fastly-audit" inventory --json \
+  >"$TEST_TMP/progress-json" 2>"$TEST_TMP/progress-err"
+jq -e '.edge_services.total == 3' "$TEST_TMP/progress-json" >/dev/null
+grep -F 'Workspaces discovered: 0' "$TEST_TMP/progress-err" >/dev/null
+NGWAF_PROGRESS=always "$ROOT/fastly-audit" service list --json 2>"$TEST_TMP/pipeline-err" |
+  jq -e '.summary.total == 3' >/dev/null
+grep -F 'Completed successfully' "$TEST_TMP/pipeline-err" >/dev/null
+
 security="$("$ROOT/fastly-audit" security summary --json 2>"$TEST_TMP/security-err")"
 jq -e --argjson inventory "$inventory" '
   .summary.token_visible_customer_services == $inventory.edge_services.total
@@ -173,11 +190,15 @@ jq -e --argjson inventory "$inventory" '
 ' >/dev/null <<<"$security"
 
 export FASTLY_TEST_SERVICE_INVENTORY_MODE=service-api-error
-if "$ROOT/fastly-audit" service inventory --json >"$TEST_TMP/service-api-error-out" 2>"$TEST_TMP/service-api-error-err"; then
+if NGWAF_PROGRESS=always "$ROOT/fastly-audit" service inventory --json >"$TEST_TMP/service-api-error-out" 2>"$TEST_TMP/service-api-error-err"; then
   printf 'service inventory test: service API error unexpectedly succeeded\n' >&2
   exit 1
 fi
 grep -F 'Service inventory unavailable: GET /service returned HTTP 503' "$TEST_TMP/service-api-error-err" >/dev/null
+grep -F 'Failed:' "$TEST_TMP/service-api-error-err" >/dev/null
+if grep -F 'Completed successfully' "$TEST_TMP/service-api-error-err" >/dev/null; then
+  printf 'service inventory test: progress reported success after HTTP failure\n' >&2; exit 1
+fi
 
 export FASTLY_TEST_SERVICE_INVENTORY_MODE=service-malformed
 if "$ROOT/fastly-audit" service inventory --json >"$TEST_TMP/service-malformed-out" 2>"$TEST_TMP/service-malformed-err"; then

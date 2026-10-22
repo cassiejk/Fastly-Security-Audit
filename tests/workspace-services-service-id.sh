@@ -35,33 +35,77 @@ case "$url" in
     case "$mode" in
       enabled|no-map) printf '%s\n' '{"content":"sub vcl_recv { return(pass); }"}' >"$outfile" ;;
       vcl-unavailable) status=503; printf '%s\n' '{"error":"unavailable"}' >"$outfile" ;;
-      *) printf '%s\n' '{"content":"set req.http.X-Inspection = \"se--costco--prod.edgecompute.app\";"}' >"$outfile" ;;
+      *) printf '%s\n' '{"content":"set req.http.X-Inspection = \"se--examplecorp--prod.edgecompute.app\";"}' >"$outfile" ;;
     esac ;;
-  */v0/corps/costco/sites)
-    if [[ "$mode" == sites-unavailable ]]; then
+  */v0/corps/examplecorp/sites)
+    if [[ "$mode" == unrelated-inspection-failure ]]; then
+      printf '%s\n' '{"data":[{"id":"workspace-main","name":"Primary Workspace","customer_id":"test-customer","serviceID":"inspection-target"},{"id":"workspace-other","name":"Other Workspace","customer_id":"test-customer","serviceID":"inspection-unrelated"}]}' >"$outfile"
+    elif [[ "$mode" == sites-denied ]]; then
+      status=403; printf '%s\n' '{"error":"access denied"}' >"$outfile"
+    elif [[ "$mode" == sites-unavailable ]]; then
       status=503; printf '%s\n' '{"error":"unavailable"}' >"$outfile"
     elif [[ "$mode" == sites-foreign ]]; then
       printf '%s\n' '{"data":[{"id":"internal-site","name":"Production Workspace","customer_id":"other-customer","serviceID":"inspection-target"}]}' >"$outfile"
     elif [[ "$mode" == sites-missing-customer ]]; then
       printf '%s\n' '{"data":[{"id":"internal-site","name":"Production Workspace","customer_id":"test-customer","serviceID":"inspection-target"},{"id":"unverified-site","name":"Unverified Workspace","serviceID":"other-inspection"}]}' >"$outfile"
-    else
+    elif [[ "$mode" == sites-empty-customer ]]; then
+      printf '%s\n' '{"data":[{"id":"workspace-main","name":"Production Workspace","customer_id":"test-customer","serviceID":"inspection-target"},{"id":"unverified-site","name":"Unverified Workspace","customer_id":"","serviceID":"other-inspection"}]}' >"$outfile"
+    elif [[ "$mode" == name-only || "$mode" == ambiguous ]]; then
       printf '%s\n' '{"data":[{"id":"internal-site","name":"Production Workspace","customer_id":"test-customer","serviceID":"inspection-target"}]}' >"$outfile"
+    else
+      printf '%s\n' '{"data":[{"id":"workspace-main","name":"Production Workspace","customer_id":"test-customer","serviceID":"inspection-target"}]}' >"$outfile"
     fi ;;
   */service/inspection-target)
-    if [[ "$mode" == inspection-foreign ]]; then
-      printf '%s\n' '{"id":"inspection-target","name":"se--costco--prod","type":"wasm","customer_id":"other-customer"}' >"$outfile"
+    if [[ "$mode" == inspection-network ]]; then
+      printf '%s\n' 'sensitive-marker transport detail' >&2
+      exit 6
+    elif [[ "$mode" == inspection-malformed ]]; then
+      printf '%s\n' 'not-json' >"$outfile"
+    elif [[ "$mode" == inspection-unexpected ]]; then
+      printf '%s\n' '{"other":"response"}' >"$outfile"
+    elif [[ "$mode" == inspection-id-mismatch ]]; then
+      printf '%s\n' '{"id":"different-inspection","name":"se--examplecorp--prod","type":"wasm","customer_id":"test-customer"}' >"$outfile"
+    elif [[ "$mode" == inspection-denied ]]; then
+      status=403; printf '%s\n' '{"title":"Forbidden"}' >"$outfile"
+    elif [[ "$mode" == inspection-unavailable || "$mode" == both-inspection-failure ]]; then
+      status=404; printf '%s\n' '{"error":"not found"}' >"$outfile"
+    elif [[ "$mode" == inspection-foreign ]]; then
+      printf '%s\n' '{"id":"inspection-target","name":"se--examplecorp--prod","type":"wasm","customer_id":"other-customer"}' >"$outfile"
+    elif [[ "$mode" == inspection-missing ]]; then
+      printf '%s\n' '{"id":"inspection-target","name":"se--examplecorp--prod","type":"wasm"}' >"$outfile"
+    elif [[ "$mode" == inspection-empty ]]; then
+      printf '%s\n' '{"id":"inspection-target","name":"se--examplecorp--prod","type":"wasm","customer_id":""}' >"$outfile"
     else
-      printf '%s\n' '{"id":"inspection-target","name":"se--costco--prod","type":"wasm","customer_id":"test-customer"}' >"$outfile"
+      printf '%s\n' '{"id":"inspection-target","name":"se--examplecorp--prod","type":"wasm","customer_id":"test-customer"}' >"$outfile"
     fi ;;
+  */service/inspection-unrelated)
+    status=403; printf '%s\n' '{"title":"Forbidden","detail":"sensitive-marker.example"}' >"$outfile" ;;
+  */service/other-inspection)
+    printf '%s\n' '{"id":"other-inspection","name":"unrelated-inspection","type":"wasm","customer_id":"test-customer"}' >"$outfile" ;;
   */enabled-products/v1/ngwaf/services/cdn-target/configuration)
-    if [[ "$mode" == conflict ]]; then
+    if [[ "$mode" == config-denied ]]; then
+      status=403; printf '%s\n' '{"title":"Forbidden","detail":"sensitive-marker.example"}' >"$outfile"
+    elif [[ "$mode" == config-owner-mismatch ]]; then
+      printf '%s\n' '{"customer_id":"other-customer","configuration":{"workspace_id":"workspace-main"}}' >"$outfile"
+    elif [[ "$mode" == config-id-mismatch ]]; then
+      printf '%s\n' '{"service_id":"other-service","configuration":{"workspace_id":"workspace-main"}}' >"$outfile"
+    elif [[ "$mode" == conflict ]]; then
       printf '%s\n' '{"configuration":{"workspace_id":"workspace-other"}}' >"$outfile"
     else
       printf '%s\n' '{"configuration":{"workspace_id":"workspace-main"}}' >"$outfile"
     fi ;;
   */enabled-products/v1/ngwaf/services/cdn-target)
     case "$mode" in
-      enabled|both|conflict) printf '%s\n' '{}' >"$outfile" ;;
+      enabled|both|conflict|both-inspection-failure|config-denied|config-owner-mismatch|config-id-mismatch) printf '%s\n' '{}' >"$outfile" ;;
+      product-recognized-400) status=400; printf '%s\n' '{"title":"The request is not valid","detail":"Site not found"}' >"$outfile" ;;
+      product-sensitive-400) status=400; printf '%s\n' '{"title":"Unexpected","detail":"sensitive-marker.example token=sensitive-marker"}' >"$outfile" ;;
+      product-bad-request) status=400; printf '%s\n' '{"error":"bad request"}' >"$outfile" ;;
+      product-denied) status=403; printf '%s\n' '{"error":"access denied"}' >"$outfile" ;;
+      product-network) printf '%s\n' 'sensitive-marker transport detail' >&2; exit 6 ;;
+      product-malformed) printf '%s\n' 'not-json' >"$outfile" ;;
+      product-unexpected) printf '%s\n' '[]' >"$outfile" ;;
+      product-id-mismatch) printf '%s\n' '{"service_id":"different-service"}' >"$outfile" ;;
+      product-owner-mismatch) printf '%s\n' '{"customer_id":"other-customer"}' >"$outfile" ;;
       product-unavailable) status=503; printf '%s\n' '{"error":"unavailable"}' >"$outfile" ;;
       *) status=404; printf '%s\n' '{"error":"not found"}' >"$outfile" ;;
     esac ;;
@@ -100,7 +144,7 @@ assert_scoped_requests() {
 run_case() {
   export SERVICE_SCOPED_MODE="$1"
   : >"$SERVICE_SCOPED_CURL_LOG"
-  if "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp costco >"$TEST_TMP/result.json" 2>"$TEST_TMP/err"; then
+  if "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp examplecorp >"$TEST_TMP/result.json" 2>"$TEST_TMP/err"; then
     [[ "$2" == success ]] || fail "$1 unexpectedly succeeded"
   else
     [[ "$2" == failure ]] || { cat "$TEST_TMP/err" >&2; fail "$1 unexpectedly failed"; }
@@ -110,10 +154,12 @@ run_case() {
 }
 
 run_case legacy success
-jq -e '.status == "COMPLETE" and .relationship_status == "MAPPED" and .selected_service.active_version == 7 and .workspaces[0].workspace_id == "workspace-main" and .workspaces[0].services[0].mapping_sources == ["in_band_vcl_evidence"] and .workspaces[0].services[0].mapping_evidence[0].evidence.internal_site_id == "internal-site" and .workspaces[0].services[0].mapping_evidence[0].evidence.workspace_resolution == "unique_exact_workspace_name"' "$TEST_TMP/result.json" >/dev/null
+jq -e '.status == "COMPLETE" and .relationship_status == "MAPPED" and .selected_service.active_version == 7 and .workspaces[0].workspace_id == "workspace-main" and .workspaces[0].services[0].mapping_sources == ["in_band_vcl_evidence"] and .workspaces[0].services[0].mapping_evidence[0].evidence.internal_site_id == "workspace-main" and .workspaces[0].services[0].mapping_evidence[0].evidence.workspace_resolution == "exact_id"' "$TEST_TMP/result.json" >/dev/null
 [[ "$(rg -c '/generated_vcl$' "$SERVICE_SCOPED_CURL_LOG")" == 1 ]] || fail 'generated VCL fetched more than once'
 [[ "$(rg -c '/service/inspection-target$' "$SERVICE_SCOPED_CURL_LOG")" == 1 ]] || fail 'Inspection Service fetched more than once'
 [[ "$(wc -l <"$SERVICE_SCOPED_CURL_LOG" | tr -d ' ')" == 7 ]] || fail 'legacy mapping made an unexpected number of API requests'
+run_case name-only failure
+jq -e '.status == "PARTIAL" and .relationship_status == "UNRESOLVED" and (.workspaces | length) == 0 and .unmatched_workspace_relationships[0].mapping_evidence.workspace_resolution == "UNRESOLVED" and .legacy_service_evidence[0].status == "CONFIRMED"' "$TEST_TMP/result.json" >/dev/null
 run_case enabled success
 jq -e '.status == "COMPLETE" and .relationship_status == "MAPPED" and .workspaces[0].services[0].mapping_sources == ["enabled_product_api"] and .legacy_service_evidence[0].status == "NOT_FOUND"' "$TEST_TMP/result.json" >/dev/null
 ! rg -q '/v0/corps/|/service/inspection-target$' "$SERVICE_SCOPED_CURL_LOG" || fail 'site inventory fetched without an in-band hostname'
@@ -124,6 +170,7 @@ run_case conflict failure
 jq -e '.status == "PARTIAL" and .relationship_status == "CONFLICTING" and .mapping_conflicts[0].type == "source_workspace_disagreement" and (.workspaces | length) == 2' "$TEST_TMP/result.json" >/dev/null
 run_case no-map success
 jq -e '.status == "COMPLETE" and .relationship_status == "NO_OBSERVED_MAPPING" and (.workspaces | length) == 0 and .provenance.workspace_inventory.requested == false and (.limitations[0] | contains("does not prove"))' "$TEST_TMP/result.json" >/dev/null
+jq -e '.provenance.enabled_product_api.failure == {endpoint:"GET /enabled-products/v1/ngwaf/services/{service_id}",http_status:404,transport_failure_category:null,response_format:"json_object",api_error_category:"unrecognized",failure_kind:"http_status"}' "$TEST_TMP/result.json" >/dev/null
 ! rg -q '/ngwaf/v1/workspaces$|/v0/corps/' "$SERVICE_SCOPED_CURL_LOG" || fail 'unneeded shared inventory fetched for no mapping'
 [[ "$(wc -l <"$SERVICE_SCOPED_CURL_LOG" | tr -d ' ')" == 4 ]] || fail 'no-mapping case made an unexpected number of API requests'
 run_case ambiguous failure
@@ -136,40 +183,108 @@ jq -e '.status == "UNKNOWN" and .relationship_status == "UNRESOLVED" and .proven
 run_case vcl-unavailable failure
 jq -e '.status == "PARTIAL" and .legacy_service_evidence[0].status == "UNKNOWN" and .relationship_status == "UNRESOLVED"' "$TEST_TMP/result.json" >/dev/null
 run_case product-unavailable failure
-jq -e '.status == "UNKNOWN" and .provenance.enabled_product_api.http_status == "503"' "$TEST_TMP/result.json" >/dev/null
+jq -e '.status == "PARTIAL" and .relationship_status == "MAPPED" and .provenance.enabled_product_api.http_status == "503"' "$TEST_TMP/result.json" >/dev/null
+run_case product-bad-request failure
+jq -e '.status == "PARTIAL" and .relationship_status == "MAPPED" and .provenance.enabled_product_api.http_status == "400"' "$TEST_TMP/result.json" >/dev/null
+run_case product-recognized-400 failure
+jq -e '.provenance.enabled_product_api.failure == {endpoint:"GET /enabled-products/v1/ngwaf/services/{service_id}",http_status:400,transport_failure_category:null,response_format:"json_object",api_error_category:"site_not_found",failure_kind:"http_status"}' "$TEST_TMP/result.json" >/dev/null
+run_case product-sensitive-400 failure
+jq -e '.provenance.enabled_product_api.failure.api_error_category == "unrecognized" and .provenance.enabled_product_api.failure.response_format == "json_object"' "$TEST_TMP/result.json" >/dev/null
+! rg -q 'sensitive-marker' "$TEST_TMP/result.json" "$TEST_TMP/err" || fail 'sensitive product error text leaked'
+run_case product-denied failure
+jq -e '.status == "PARTIAL" and .relationship_status == "MAPPED" and .provenance.enabled_product_api.failure.http_status == 403' "$TEST_TMP/result.json" >/dev/null
+run_case product-network failure
+jq -e '.provenance.enabled_product_api.failure.http_status == null and .provenance.enabled_product_api.failure.transport_failure_category == "no_http_response" and .provenance.enabled_product_api.failure.failure_kind == "transport_failure"' "$TEST_TMP/result.json" >/dev/null
+! rg -q 'sensitive-marker' "$TEST_TMP/result.json" "$TEST_TMP/err" || fail 'product transport detail leaked'
+run_case product-malformed failure
+jq -e '.provenance.enabled_product_api.failure.http_status == 200 and .provenance.enabled_product_api.failure.response_format == "invalid_json" and .provenance.enabled_product_api.failure.failure_kind == "malformed_response"' "$TEST_TMP/result.json" >/dev/null
+run_case product-unexpected failure
+jq -e '.provenance.enabled_product_api.failure.http_status == 200 and .provenance.enabled_product_api.failure.response_format == "other_json" and .provenance.enabled_product_api.failure.failure_kind == "unexpected_schema"' "$TEST_TMP/result.json" >/dev/null
+run_case product-id-mismatch failure
+jq -e '.provenance.enabled_product_api.failure.failure_kind == "identity_mismatch"' "$TEST_TMP/result.json" >/dev/null
+run_case product-owner-mismatch failure
+jq -e '.provenance.enabled_product_api.failure.failure_kind == "ownership_mismatch"' "$TEST_TMP/result.json" >/dev/null
+run_case config-denied failure
+jq -e '.provenance.enabled_product_api.configuration.failure == {endpoint:"GET /enabled-products/v1/ngwaf/services/{service_id}/configuration",http_status:403,transport_failure_category:null,response_format:"json_object",api_error_category:"access_denied",failure_kind:"http_status"}' "$TEST_TMP/result.json" >/dev/null
+! rg -q 'sensitive-marker' "$TEST_TMP/result.json" "$TEST_TMP/err" || fail 'sensitive configuration error text leaked'
+run_case config-owner-mismatch failure
+jq -e '.provenance.enabled_product_api.configuration.failure.failure_kind == "ownership_mismatch" and .provenance.enabled_product_api.configuration.failure.http_status == 200' "$TEST_TMP/result.json" >/dev/null
+run_case config-id-mismatch failure
+jq -e '.provenance.enabled_product_api.configuration.failure.failure_kind == "identity_mismatch" and .provenance.enabled_product_api.configuration.failure.http_status == 200' "$TEST_TMP/result.json" >/dev/null
+run_case sites-denied failure
+jq -e '.status == "UNKNOWN" and .relationship_status == "UNRESOLVED" and .provenance.in_band_vcl_evidence.internal_ngwaf_sites.internal_ngwaf_http_status == 403' "$TEST_TMP/result.json" >/dev/null
+run_case inspection-unavailable failure
+jq -e '.status == "PARTIAL" and .relationship_status == "UNRESOLVED" and .unresolved_services[0].lookup_failures[0].reason == "Fastly direct Inspection Service lookup failed: HTTP 404" and .unresolved_services[0].lookup_failures[0].failure.http_status == 404 and .inspection_service_lookup_failures[0].service_id == "inspection-target"' "$TEST_TMP/result.json" >/dev/null
+run_case inspection-denied failure
+jq -e '.inspection_service_lookup_failures[0].failure.http_status == 403 and .inspection_service_lookup_failures[0].failure.api_error_category == "access_denied"' "$TEST_TMP/result.json" >/dev/null
+run_case inspection-network failure
+jq -e '.inspection_service_lookup_failures[0].failure.http_status == null and .inspection_service_lookup_failures[0].failure.transport_failure_category == "no_http_response"' "$TEST_TMP/result.json" >/dev/null
+! rg -q 'sensitive-marker' "$TEST_TMP/result.json" "$TEST_TMP/err" || fail 'inspection transport detail leaked'
+run_case inspection-malformed failure
+jq -e '.inspection_service_lookup_failures[0].failure.http_status == 200 and .inspection_service_lookup_failures[0].failure.response_format == "invalid_json" and .inspection_service_lookup_failures[0].failure.failure_kind == "malformed_response"' "$TEST_TMP/result.json" >/dev/null
+run_case inspection-unexpected failure
+jq -e '.inspection_service_lookup_failures[0].failure.failure_kind == "unexpected_schema" and .inspection_service_lookup_failures[0].failure.response_format == "json_object"' "$TEST_TMP/result.json" >/dev/null
+run_case inspection-id-mismatch failure
+jq -e '.inspection_service_lookup_failures[0].failure.failure_kind == "identity_mismatch" and (.workspaces | length) == 0' "$TEST_TMP/result.json" >/dev/null
 run_case inspection-foreign failure
-jq -e '.status == "PARTIAL" and .relationship_status == "UNRESOLVED" and .unresolved_services[0].lookup_failures[0].reason == "Inspection Service customer ownership could not be verified" and (.workspaces | length) == 0' "$TEST_TMP/result.json" >/dev/null
+jq -e '.status == "PARTIAL" and .relationship_status == "UNRESOLVED" and .unresolved_services[0].lookup_failures[0].reason == "Inspection Service customer ownership could not be verified" and .inspection_service_lookup_failures[0].failure.failure_kind == "ownership_mismatch" and .inspection_service_lookup_failures[0].failure.http_status == 200 and (.workspaces | length) == 0' "$TEST_TMP/result.json" >/dev/null
+run_case inspection-missing failure
+jq -e '.relationship_status == "UNRESOLVED" and .inspection_service_lookup_failures[0].failure.failure_kind == "ownership_unverified" and (.workspaces | length) == 0' "$TEST_TMP/result.json" >/dev/null
+run_case inspection-empty failure
+jq -e '.relationship_status == "UNRESOLVED" and .inspection_service_lookup_failures[0].failure.failure_kind == "ownership_unverified" and (.workspaces | length) == 0' "$TEST_TMP/result.json" >/dev/null
+run_case unrelated-inspection-failure success
+jq -e '.status == "COMPLETE" and .relationship_status == "MAPPED" and .workspaces[0].workspace_id == "workspace-main" and .inspection_service_lookup_failures == [{service_id:"inspection-unrelated",status:"UNKNOWN",reason:"Fastly direct Inspection Service lookup failed: HTTP 403",failure:{endpoint:"GET /service/{serviceID}",http_status:403,transport_failure_category:null,response_format:"json_object",api_error_category:"access_denied",failure_kind:"http_status"}}]' "$TEST_TMP/result.json" >/dev/null
+! rg -q 'sensitive-marker' "$TEST_TMP/result.json" "$TEST_TMP/err" || fail 'unrelated inspection error text leaked'
+run_case both-inspection-failure failure
+jq -e '.status == "PARTIAL" and .relationship_status == "MAPPED" and .workspaces[0].services[0].mapping_sources == ["enabled_product_api"] and .inspection_service_lookup_failures[0].failure.http_status == 404' "$TEST_TMP/result.json" >/dev/null
 : >"$SERVICE_SCOPED_CURL_LOG"
 SERVICE_SCOPED_MODE=workspaces-unavailable
-if "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp costco >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'unavailable workspace inventory accepted'; fi
+if "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp examplecorp >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'unavailable workspace inventory accepted'; fi
 [[ ! -s "$TEST_TMP/out" ]] || fail 'unverified workspace inventory emitted a mapping'
 rg -q 'workspace inventory unavailable; cannot verify the selected service mapping' "$TEST_TMP/err" || fail 'workspace failure lacked diagnostic'
 
 : >"$SERVICE_SCOPED_CURL_LOG"
-if "$ROOT/fastly-audit" ngwaf workspace-services --service-id 'cdn*' --json --sigsci-corp costco >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'invalid ID accepted'; fi
+if "$ROOT/fastly-audit" ngwaf workspace-services --service-id 'cdn*' --json --sigsci-corp examplecorp >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'invalid ID accepted'; fi
 ! rg -q '/service/|/generated_vcl|/v0/corps/' "$SERVICE_SCOPED_CURL_LOG" || fail 'invalid ID reached service configuration'
 for args in '--all --service-id cdn-target' 'workspace-main --service-id cdn-target' '--service-id cdn-target --service-id cdn-target'; do
   read -r -a fields <<<"$args"
-  if "$ROOT/fastly-audit" ngwaf workspace-services "${fields[@]}" --json --sigsci-corp costco >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'incompatible selectors accepted'; fi
+  if "$ROOT/fastly-audit" ngwaf workspace-services "${fields[@]}" --json --sigsci-corp examplecorp >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'incompatible selectors accepted'; fi
 done
 : >"$SERVICE_SCOPED_CURL_LOG"
 SERVICE_SCOPED_MODE=foreign
-if "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp costco >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'foreign service accepted'; fi
+if "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp examplecorp >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'foreign service accepted'; fi
 [[ ! -s "$TEST_TMP/out" ]] || fail 'foreign service emitted a mapping'
 ! rg -q '/generated_vcl|/v0/corps/|/enabled-products/' "$SERVICE_SCOPED_CURL_LOG" || fail 'foreign service configuration was retrieved'
 : >"$SERVICE_SCOPED_CURL_LOG"
-if (unset FASTLY_DSTOKEN; "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp costco) >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'missing legacy credentials accepted'; fi
-[[ ! -s "$TEST_TMP/out" ]] || fail 'missing credentials emitted mapping'
-! rg -q '/service/|/generated_vcl|/v0/corps/' "$SERVICE_SCOPED_CURL_LOG" || fail 'missing credentials reached collection'
+SERVICE_SCOPED_MODE=legacy
+if (unset FASTLY_DSTOKEN; "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp examplecorp) >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'unavailable legacy evidence unexpectedly completed'; fi
+jq -e '.status == "UNKNOWN" and .relationship_status == "UNRESOLVED" and .provenance.in_band_vcl_evidence.internal_ngwaf_sites.status == "UNKNOWN" and (.workspaces | length) == 0' "$TEST_TMP/out" >/dev/null
+! rg -q '/v0/corps/|/service/inspection-target$' "$SERVICE_SCOPED_CURL_LOG" || fail 'missing credentials reached legacy APIs'
+: >"$SERVICE_SCOPED_CURL_LOG"
+SERVICE_SCOPED_MODE=enabled
+(unset FASTLY_DSTOKEN FASTLY_VOUCH_COOKIE; "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp examplecorp) >"$TEST_TMP/out" 2>"$TEST_TMP/err" || fail 'verified product attachment required legacy credentials'
+jq -e '.status == "COMPLETE" and .relationship_status == "MAPPED" and .workspaces[0].services[0].mapping_sources == ["enabled_product_api"]' "$TEST_TMP/out" >/dev/null
+! rg -q '/v0/corps/|/service/inspection-target$' "$SERVICE_SCOPED_CURL_LOG" || fail 'product attachment probed legacy APIs'
+: >"$SERVICE_SCOPED_CURL_LOG"
+(unset FASTLY_DSTOKEN FASTLY_VOUCH_COOKIE SIGSCI_CORP; "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json) >"$TEST_TMP/out" 2>"$TEST_TMP/err" || fail 'verified product attachment required a corporation selector'
+jq -e '.status == "COMPLETE" and .relationship_status == "MAPPED" and .workspaces[0].services[0].mapping_sources == ["enabled_product_api"]' "$TEST_TMP/out" >/dev/null
+: >"$SERVICE_SCOPED_CURL_LOG"
+SERVICE_SCOPED_MODE=both
+if (unset FASTLY_DSTOKEN FASTLY_VOUCH_COOKIE; "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp examplecorp) >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'missing legacy evidence unexpectedly completed'; fi
+jq -e '.status == "PARTIAL" and .relationship_status == "MAPPED" and .workspaces[0].services[0].mapping_sources == ["enabled_product_api"] and .provenance.in_band_vcl_evidence.internal_ngwaf_sites.status == "UNKNOWN"' "$TEST_TMP/out" >/dev/null
+! rg -q '/v0/corps/|/service/inspection-target$' "$SERVICE_SCOPED_CURL_LOG" || fail 'missing credentials reached legacy APIs'
 : >"$SERVICE_SCOPED_CURL_LOG"
 SERVICE_SCOPED_MODE=sites-foreign
-if "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp costco >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'foreign internal sites accepted'; fi
+if "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp examplecorp >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'foreign internal sites accepted'; fi
 [[ ! -s "$TEST_TMP/out" ]] || fail 'foreign internal sites emitted mapping'
 ! rg -q '/service/inspection-target$|/ngwaf/v1/workspaces$' "$SERVICE_SCOPED_CURL_LOG" || fail 'foreign internal sites were reconciled'
 : >"$SERVICE_SCOPED_CURL_LOG"
 SERVICE_SCOPED_MODE=sites-missing-customer
-if "$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp costco >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then fail 'site without customer ID accepted'; fi
-[[ ! -s "$TEST_TMP/out" ]] || fail 'unverified internal sites emitted mapping'
-! rg -q '/service/inspection-target$|/service/other-inspection$|/ngwaf/v1/workspaces$' "$SERVICE_SCOPED_CURL_LOG" || fail 'unverified internal sites were reconciled'
+"$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp examplecorp >"$TEST_TMP/out" 2>"$TEST_TMP/err" || true
+jq -e '.status == "UNKNOWN" and .relationship_status == "UNRESOLVED" and .provenance.in_band_vcl_evidence.internal_ngwaf_sites.corp_validation_status == "PARTIAL" and .provenance.in_band_vcl_evidence.internal_ngwaf_sites.site_ownership_counts == {verified:1,unverified:1,conflicting:0} and .legacy_service_evidence[0].status == "UNKNOWN" and (.legacy_service_evidence[0].candidates | length) == 1' "$TEST_TMP/out" >/dev/null
+! rg -q '/service/other-inspection$' "$SERVICE_SCOPED_CURL_LOG" || fail 'unverified site caused a direct Inspection Service request'
+SERVICE_SCOPED_MODE=sites-empty-customer
+"$ROOT/fastly-audit" ngwaf workspace-services --service-id cdn-target --json --sigsci-corp examplecorp >"$TEST_TMP/out" 2>"$TEST_TMP/err" || true
+jq -e '.status == "UNKNOWN" and .provenance.in_band_vcl_evidence.internal_ngwaf_sites.site_ownership_counts.unverified == 1 and .legacy_service_evidence[0].status == "UNKNOWN"' "$TEST_TMP/out" >/dev/null
 if rg -q 'test-fastly-secret|test-dstoken-secret|test-vouch-secret' "$TEST_TMP" --glob '*.json' --glob '*.err' --glob '*.out'; then fail 'credential value leaked'; fi
 printf 'workspace-services service-id: OK\n'

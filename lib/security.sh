@@ -6,10 +6,11 @@ collect_security_products_json() {
 
   local services_body="$1"
   local config_mode="${2:-summary}"
-  local tmp product_id label config_kind category request_config
+  local tmp product_id label config_kind category request_config checked=0 total
   [[ "$config_mode" == 'summary' || "$config_mode" == 'detailed' ]] ||
     die 'collect_security_products_json config mode must be summary or detailed'
   tmp="$(mktemp)"
+  total="$(service_product_specs | awk -F '\t' '$4 == "security" {n++} END {print n+0}')"
 
   while IFS=$'\t' read -r product_id label config_kind category; do
     [[ -n "$product_id" && "$category" == 'security' ]] || continue
@@ -18,6 +19,8 @@ collect_security_products_json() {
       request_config='false'
     fi
     discover_product_json "$product_id" "$label" "$config_kind" "$category" "$services_body" "$request_config" >>"$tmp"
+    checked=$((checked + 1))
+    progress_job_milestone 'Security product checks' "$checked" "$total"
   done < <(service_product_specs)
 
   jq -s '.' "$tmp"
@@ -195,6 +198,42 @@ legacy_map_trace() {
   printf '%s: legacy-map trace: %s\n' "${PROGRAM_NAME:-ngwaf}" "$*" >&2
 }
 
+# Only these scoped mapping probes use this projection. Never copy API error
+# text into output: even an error response can contain customer configuration.
+workspace_services_failure_json() {
+  [[ $# -eq 4 ]] || die 'workspace_services_failure_json requires <endpoint-template> <http-status> <body-file> <failure-kind>'
+  local endpoint="$1" code="$2" body="$3" kind="$4" format category=unavailable
+  if [[ ! -s "$body" ]]; then
+    format=empty
+  elif jq -e -s 'length == 1 and (.[0] | type) == "object"' "$body" >/dev/null 2>&1; then
+    format=json_object
+  elif jq -e -s 'length == 1' "$body" >/dev/null 2>&1; then
+    format=other_json
+  else
+    format=invalid_json
+  fi
+  if [[ "$format" == json_object ]]; then
+    category="$(jq -r '
+      [.title?, .detail?, .message?, .error?] | map(select(type == "string")) as $values
+      | if ($values | index("Site not found")) != null then "site_not_found"
+        elif ($values | index("This resource does not exist")) != null or
+             ($values | index("Not Found")) != null then "resource_not_found"
+        elif ($values | index("The request is not valid")) != null or
+             ($values | index("Bad Request")) != null then "invalid_request"
+        elif ($values | index("Forbidden")) != null or
+             ($values | index("Access denied")) != null then "access_denied"
+        elif ($values | index("Unauthorized")) != null then "unauthorized"
+        else "unrecognized" end
+    ' "$body")" || return 1
+  fi
+  jq -nc --arg endpoint "$endpoint" --arg code "$code" --arg format "$format" \
+    --arg category "$category" --arg kind "$kind" '
+      {endpoint:$endpoint,
+       http_status:(if ($code | test("^[1-5][0-9]{2}$")) then ($code | tonumber) else null end),
+       transport_failure_category:(if $code == "000" then "no_http_response" else null end),
+       response_format:$format,api_error_category:$category,failure_kind:$kind}'
+}
+
 legacy_map_lookup_inspection_service_json() {
   [[ $# -eq 4 ]] || die 'legacy_map_lookup_inspection_service_json requires <service-id> <retrieved-at> <services-file> <output-file>'
 
@@ -202,7 +241,7 @@ legacy_map_lookup_inspection_service_json() {
   local retrieved_at="$2"
   local services_file="$3"
   local outfile="$4"
-  local detail_tmp code normalized inventory_hit started_at elapsed
+  local detail_tmp code normalized inventory_hit started_at elapsed returned_id failure kind
 
   legacy_map_trace "resolving serviceID: $sid"
   inventory_hit="unknown"
@@ -218,7 +257,7 @@ legacy_map_lookup_inspection_service_json() {
   detail_tmp="$(mktemp)"
   started_at="$(date +%s)"
   legacy_map_trace "direct Fastly API lookup: GET /service/$sid"
-  code="$(http_get_to_file "/service/$sid" "$detail_tmp")"
+  code="$(NGWAF_HTTP_REDACT_CURL_STDERR=1 http_get_to_file "/service/$sid" "$detail_tmp")"
   elapsed=$(( $(date +%s) - started_at ))
   legacy_map_trace "direct Fastly API lookup completed: /service/$sid HTTP $code in ${elapsed}s"
   if [[ "$code" == 2* ]] && normalized="$(
@@ -250,19 +289,55 @@ legacy_map_lookup_inspection_service_json() {
     ' "$detail_tmp"
   )" && [[ -n "$normalized" ]]; then
     jq -n --arg service_id "$sid" --arg retrieved_at "$retrieved_at" \
-      --argjson service "$normalized" \
-      '{service_id: $service_id, status: "COMPLETE", evidence_type: "DIRECT", source: "GET /service/{serviceID}", retrieved_at: $retrieved_at, reason: "Fastly Inspection Service resolved directly from NGWAF site serviceID", service: $service}' >"$outfile"
+      --arg code "$code" --argjson service "$normalized" \
+      '{service_id: $service_id, status: "COMPLETE", evidence_type: "DIRECT", source: "GET /service/{serviceID}", retrieved_at: $retrieved_at, reason: "Fastly Inspection Service resolved directly from NGWAF site serviceID", service: $service,
+        lookup_http_status:($code | tonumber),lookup_response_format:"json_object"}' >"$outfile"
     rm -f "$detail_tmp"
     return 0
   elif [[ "$code" == 2* ]]; then
-    jq -n --arg service_id "$sid" --arg retrieved_at "$retrieved_at" \
-      '{service_id: $service_id, status: "UNKNOWN", evidence_type: "UNKNOWN", source: "GET /service/{serviceID}", retrieved_at: $retrieved_at, reason: "Fastly direct Inspection Service lookup returned an unrecognized service shape or mismatched id", service: null}' >"$outfile"
+    if ! jq -e -s 'length == 1' "$detail_tmp" >/dev/null 2>&1; then
+      kind=malformed_response
+    else
+      returned_id="$(jq -r 'try (if type == "object" then .id // .ServiceID // .service.id // .data.id // empty else empty end) catch empty' "$detail_tmp")"
+      if [[ -n "$returned_id" && "$returned_id" != "$sid" ]]; then
+        kind=identity_mismatch
+      else
+        kind=unexpected_schema
+      fi
+    fi
+    failure="$(workspace_services_failure_json 'GET /service/{serviceID}' "$code" "$detail_tmp" "$kind")" || return 1
+    jq -n --arg service_id "$sid" --arg retrieved_at "$retrieved_at" --argjson failure "$failure" \
+      '{service_id: $service_id, status: "UNKNOWN", evidence_type: "UNKNOWN", source: "GET /service/{serviceID}", retrieved_at: $retrieved_at, reason: "Fastly direct Inspection Service lookup returned an unrecognized service shape or mismatched id", service: null, failure:$failure}' >"$outfile"
   else
-    jq -n --arg service_id "$sid" --arg status "$code" --arg retrieved_at "$retrieved_at" \
-      '{service_id: $service_id, status: "UNKNOWN", evidence_type: "UNKNOWN", source: "GET /service/{serviceID}", retrieved_at: $retrieved_at, reason: ("Fastly direct Inspection Service lookup failed: HTTP " + $status), service: null}' >"$outfile"
+    if [[ "$code" == 000 ]]; then kind=transport_failure; else kind=http_status; fi
+    failure="$(workspace_services_failure_json 'GET /service/{serviceID}' "$code" "$detail_tmp" "$kind")" || return 1
+    jq -n --arg service_id "$sid" --arg status "$code" --arg retrieved_at "$retrieved_at" --argjson failure "$failure" \
+      '{service_id: $service_id, status: "UNKNOWN", evidence_type: "UNKNOWN", source: "GET /service/{serviceID}", retrieved_at: $retrieved_at, reason: ("Fastly direct Inspection Service lookup failed: HTTP " + $status), service: null, failure:$failure}' >"$outfile"
   fi
   rm -f "$detail_tmp"
   return 1
+}
+
+legacy_map_validate_inspection_services_json() {
+  [[ $# -eq 2 ]] || die 'legacy_map_validate_inspection_services_json requires <inspection-services-json> <selected-customer-id>'
+  jq --arg cid "$2" '
+    map(if .status != "COMPLETE" then .
+      else
+        (if (.service.customer_id | type) != "string" or .service.customer_id == "" then "ownership_unverified"
+         elif .service.customer_id == $cid then "verified"
+         else "ownership_mismatch" end) as $ownership
+        | .ownership_validation_status = $ownership
+        | if $ownership == "verified" then .
+          else
+            .failure = {endpoint:"GET /service/{serviceID}",http_status:(.lookup_http_status // null),
+              transport_failure_category:null,response_format:(.lookup_response_format // null),
+              api_error_category:"none",failure_kind:$ownership}
+            | .status = "UNKNOWN"
+            | .reason = "Inspection Service customer ownership could not be verified"
+            | .service = null
+          end
+      end)
+  ' <<<"$1"
 }
 
 legacy_map_validate_sites_customer_json() {
@@ -277,10 +352,20 @@ legacy_map_validate_sites_customer_json() {
 
   validation="$(
     jq --arg selected_cid "$selected_cid" --arg corp "$corp" --arg corp_source "$corp_source" '
-      def site_customer_id:
-        .customer_id // .customerID // .customerId // .customer.id // null;
+      def site_customer_ids:
+        [.customer_id, .customerID, .customerId, .customer.id?]
+        | map(select(type == "string" and length > 0)) | unique;
+      def site_ownership:
+        site_customer_ids as $ids
+        | if ($ids | length) == 0 then "ownership_unverified"
+          elif any($ids[]; . != $selected_cid) then "ownership_mismatch"
+          else "verified" end;
       (.status // "UNKNOWN") as $status
-      | ([.data[]? | site_customer_id | select(. != null and . != "")] | unique) as $ids
+      | ([.data[]? | site_customer_ids[]] | unique) as $ids
+      | ([.data[]? | select(site_ownership == "verified")] | length) as $verified
+      | ([.data[]? | select(site_ownership == "ownership_unverified")] | length) as $unverified
+      | ([.data[]? | select(site_ownership == "ownership_mismatch")] | length) as $conflicting
+      | {verified:$verified,unverified:$unverified,conflicting:$conflicting} as $counts
       | if $status != "COMPLETE" then
           {
             corp_validation_status: "UNKNOWN",
@@ -290,9 +375,18 @@ legacy_map_validate_sites_customer_json() {
             sigsci_corp: $corp,
             sigsci_corp_source: $corp_source,
             sigsci_customer_id: null,
-            returned_customer_ids: $ids
+            returned_customer_ids: $ids,
+            site_ownership_counts: $counts
           }
-        elif ($ids | length) == 1 and $ids[0] == $selected_cid then
+        elif $conflicting == 0 and $verified > 0 and $unverified > 0 then
+          {
+            corp_validation_status: "PARTIAL", status: "PARTIAL",
+            reason: "SIGSCI corp site ownership is only partially verified",
+            selected_customer_id: $selected_cid, sigsci_corp: $corp,
+            sigsci_corp_source: $corp_source, sigsci_customer_id: $selected_cid,
+            returned_customer_ids: $ids, site_ownership_counts: $counts
+          }
+        elif $conflicting == 0 and $verified > 0 and $unverified == 0 then
           {
             corp_validation_status: "VALID",
             status: $status,
@@ -301,7 +395,8 @@ legacy_map_validate_sites_customer_json() {
             sigsci_corp: $corp,
             sigsci_corp_source: $corp_source,
             sigsci_customer_id: $ids[0],
-            returned_customer_ids: $ids
+            returned_customer_ids: $ids,
+            site_ownership_counts: $counts
           }
         elif ($ids | length) == 1 then
           {
@@ -312,7 +407,8 @@ legacy_map_validate_sites_customer_json() {
             sigsci_corp: $corp,
             sigsci_corp_source: $corp_source,
             sigsci_customer_id: $ids[0],
-            returned_customer_ids: $ids
+            returned_customer_ids: $ids,
+            site_ownership_counts: $counts
           }
         elif ($ids | length) > 1 then
           {
@@ -323,7 +419,8 @@ legacy_map_validate_sites_customer_json() {
             sigsci_corp: $corp,
             sigsci_corp_source: $corp_source,
             sigsci_customer_id: null,
-            returned_customer_ids: $ids
+            returned_customer_ids: $ids,
+            site_ownership_counts: $counts
           }
         else
           {
@@ -334,7 +431,8 @@ legacy_map_validate_sites_customer_json() {
             sigsci_corp: $corp,
             sigsci_corp_source: $corp_source,
             sigsci_customer_id: null,
-            returned_customer_ids: $ids
+            returned_customer_ids: $ids,
+            site_ownership_counts: $counts
           }
         end
     ' <<<"$sites_result"
@@ -368,16 +466,26 @@ legacy_map_validate_sites_customer_json() {
 
   printf '%s\n%s\n' "$sites_result" "$validation" |
     jq -s '
+      def site_customer_ids:
+        [.customer_id, .customerID, .customerId, .customer.id?]
+        | map(select(type == "string" and length > 0)) | unique;
       .[0] as $sites
       | .[1] as $validation
       | $sites + {
+          status: $validation.status,
           sigsci_corp: $validation.sigsci_corp,
           sigsci_corp_source: $validation.sigsci_corp_source,
           selected_customer_id: $validation.selected_customer_id,
           sigsci_customer_id: $validation.sigsci_customer_id,
           returned_customer_ids: $validation.returned_customer_ids,
+          site_ownership_counts: $validation.site_ownership_counts,
           corp_validation_status: $validation.corp_validation_status,
-          corp_validation_reason: $validation.reason
+          corp_validation_reason: $validation.reason,
+          data: ($sites.data | map(. + {ownership_validation_status:
+            (site_customer_ids as $ids
+             | if ($ids | length) == 0 then "ownership_unverified"
+               elif any($ids[]; . != $validation.selected_customer_id) then "ownership_mismatch"
+               else "verified" end)}))
         }
     '
 }
@@ -405,9 +513,9 @@ legacy_map_resolve_inspection_services_json() {
   trap cleanup_legacy_map_resolver_tmp RETURN
 
   sites_count="$(jq '.data | length' <<<"$sites_result")"
-  service_id_count="$(jq '[.data[]? | .serviceID // empty] | length' <<<"$sites_result")"
-  unique_service_id_count="$(jq '[.data[]? | .serviceID // empty] | unique | length' <<<"$sites_result")"
-  jq -r '.data[]? | .serviceID // empty' <<<"$sites_result" | sort -u >"$ids_tmp"
+  service_id_count="$(jq '[.status as $status | .data[]? | select($status != "PARTIAL" or .ownership_validation_status == "verified") | .serviceID // empty] | length' <<<"$sites_result")"
+  unique_service_id_count="$(jq '[.status as $status | .data[]? | select($status != "PARTIAL" or .ownership_validation_status == "verified") | .serviceID // empty] | unique | length' <<<"$sites_result")"
+  jq -r '.status as $status | .data[]? | select($status != "PARTIAL" or .ownership_validation_status == "verified") | .serviceID // empty' <<<"$sites_result" | sort -u >"$ids_tmp"
 
   concurrency="${FASTLY_AUDIT_LOOKUP_CONCURRENCY:-${FASTLY_AUDIT_LEGACY_MAP_CONCURRENCY:-8}}"
   if ! [[ "$concurrency" =~ ^[1-9][0-9]*$ ]]; then
@@ -631,11 +739,12 @@ legacy_map_rows_for_service_json() {
             | [
                 $sites.data[]?
                 | . as $site
+                | select(.ownership_validation_status == "verified")
                 | ($site.serviceID // null) as $site_service_id
                 | select($site_service_id != null and $site_service_id != "")
                 | [
                     $inspection_services[]
-                    | select(.service_id == $site_service_id and (.status // "UNKNOWN") == "COMPLETE")
+                    | select(.service_id == $site_service_id and (.status // "UNKNOWN") == "COMPLETE" and .ownership_validation_status == "verified")
                     | .service
                     | select((.name // "") == $ess_name and (.type // "") == "wasm")
                   ][] as $ess
@@ -655,6 +764,15 @@ legacy_map_rows_for_service_json() {
               ] as $candidates
             | [
                 $sites.data[]?
+                | select(.ownership_validation_status != "verified")
+                | .serviceID // empty
+                | . as $unverified_service_id
+                | ([$inspection_services[] | select(.service_id == $unverified_service_id)]) as $lookups
+                | select(($lookups | length) == 0 or
+                    any($lookups[]; .status != "COMPLETE" or (.service.name // "") == $ess_name))
+              ] as $ownership_uncertainty
+            | [
+                $sites.data[]?
                 | . as $site
                 | ($site.serviceID // null) as $site_service_id
                 | select($site_service_id != null and $site_service_id != "")
@@ -666,7 +784,8 @@ legacy_map_rows_for_service_json() {
                         workspace_name: workspace_name($site),
                         workspace_id: ($site.id // null),
                         status: (.status // "UNKNOWN"),
-                        reason: (.reason // "Fastly direct Inspection Service lookup unavailable")
+                        reason: (.reason // "Fastly direct Inspection Service lookup unavailable"),
+                        failure: (.failure // null)
                       }
                   ][]
               ] as $lookup_failures
@@ -683,12 +802,16 @@ legacy_map_rows_for_service_json() {
                   candidates: $candidates
                 }
               + (
-                  if ($sites.status // "UNKNOWN") != "COMPLETE" then
+                  if ($sites.status // "UNKNOWN") != "COMPLETE" and ($sites.status // "UNKNOWN") != "PARTIAL" then
                     {
                       evidence_type: "UNKNOWN",
                       status: "UNKNOWN",
                       reason: ($sites.reason // "internal NGWAF site inventory unavailable")
                     }
+                  elif ($ownership_uncertainty | length) > 0 then
+                    {evidence_type:"UNKNOWN",status:"UNKNOWN",
+                     reason:"unverified NGWAF site ownership could affect the Inspection Service join",
+                     lookup_failures:$lookup_failures}
                   elif ($candidates | length) == 0 then
                     if ($lookup_failures | length) > 0 then
                       {
@@ -788,7 +911,7 @@ legacy_map_payload_json() {
           limitations: [
             "This command is read-only and does not perform migration actions.",
             "Only CDN/VCL source services are inspected for generated VCL hostnames.",
-            "CONFIRMED requires an exact join from generated VCL Inspection Service hostname to Fastly Inspection Service name to internal NGWAF site serviceID.",
+            "CONFIRMED requires an exact generated VCL Inspection Service name and site serviceID join with verified site and Inspection Service customer ownership.",
             "UNRESOLVED means an in-band Inspection Service hostname was present but no exact workspace join was established; it is not treated as a disabled or absent workspace.",
             "Fields named legacy_ess_* or ess_service_id are compatibility aliases for Inspection Service fields.",
             "The internal NGWAF site inventory requires FASTLY_DSTOKEN, FASTLY_VOUCH_COOKIE, and SIGSCI_CORP."
@@ -1045,9 +1168,10 @@ cmd_security_legacy_map() {
       "$corp_source"
   )"
   legacy_map_trace "corp validation status: $(jq -r '.corp_validation_status // "UNKNOWN"' <<<"$sites_result")"
-  if [[ "$(jq -r '.status // "UNKNOWN"' <<<"$sites_result")" == "COMPLETE" ]]; then
+  if [[ "$(jq -r '.status // "UNKNOWN"' <<<"$sites_result")" == "COMPLETE" || "$(jq -r '.status // "UNKNOWN"' <<<"$sites_result")" == "PARTIAL" ]]; then
     started_at="$(date +%s)"
     inspection_services="$(legacy_map_resolve_inspection_services_json "$sites_result" "$services_body")"
+    inspection_services="$(legacy_map_validate_inspection_services_json "$inspection_services" "$cid")" || return 1
     elapsed=$(( $(date +%s) - started_at ))
     legacy_map_trace "Inspection Service resolver completed in ${elapsed}s"
     legacy_map_trace "Inspection Service resolver is completed before generated VCL matching; no early stop after a later exact match occurs in current flow"
@@ -1120,6 +1244,7 @@ collect_security_summary_json() {
   fi
   services_body="$(get_customer_services)" ||
     die 'service inventory unavailable; security summary cannot safely use audit-event-derived service counts as a substitute'
+  progress_job_note "Services retrieved: $(jq '.data | length' <<<"$services_body")"
 
   ui_phase 2 4 'Checking security-product attachment inventory'
   products="$(collect_security_products_json "$services_body" "$config_mode")" || return
@@ -1129,6 +1254,7 @@ collect_security_summary_json() {
     get_all_pages "/ngwaf/v1/workspaces" \
       --data-urlencode "customer_id=$cid"
   )" || return
+  progress_job_note "Workspaces discovered: $(jq '.data | length' <<<"$workspaces")"
 
   if [[ "$validate_scope" == true ]]; then
     jq -e --arg cid "$cid" '
@@ -2007,14 +2133,17 @@ customer_security_agent_error_reason() {
 }
 
 customer_security_agent_inventory_json() {
-  local workspace_id="$1" workspace_uid="${2:-}" body err reason identifier_used=id
+  [[ $# -eq 3 ]] || die 'customer_security_agent_inventory_json requires <workspace-id> <workspace-uid> <customer-id>'
+  local workspace_id="$1" workspace_uid="$2" cid="$3" body err reason identifier_used=id
   err="$(mktemp)"
-  if ! body="$(get "$(workspace_path "$workspace_id")/agents" 2>"$err")"; then
+  if ! body="$(get "$(workspace_path "$workspace_id")/agents" \
+    --data-urlencode "customer_id=$cid" 2>"$err")"; then
     reason="$(customer_security_agent_error_reason "$err")"
     if [[ "$reason" == HTTP\ 400* && -n "$workspace_uid" && "$workspace_uid" != "$workspace_id" ]]; then
       : >"$err"
       identifier_used=workspace_uid
-      if ! body="$(get "$(workspace_path "$workspace_uid")/agents" 2>"$err")"; then
+      if ! body="$(get "$(workspace_path "$workspace_uid")/agents" \
+        --data-urlencode "customer_id=$cid" 2>"$err")"; then
         reason="$(customer_security_agent_error_reason "$err")"
       else
         reason=''
@@ -2026,14 +2155,17 @@ customer_security_agent_inventory_json() {
   if [[ -z "$reason" ]] &&
     jq -e --arg id "$workspace_id" --arg uid "$workspace_uid" '
       type == "object" and (.meta.total | type == "number" and . >= 0 and floor == .) and
-      (.data | type == "array") and (.meta.total == (.data | length)) and
+      (.data | type == "array") and
       all(.data[]; type == "object" and has("module_detected") and
         (.module_detected | type == "boolean") and
         (if has("agent_active") then (.agent_active | type == "boolean") else true end) and
         (if has("workspace_id") then (.workspace_id == $id or ($uid != "" and .workspace_id == $uid)) else true end))
     ' >/dev/null <<<"$body"; then
     jq -c --arg identifier_used "$identifier_used" \
-      '{status:"complete",source:"GET /ngwaf/v1/workspaces/{workspace_id}/agents",identifier_used:$identifier_used,agents:.data}' <<<"$body"
+      '{status:"returned",source:"GET /ngwaf/v1/workspaces/{workspace_id}/agents",
+        identifier_used:$identifier_used,reported_total:.meta.total,
+        returned_agent_count:(.data | length),
+        total_matches_returned_count:(.meta.total == (.data | length)),agents:.data}' <<<"$body"
   else
     jq -nc --arg reason "${reason:-request failed or incomplete data}" \
       --arg identifier_used "$identifier_used" \
@@ -2107,12 +2239,15 @@ customer_security_cloud_inventory_json() {
 }
 
 customer_security_deployments_json() {
-  local payload="$1" cid workspace_id workspace_uid agents_tmp agent_result cloud_result
+  local payload="$1" cid workspace_id workspace_uid agents_tmp agent_result cloud_result checked=0 total
   cid="$(jq -r '.customer.id' <<<"$payload")"
+  total="$(jq '.ngwaf.workspaces | length' <<<"$payload")"
   agents_tmp="$(mktemp)"
   while IFS=$'\t' read -r workspace_id workspace_uid; do
-    agent_result="$(customer_security_agent_inventory_json "$workspace_id" "$workspace_uid")"
+    agent_result="$(customer_security_agent_inventory_json "$workspace_id" "$workspace_uid" "$cid")"
     jq -c --arg id "$workspace_id" '{workspace_id:$id,result:.}' <<<"$agent_result" >>"$agents_tmp"
+    checked=$((checked + 1))
+    progress_job_milestone 'Workspace checks' "$checked" "$total"
   done < <(jq -r '
     .ngwaf.workspaces as $all
     | $all[] as $workspace
@@ -2121,6 +2256,7 @@ customer_security_deployments_json() {
           ([$all[] | select(.id == $workspace.workspace_uid or .workspace_uid == $workspace.workspace_uid)] | length) == 1
         then $workspace.workspace_uid else "" end)] | @tsv
   ' <<<"$payload")
+  if (( total == 0 )); then progress_job_note 'Workspace checks: 0/0'; fi
   cloud_result="$(customer_security_cloud_inventory_json "$cid")"
   jq -s --argjson cloud "$cloud_result" \
     --slurpfile agents "$agents_tmp" '
@@ -2131,10 +2267,13 @@ customer_security_deployments_json() {
           {unmatched_association_count: ([$cloud.associations[] | . as $association
             | select(([$payload.ngwaf.workspaces[] |
                 select(.id == $association.site_name or .name == $association.site_name)] | length) != 1)] | length)}),
-          agents:[$agents[] | {workspace_id,status:.result.status,source:.result.source,reason:.result.reason}]}
+          agents:[$agents[] | {workspace_id,status:.result.status,source:.result.source,
+            reason:.result.reason,reported_total:.result.reported_total,
+            returned_agent_count:.result.returned_agent_count,
+            total_matches_returned_count:.result.total_matches_returned_count}]}
       | .ngwaf.workspaces |= map(
           . as $workspace
-          | ([$payload.ngwaf.attachments[] | select(.workspace_id == $workspace.id and .configuration_status == "RETRIEVED")]) as $attachments
+          | ([$payload.ngwaf.attachments[] | select(.workspace_id == $workspace.id and .configuration_status == "RETRIEVED" and .mapping_validation.status == "RESOLVED")]) as $attachments
           | ([$cloud.associations[] | . as $association
               | select(([$payload.ngwaf.workspaces[] |
                   select(.id == $association.site_name or .name == $association.site_name)] | length) == 1)
@@ -2152,8 +2291,8 @@ customer_security_deployments_json() {
           | ([$agent_result.agents[] | select(.module_detected == true)]) as $modules
           | ([$agent_result.agents[] | select(.module_detected == false)]) as $other_agents
           | (if ($modules | length) > 0 then
-               [record("on_prem_module_agent";"inferred";"agent_module";
-                 ("NGWAF agent; web server module detected" +
+               [record("agent_based_unknown";"unresolved";"agent_module";
+                 ("NGWAF agent reports module_detected=true" +
                    ([$modules[0] | {module_type,module_server,module_version,host_os} | to_entries[] |
                      select(.value != null and .value != "") | "\(.key)=\(.value)"] |
                     if length > 0 then " (" + join(", ") + ")" else "" end));
@@ -2167,13 +2306,13 @@ customer_security_deployments_json() {
           | .deployments = ($edge_records + $cloud_records + $module_records + $agent_records)
           | if (.deployments | length) == 0 then
               .deployments = [record("unknown";"unresolved";"none";
-                (if $agent_result.status == "unavailable" then "Agent inventory unavailable: " + $agent_result.reason
-                 else "No recognized deployment evidence" end);"deployment inventory")]
+                "No recognized deployment evidence";"deployment inventory")]
             else . end
           | .deployment_visibility = {agents:($agent_result | del(.agents)),cloud_waf:($cloud | del(.associations))}
         )
       | .limitations += [
           "NGWAF deployment architecture is reported per workspace; a workspace may have multiple methods.",
+          "Agent module observations do not establish whether the deployment is customer-managed On-Prem, Fastly-managed Edge, or Cloud WAF.",
           "Unresolved deployment architecture means available APIs do not safely identify the method."
         ]
     ' <<<"$payload"
@@ -2181,15 +2320,51 @@ customer_security_deployments_json() {
 }
 
 customer_security_payload_json() {
-  # Retain the existing v1 product/result/provenance structures. Omit summary
-  # reconciliation findings and anomaly classifications from this orientation
-  # view; attachment counts require both inventory and configuration evidence.
+  # Retain the existing v1 product/result/provenance structures. Product-enable
+  # attachment counts are separate from verified service-to-workspace joins.
   jq '
+    def mapping_reasons($source; $service; $attachment):
+      ($attachment.workspace_id) as $id
+      | ([$source.ngwaf.workspaces[] | select(.id == $id)]) as $matches
+      | ([$source.ngwaf.workspaces[] | select(.workspace_uid != null and .workspace_uid == $id and .id != $id)]) as $uid_id_conflicts
+      | (if ($matches | length) == 1 and ($matches[0].workspace_uid | type) == "string" and $matches[0].workspace_uid != ""
+         then [$source.ngwaf.workspaces[] | select(.id != $id and .workspace_uid == $matches[0].workspace_uid)]
+         else [] end) as $uid_collisions
+      | [
+          (if $source.ngwaf.workspace_inventory_result.status != "COMPLETE" then "workspace_inventory_incomplete" else empty end),
+          (if ($id | type) != "string" or $id == "" then "missing_workspace_id" else empty end),
+          (if ($id | type) == "string" and $id != "" and ($matches | length) == 0 then "workspace_not_found" else empty end),
+          (if ($matches | length) > 1 then "ambiguous_workspace_id" else empty end),
+          (if ($uid_id_conflicts | length) > 0 or ($uid_collisions | length) > 0 or
+              ($attachment.workspace != null and $attachment.workspace.id != $id) or
+              ($service.configuration_status == "RETRIEVED" and $service.configuration.workspace_id != $id)
+           then "conflicting_workspace_identifier" else empty end),
+          (if ($service.customer_id != null and $service.customer_id != $source.customer.id) or
+              ($attachment.customer_id != null and $attachment.customer_id != $source.customer.id)
+           then "ownership_conflict" else empty end)
+        ];
     . as $source
     | (.products[] | select(.id == "ngwaf")) as $edge
+    | [.ngwaf.attachments[] as $attachment
+        | ([$edge.services[] | select(.id == $attachment.service_id)]) as $services
+        | ($services[0] // {}) as $service
+        | (mapping_reasons($source; $service; $attachment) +
+            (if ($services | length) != 1 then ["conflicting_service_identity"] else [] end)) as $reasons
+        | $attachment
+        | .configuration_status = ($service.configuration_status // null)
+        | .configuration_evidence_type = ($service.configuration_evidence_type // null)
+        | .traffic_ramp_raw = ($service.configuration.traffic_ramp // null)
+        | .mapping_validation = {
+            status: (if ($reasons | length) == 0 and $service.configuration_status == "RETRIEVED" then "RESOLVED" else "UNRESOLVED" end),
+            reason_codes: ($reasons + (if $service.configuration_status != "RETRIEVED" then ["configuration_unavailable"] else [] end)),
+            workspace_match_count: ([$source.ngwaf.workspaces[] | select(.id == $attachment.workspace_id)] | length),
+            evidence_type: "DERIVED"
+          }
+      ] as $attachments
     | ($source.summary.service_inventory_status == "COMPLETE" and $edge.result.status == "COMPLETE"
-        and all($edge.services[]; .configuration_status == "RETRIEVED"
-          and (.configuration.workspace_id | type == "string" and length > 0))) as $links_complete
+        and $source.ngwaf.workspace_inventory_result.status == "COMPLETE"
+        and ($attachments | length) == ($edge.services | length)
+        and all($attachments[]; .mapping_validation.status == "RESOLVED")) as $links_complete
     | {
         schema_version,
         command: "customer security",
@@ -2210,19 +2385,23 @@ customer_security_payload_json() {
             status: (if $links_complete then "COMPLETE" else "PARTIAL" end),
             evidence_type: "DERIVED",
             derived_from: ["products[].result", "products[].services[].configuration", "ngwaf.workspaces"],
-            reason: (if $links_complete then "complete attachment inventory and workspace ID configuration"
-              else "attachment inventory or workspace ID configuration is inconclusive; counts are lower bounds" end)
+            discovery_method: "ngwaf_product_enablement",
+            completeness_scope: "product_enabled_service_attachments_only",
+            other_deployment_methods_included: false,
+            configured_attachment_count: ($attachments | length),
+            resolved_mapping_count: ([$attachments[] | select(.mapping_validation.status == "RESOLVED")] | length),
+            unresolved_attachments: [$attachments[] | select(.mapping_validation.status == "UNRESOLVED") |
+              {service_id, workspace_id, reason_codes: .mapping_validation.reason_codes}],
+            reason: (if $links_complete then "product-enabled service attachments and their workspace joins are complete within the selected inventory"
+              else "product-enabled attachment inventory or workspace joins are inconclusive; verified workspace counts are lower bounds" end)
           },
-          attachments: [.attachments[] as $attachment
-            | ($edge.services[] | select(.id == $attachment.service_id)) as $service
-            | $attachment
-            | del(.anomalies)
-            | .configuration_status = $service.configuration_status
-            | .configuration_evidence_type = $service.configuration_evidence_type
-            | .traffic_ramp_raw = $service.configuration.traffic_ramp],
+          attachments: $attachments,
           workspaces: [.workspaces[]
-            | .attachment_count_lower_bound = (if $links_complete then null else .attachment_count end)
-            | .attachment_count = (if $links_complete then .attachment_count else null end)
+            | . as $workspace
+            | .attachments = [$attachments[] | select(.workspace_id == $workspace.id and .mapping_validation.status == "RESOLVED") |
+                {service_id, service_name, traffic_ramp}]
+            | .attachment_count_lower_bound = (if $links_complete then null else (.attachments | length) end)
+            | .attachment_count = (if $links_complete then (.attachments | length) else null end)
             | .attachment_count_status = (if $links_complete then "COMPLETE" else "PARTIAL" end)]
         }),
         limitations: (.limitations + [
@@ -2235,6 +2414,11 @@ customer_security_payload_json() {
         if ($source.provenance.service_discovery | has("token_visibility_complete_for_customer"))
         then $source.provenance.service_discovery.token_visibility_complete_for_customer
         else null end)
+    | .summary.ngwaf_service_attachment_scope = "product_enabled_service_attachments_only"
+    | .inventory_sections.edge_waf_service_attachments.completeness_scope = "product_enabled_service_attachments_only"
+    | .inventory_sections.ngwaf_service_attachments.completeness_scope = "product_enabled_service_attachments_only"
+    | .ngwaf.edge_waf_service_attachment_result.completeness_scope = "product_enabled_service_attachments_only"
+    | .ngwaf.service_attachment_result.completeness_scope = "product_enabled_service_attachments_only"
   '
 }
 
@@ -2277,7 +2461,11 @@ customer_security_render_human() {
     if [[ "$status" != COMPLETE ]]; then
       printf 'Retrieval was inconclusive (%s); shown mappings are observed only.\n' "$status"
     elif [[ "$mapping_count" == 0 ]]; then
-      printf 'No configured service mappings found.\n'
+      if [[ "$product_id" == ngwaf ]]; then
+        printf 'No NGWAF product-enabled service attachments found; other deployment methods may still be present.\n'
+      else
+        printf 'No configured service mappings found.\n'
+      fi
     fi
     [[ "$mapping_count" != 0 ]] || continue
     jq -r --arg id "$product_id" '
@@ -2336,7 +2524,6 @@ PRODUCTS
     jq -r '
       def deployment_label:
         {edge_waf:"Edge WAF",cloud_waf:"Cloud WAF",
-         on_prem_module_agent:"On-Prem module-agent",
          agent_based_unknown:"Agent-based deployment",unknown:"Unknown"}[.] // .;
       ["WORKSPACE","DEPLOYMENT","EVIDENCE","STATUS"],
       (.ngwaf.workspaces | sort_by(.name,.id) | .[] as $workspace
@@ -2361,6 +2548,7 @@ PRODUCTS
 cmd_customer_security() {
   local payload
   payload="$(collect_security_summary_json detailed true | customer_security_payload_json)"
+  ui_phase 5 5 'Inspecting deployment evidence'
   payload="$(customer_security_deployments_json "$payload")"
   if [[ "$CUSTOMER_SECURITY_MODE" == json ]]; then
     jq . <<<"$payload"

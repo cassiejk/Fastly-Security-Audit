@@ -35,6 +35,20 @@ dispatch_preflight() {
   esac
 }
 
+dispatch_require_no_args() {
+  local command_path="$1" help_path="$2" argument
+  shift 2
+  (( $# == 0 )) && return 0
+  argument="$1"
+  if [[ "$argument" == -* ]]; then
+    printf "Error: unsupported option '%s' for '%s'\n" "$argument" "$command_path" >&2
+  else
+    printf "Error: unexpected argument '%s' for '%s'\n" "$argument" "$command_path" >&2
+  fi
+  printf "Run '%s -h' for usage.\n" "$help_path" >&2
+  return 1
+}
+
 dispatch_flat() {
   local command="${1:-help}"
   (( $# == 0 )) || shift
@@ -66,6 +80,53 @@ dispatch_flat() {
     return
   fi
 
+  # Commands without operands must reject extras before customer preflight or API calls.
+  case "$command" in
+    workspaces)
+      if (( $# == 1 )) && [[ "$1" == -h || "$1" == --help ]]; then
+        workspaces_usage
+        return
+      fi
+      dispatch_require_no_args "$USAGE_PROGRAM workspaces" "$USAGE_PROGRAM workspaces" "$@" || return 1
+      ;;
+    version|whoami|customer)
+      if (( $# == 1 )) && [[ "$1" == -h || "$1" == --help ]]; then
+        usage
+        return
+      fi
+      local command_path="$USAGE_PROGRAM $command"
+      if [[ "$command" == customer && "$USAGE_PROGRAM" == "$PROGRAM_NAME customer" ]]; then
+        command_path="$USAGE_PROGRAM show"
+      fi
+      dispatch_require_no_args "$command_path" "$USAGE_PROGRAM" "$@" || return 1
+      ;;
+    rules|thresholds)
+      if (( $# >= 1 )) && [[ "$1" == -* ]]; then
+        dispatch_require_no_args "$USAGE_PROGRAM $command" "$USAGE_PROGRAM" "$1" || return 1
+      fi
+      if (( $# >= 2 )); then
+        case "$command:$2" in
+          rules:--json|rules:--list|thresholds:--json) ;;
+          *) dispatch_require_no_args "$USAGE_PROGRAM $command" "$USAGE_PROGRAM" "$2" || return 1 ;;
+        esac
+      fi
+      if (( $# > 2 )); then
+        dispatch_require_no_args "$USAGE_PROGRAM $command" "$USAGE_PROGRAM" "${@:3}" || return 1
+      fi
+      ;;
+    overview)
+      if (( $# > 2 )); then
+        dispatch_require_no_args "$USAGE_PROGRAM overview" "$USAGE_PROGRAM" "${@:3}" || return 1
+      fi
+      if (( $# >= 1 )) && [[ "$1" == -* && "$1" != --json ]]; then
+        dispatch_require_no_args "$USAGE_PROGRAM overview" "$USAGE_PROGRAM" "$1" || return 1
+      fi
+      if (( $# >= 2 )) && [[ "$2" == -* && "$2" != --json ]]; then
+        dispatch_require_no_args "$USAGE_PROGRAM overview" "$USAGE_PROGRAM" "$2" || return 1
+      fi
+      ;;
+  esac
+
   dispatch_preflight "$command"
 
   case "$command" in
@@ -75,10 +136,10 @@ dispatch_flat() {
     whoami) cmd_whoami "$@" ;;
     use) cmd_use "$@" ;;
     customer) cmd_customer "$@" ;;
-    services) cmd_services "$@" ;;
-    products) cmd_products "$@" ;;
-    inventory) cmd_inventory "$@" ;;
-    workspaces) cmd_workspaces "$@" ;;
+    services) progress_run 'service list' cmd_services "$@" ;;
+    products) progress_run 'service products' cmd_products "$@" ;;
+    inventory) progress_run 'inventory' cmd_inventory "$@" ;;
+    workspaces) progress_run 'NGWAF workspaces' cmd_workspaces "$@" ;;
     link) cmd_ngwaf_link "$@" ;;
     workspace-services) cmd_workspace_services "$@" ;;
     overview) cmd_overview "$@" ;;
@@ -236,7 +297,9 @@ dispatch_customer_namespace() {
         return
       fi
       dispatch_preflight customer-security
-      cmd_customer_security
+      NGWAF_PROGRESS_PHASE_TOTAL=5
+      export NGWAF_PROGRESS_PHASE_TOTAL
+      progress_run 'customer security audit' cmd_customer_security
       ;;
     vcl-size)
       dispatch_preflight services

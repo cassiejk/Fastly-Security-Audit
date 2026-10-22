@@ -235,6 +235,7 @@ search_customer_services_json() {
     pages=$(( pages + 1 ))
     fetched=$(( fetched + count ))
     if (( fetched > total )); then reason='search collected more services than meta.total'; break; fi
+    progress_job_milestone 'Services scanned' "$fetched" "$total"
     next_cursor="$(jq -r '.meta.next_cursor // ""' "$tmp/page")"
     # Reject control characters before shell extraction could alter an opaque
     # cursor (command substitution strips trailing newlines).
@@ -361,7 +362,9 @@ get_customer_services() {
     return 1
   fi
   tmp="$(mktemp)" || return 1
-  printf 'Listing customer-scoped services from Fastly service search...\n' >&2
+  if [[ -z "${NGWAF_PROGRESS_JOB_STATE:-}" ]]; then
+    printf 'Listing customer-scoped services from Fastly service search...\n' >&2
+  fi
   if reason="$(search_customer_services_json "$cid" "$tmp")"; then
     inventory="$(cat "$tmp")"
     rm -f "$tmp"
@@ -398,7 +401,9 @@ get_token_visible_customer_services() {
   tmp="$(mktemp)"
   retrieved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-  printf 'Listing token-visible services from Fastly service inventory...\n' >&2
+  if [[ -z "${NGWAF_PROGRESS_JOB_STATE:-}" ]]; then
+    printf 'Listing token-visible services from Fastly service inventory...\n' >&2
+  fi
 
   code="$(http_get_to_file "/service" "$tmp")"
   if [[ "$code" != 2* ]]; then
@@ -1164,12 +1169,15 @@ collect_products_json() {
   [[ $# -eq 1 ]] || die 'collect_products_json requires <services-json>'
 
   local services_body="$1"
-  local tmp product_id label config_kind category
+  local tmp product_id label config_kind category checked=0 total
   tmp="$(mktemp)"
+  total="$(service_product_specs | awk 'END {print NR}')"
 
   while IFS=$'\t' read -r product_id label config_kind category; do
     [[ -n "$product_id" ]] || continue
     discover_product_json "$product_id" "$label" "$config_kind" "$category" "$services_body" >>"$tmp"
+    checked=$((checked + 1))
+    progress_job_milestone 'Product checks' "$checked" "$total"
   done < <(service_product_specs)
 
   jq -s '.' "$tmp"
@@ -1183,10 +1191,14 @@ cmd_services() {
   local cid customer services_body normalized
   [[ -z "$mode" || "$mode" == '--json' ]] || die 'usage: ngwaf services [--json]'
 
+  progress_job_phase '[1/3] Resolving the selected customer'
   cid="$(current_cid)"
   customer="$(get "/customer/$cid")"
+  progress_job_phase '[2/3] Discovering customer services'
   services_body="$(get_customer_services --details)" ||
     die 'service inventory unavailable; cannot safely use audit-event-derived service counts as a substitute'
+  progress_job_note "Services retrieved: $(jq '.data | length' <<<"$services_body")"
+  progress_job_phase '[3/3] Preparing service list'
 
   normalized="$(
     printf '%s\n%s\n' "$customer" "$services_body" |
@@ -1566,11 +1578,16 @@ cmd_products() {
   local cid customer services_body products payload
   [[ -z "$mode" || "$mode" == '--json' ]] || die 'usage: ngwaf products [--json]'
 
+  progress_job_phase '[1/4] Resolving the selected customer'
   cid="$(current_cid)"
   customer="$(get "/customer/$cid")"
+  progress_job_phase '[2/4] Discovering customer services'
   services_body="$(get_customer_services)" ||
     die 'service inventory unavailable; cannot safely use audit-event-derived service counts as a substitute'
+  progress_job_note "Services retrieved: $(jq '.data | length' <<<"$services_body")"
+  progress_job_phase '[3/4] Checking service products'
   products="$(collect_products_json "$services_body")"
+  progress_job_phase '[4/4] Preparing product report'
 
   payload="$(
     printf '%s\n%s\n%s\n' "$customer" "$services_body" "$products" |
@@ -1663,15 +1680,22 @@ cmd_inventory() {
   local cid customer services_body products workspaces payload
   [[ -z "$mode" || "$mode" == '--json' ]] || die 'usage: ngwaf inventory [--json]'
 
+  progress_job_phase '[1/5] Resolving the selected customer'
   cid="$(current_cid)"
   customer="$(get "/customer/$cid")"
+  progress_job_phase '[2/5] Discovering customer services'
   services_body="$(get_customer_services --details)" ||
     die 'service inventory unavailable; cannot safely use audit-event-derived service counts as a substitute'
+  progress_job_note "Services retrieved: $(jq '.data | length' <<<"$services_body")"
+  progress_job_phase '[3/5] Checking service products'
   products="$(collect_products_json "$services_body")"
+  progress_job_phase '[4/5] Retrieving NGWAF workspaces'
   workspaces="$(
     get_all_pages "/ngwaf/v1/workspaces" \
       --data-urlencode "customer_id=$cid"
   )"
+  progress_job_note "Workspaces discovered: $(jq '.data | length' <<<"$workspaces")"
+  progress_job_phase '[5/5] Preparing inventory report'
 
   payload="$(
     printf '%s\n%s\n%s\n%s\n' "$customer" "$services_body" "$products" "$workspaces" |
