@@ -1,5 +1,11 @@
 .DS_Store
 .env
 ngwaf-snapshot-*.json
+# Customer audit exports kept locally at the repository root.
+/costco-security-summary.json
+/costco-security.json
+/costco-services.json
+# Put future local customer audit exports here, away from source fixtures.
+/local-audit-exports/
 dist/
 /dev/unifier-check/results/
