@@ -42,3 +42,28 @@
 - Run the focused tests first, then `./scripts/check` and `git diff --check`.
 - Report tests that used mocks separately from any live authenticated API or UI
   validation; do not claim live validation unless it actually ran.
+
+## Inspection workflow and documentation
+
+- Use `fastly-audit` (`fa`) as the exclusive user-facing CLI for Fastly
+  inspections and troubleshooting. Keep `ngwaf` only as a compatibility
+  launcher. Never recommend the official `fastly` CLI or direct `curl` requests
+  as user-facing workarounds. Internal Fastly API calls made by `fa` are allowed.
+- If an inspection capability is missing, investigate implementing it in `fa`.
+  Before recommending a command, verify its syntax and flags against the
+  current launcher, dispatcher, help definitions, and implementation. Do not
+  invent commands, flags, JSON fields, or API capabilities. Current repository
+  code takes precedence over historical docs, prior conversations, and guesses.
+- Prefer narrow, read-only service or workspace inspections. Avoid customer-wide
+  inventory scans unless explicitly required. Identify and document expected
+  API requests and possible fan-out before adding inspection commands. Show
+  progress on stderr for expensive operations.
+- Keep NGWAF deployment type, inspection architecture, management method,
+  ownership, and enforcement behavior distinct. Preserve exact raw evidence
+  and provenance for derived security findings. Never promote missing or
+  conflicting evidence to confirmed findings. Historical Signal Sciences-managed
+  integrations may not appear in current Fastly NGWAF product APIs.
+- Treat current CLI help and source code as authoritative. Update relevant
+  documentation when commands, API dependencies, evidence classifications, or
+  known limitations change. Check or generate CLI docs from actual help
+  definitions where possible to prevent drift.
