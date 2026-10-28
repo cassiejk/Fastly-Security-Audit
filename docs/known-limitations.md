@@ -272,6 +272,29 @@ unavailable source is not evidence that a deployment is absent.
   service confirming active version and exact VCL declaration. Local tests and
   source review: 22 October 2026; no authenticated run performed here.
 
+## Platform Metrics v2 planning
+
+### NG-12 — Beta metrics are not yet interchangeable with NGWAF time series
+
+- **Status:** Planned investigation; no Platform Metrics v2 collector exists in
+  `fa` yet.
+- **Affected:** Future NGWAF metrics work. Current `overview`, `timeseries`,
+  `metrics`, `attack-profile`, and `attack-origins` retain their existing APIs.
+- **Constraint:** The published Platform Metrics v2 API is beta. Its `ngwaf`
+  metric set uses different field names, sparse nonzero fields, cursor pages,
+  daily retention of 365 days, and minute/hour retention of 35 days. Four
+  NGWAF configuration metrics are interval-maximum gauges, not additive
+  counters. Similar names do not establish equivalence with legacy fields.
+- **Within `fa`:** Keep old collectors and missing-data safeguards intact.
+  Do not infer zero traffic from a missing row or completeness from one page.
+- **Sources:** [NGWAF-first metrics roadmap](roadmap-platform-metrics.md),
+  [Fastly Platform Metrics API](https://www.fastly.com/documentation/reference/api/metrics-stats/metrics-v2/platform/),
+  `lib/metrics.sh`, `lib/attack_analysis.sh`.
+- **Resolution evidence/date:** Establish entity ownership, supported
+  metric/entity combinations, pagination and sparse-row behavior, then compare
+  settled matching UTC windows using narrow read-only probes. Documentation
+  reviewed 22 October 2026; no authenticated v2 request was made.
+
 ## Maintenance
 
 Recheck this register whenever an API behavior, evidence rule, request path,
