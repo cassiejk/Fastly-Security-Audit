@@ -35,6 +35,36 @@
   not present product attachment, retained request data, or credential-limited
   results as authoritative per-hostname coverage or proof of enforcement.
 
+### NGWAF API surfaces and authentication boundaries
+
+- Identify hostname, endpoint, authentication, and resource IDs before changing
+  any NGWAF integration. Public `https://api.fastly.com` uses
+  `FASTLY_API_TOKEN`; its customer-accessible NGWAF workspace and Agents APIs
+  use public workspace `id`/`workspace_uid` and agent schemas. Agents results
+  are observations, not an independent On-Prem/Edge/Cloud classification.
+- Legacy `https://dashboard.signalsciences.net/api/v0` uses `SIGSCI_EMAIL`,
+  `SIGSCI_TOKEN`, and `SIGSCI_CORP` where implemented; its corporation, site,
+  and Cloud WAF instance resources are a separate management domain.
+- Internal Fastly-only SigSci/Salt uses
+  `https://sigsci-console-internal.secretcdn.net/api` and a corporation/site
+  model. An authenticated employee browser session supplies `dstoken` and
+  `VouchCookie` through the existing credential workflow as `FASTLY_DSTOKEN`
+  and `FASTLY_VOUCH_COOKIE`. These expiring session cookies are not public API
+  tokens. Never substitute internal endpoints for public NGWAF Agents endpoints
+  or assume their response fields share a contract.
+- Keep public workspace `mode`, legacy site `agentLevel`, internal site
+  `agentMode`, and individual-agent `agent_enabled`/`agent_active` distinct.
+  Before joining corp/site data to public workspaces, verify each source and
+  identifier against current code or authoritative documentation, exact
+  selected-customer ownership, and unique matches. Never infer a public
+  workspace ID from a matching corp/site name or internal agent record.
+  Preserve unknown/conflicting identity and keep configuration, architecture,
+  observations, and enforcement evidence separate.
+- Use `fa` for user-facing inspections; prefer documented public APIs when
+  sufficient while retaining distinct internal evidence paths. Never expose
+  credential values in logs, progress, fixtures, documentation, or errors.
+  See [NGWAF API sources](docs/ngwaf-api-sources.md).
+
 ## Validation
 
 - Add or update focused fake-`curl` behavior tests for API, resolver, JSON, or

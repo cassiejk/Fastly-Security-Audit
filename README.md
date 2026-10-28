@@ -21,6 +21,11 @@ open questions, and evidence or performance limits, see the
 See [NGWAF deployment architecture and resource identity](docs/ngwaf-deployment-architecture.md)
 for the five deployment types, Edge inspection and management methods,
 resource ownership, and the API evidence each relationship requires.
+For the APIs `fa` actually calls, their credentials, request cost, and evidence
+limits, see [NGWAF API sources](docs/ngwaf-api-sources.md).
+For the investigation-only plan to add Fastly Platform Metrics v2, start with
+the [NGWAF-first metrics roadmap](docs/roadmap-platform-metrics.md); no v2
+collector is implemented yet.
 
 ```text
 ngwaf-helper/

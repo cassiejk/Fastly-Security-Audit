@@ -31,8 +31,9 @@ legacy_map_usage() {
   die 'usage: fastly-audit security legacy-map [service-name-or-id] [--sigsci-corp CORP] [--format human|json|csv] [--output FILE]'
 }
 
-# TODO(legacy-sigsci-auth): This internal Signal Sciences path uses DSTOKEN and
-# VouchCookie from a legacy dashboard session, separate from FASTLY_API_TOKEN.
+# TODO(legacy-sigsci-auth): Internal Fastly-only SigSci/Salt API; browser-session
+# dstoken/VouchCookie are passed via FASTLY_DSTOKEN/FASTLY_VOUCH_COOKIE. This is
+# not the public NGWAF Agents API authenticated with FASTLY_API_TOKEN.
 # manage.fastly.com uses OIDC/OAuth and does not provide these cookies. Replace
 # this dependency if the legacy dashboard/auth flow is retired.
 internal_ngwaf_require_credentials() {
@@ -2132,6 +2133,8 @@ customer_security_agent_error_reason() {
   fi
 }
 
+# Public Fastly NGWAF Agents: workspace IDs and FASTLY_API_TOKEN via get().
+# Internal SigSci/Salt site records use separate session credentials and IDs.
 customer_security_agent_inventory_json() {
   [[ $# -eq 3 ]] || die 'customer_security_agent_inventory_json requires <workspace-id> <workspace-uid> <customer-id>'
   local workspace_id="$1" workspace_uid="$2" cid="$3" body err reason identifier_used=id

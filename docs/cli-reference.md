@@ -7,6 +7,8 @@ This is the supported inspection interface. The `ngwaf` launcher and original
 flat commands remain compatibility routes, not separate implementations.
 Run `fa -h` or `fa <namespace> -h` for the full current usage text. The table
 below is an index of *implemented* routes, not a replacement for help.
+For API hosts, credentials, endpoint dependencies, request fan-out, and the
+claims each response supports, see [NGWAF API sources](ngwaf-api-sources.md).
 
 ## Scope and evidence conventions
 

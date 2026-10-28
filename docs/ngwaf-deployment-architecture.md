@@ -5,6 +5,8 @@ are linked to Fastly documentation. The [current CLI behavior](#current-cli-cove
 section describes this repository; it is not a statement about every Fastly
 deployment. A workspace may use more than one deployment type. Configuration,
 agent observations, and live inspection are separate evidence layers.
+For the implemented API calls, authentication domains, and cross-source joins,
+see [NGWAF API sources](ngwaf-api-sources.md).
 
 ## Deployment types
 

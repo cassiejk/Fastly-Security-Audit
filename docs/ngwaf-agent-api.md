@@ -1,6 +1,8 @@
 # NGWAF Agents API: Scope and Limitations
 
 Developer reference, updated 20 October 2026. This describes the current checkout and the published Fastly API. The count discrepancy below comes from user-run, direct authenticated requests, not a live request from this document.
+For the public API versus internal SigSci authentication and command-level
+dependencies, see [NGWAF API sources](ngwaf-api-sources.md).
 
 ## What the endpoint answers
 
