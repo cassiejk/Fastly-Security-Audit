@@ -149,6 +149,13 @@ NGWAF_DEBUG=1 ngwaf count production 'ruleid:RULE_ID' 7
 NGWAF_CURL_CONNECT_TIMEOUT=5 NGWAF_CURL_MAX_TIME=60 ngwaf workspaces
 ```
 
+HTTP 401 means Fastly rejected credentials supplied through `FASTLY_API_TOKEN`;
+verify the intended token is loaded, reload or correct the local credential
+environment, and retry. HTTP 403 means Fastly refused access to a resource;
+check token permissions and resource authorization. `fastly-audit doctor` can
+help distinguish token access from customer scope. Authentication error bodies
+are not printed because they may contain sensitive values.
+
 The default transport policy performs one retry, with a 90-second retry window.
 Override it with `NGWAF_CURL_RETRIES` and `NGWAF_CURL_RETRY_MAX_TIME`.
 

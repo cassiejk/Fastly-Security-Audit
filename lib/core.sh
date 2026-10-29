@@ -441,11 +441,15 @@ print_http_status_hint() {
         "${PROGRAM_NAME:-ngwaf}" >&2
       ;;
     401)
-      printf '%s: hint: token authentication failed; check FASTLY_API_TOKEN or run %s doctor\n' \
+      printf '%s: authentication failed (HTTP 401): Fastly rejected credentials supplied through FASTLY_API_TOKEN\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      printf '%s: hint: verify the intended Fastly API token is loaded; an incorrect, expired, revoked, empty, or incorrectly loaded token can cause this response\n' \
+        "${PROGRAM_NAME:-ngwaf}" >&2
+      printf '%s: hint: reload or correct your local credential environment, then retry the original command; run %s doctor for additional checks\n' \
         "${PROGRAM_NAME:-ngwaf}" "${PROGRAM_NAME:-ngwaf}" >&2
       ;;
     403)
-      printf '%s: hint: token lacks permission for this resource or customer; run %s doctor to verify scope\n' \
+      printf '%s: authorization failed (HTTP 403): Fastly refused access to this resource; check token permissions and resource authorization with %s doctor\n' \
         "${PROGRAM_NAME:-ngwaf}" "${PROGRAM_NAME:-ngwaf}" >&2
       ;;
     404)
@@ -484,8 +488,8 @@ print_troubleshooting_hint() {
 
 # Show a response body without making callers know whether Fastly returned JSON.
 # Non-JSON previews stay debug-only for 2xx responses because they may be large
-# or surprising, but explicit HTTP errors keep the historical behavior of showing
-# the server response.
+# or surprising. Other HTTP errors retain the historical response preview;
+# authentication and authorization failures omit it in get().
 print_response_body() {
   local file="$1"
 
@@ -630,9 +634,13 @@ get() {
         printf '%s: example: %s ngwaf timeseries vi-agent-production 7 --json\n' "${PROGRAM_NAME:-ngwaf}" "${PROGRAM_NAME:-fastly-audit}" >&2
       fi
       print_http_status_hint "$code"
-      printf '%s: response body:\n' "${PROGRAM_NAME:-ngwaf}" >&2
-      print_response_body "$tmp"
-      print_troubleshooting_hint
+      if [[ "$code" == 401 || "$code" == 403 ]]; then
+        printf '%s: API response body omitted for credential safety\n' "${PROGRAM_NAME:-ngwaf}" >&2
+      else
+        printf '%s: response body:\n' "${PROGRAM_NAME:-ngwaf}" >&2
+        print_response_body "$tmp"
+        print_troubleshooting_hint
+      fi
       rm -f "$tmp" "$err_tmp"
       exit 1
       ;;

@@ -172,7 +172,7 @@ if $ROOT/ngwaf count production 'tag:XSS' 1 >"$TEST_TMP/out" 2>"$TEST_TMP/auth-e
   exit 1
 fi
 grep -F 'Fastly API returned HTTP 401' "$TEST_TMP/auth-err" >/dev/null
-grep -F 'token authentication failed' "$TEST_TMP/auth-err" >/dev/null
+grep -F 'Fastly rejected credentials supplied through FASTLY_API_TOKEN' "$TEST_TMP/auth-err" >/dev/null
 
 export NGWAF_TEST_CURL_MODE=success
 export NGWAF_DEBUG=1
