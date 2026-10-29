@@ -1,7 +1,8 @@
 # NGWAF-first Platform Metrics v2 roadmap
 
-Status: investigation and implementation plan, 22 October 2026. **No Platform
-Metrics collector or command is implemented in `fa` yet.** This roadmap is
+Status: investigation and implementation plan, updated 29 October 2026. **A
+read-only P0 candidate diagnostic now exists; no Platform Metrics collector
+or P1a command is implemented in `fa`.** This roadmap is
 customer-agnostic and keeps the existing NGWAF collectors available until their
 meaning and coverage can be reconciled with the beta API.
 
@@ -10,7 +11,8 @@ Sources: the published [Platform Metrics API](https://www.fastly.com/documentati
 and [NGWAF reports API](https://www.fastly.com/documentation/reference/api/ngwaf/reports/).
 The current command contracts are in [the CLI reference](cli-reference.md) and
 the implementation in `lib/metrics.sh`, `lib/attack_analysis.sh`, `lib/core.sh`,
-`lib/dispatch.sh`, and `lib/help.sh`. API documentation establishes available
+`lib/dispatch.sh`, `lib/help.sh`, and the P0 probe in
+`lib/platform_metrics_diagnostic.sh`. API documentation establishes available
 fields and request shapes; it does **not** establish equivalence with existing
 NGWAF time series fields or confirm token access to a particular workspace.
 
@@ -129,17 +131,50 @@ demonstrated v2 replacement; do not claim they can be removed.
 
 ## Milestones
 
-### P0 — API compatibility and evidence investigation
+P0 implementation evidence (28 October 2026): `fa ngwaf
+platform-metrics-diagnostic <exact-workspace-id> --start UTC --end UTC [--json]`
+uses the public Fastly token, one selected-customer preflight GET, one exact
+`/ngwaf/v1/workspaces/{id}?customer_id=...` ownership check, then one
+`/metrics/v2/platform/entities/{id}/day` GET with `from`, `to`,
+`metric=ngwaf_requests_total_count`, and `limit=100`. Only a returned
+`meta.next_cursor` triggers another Metrics GET, up to ten pages. It rejects
+unowned or ownerless workspace details, malformed response data, repeated
+cursors, and incomplete pages; sparse metric omissions and empty rows remain
+distinct from zero. The code uses public workspace `id` as an **unverified
+candidate** Metrics `entity_id`; the published API does not explicitly specify
+whether `id` or `workspace_uid` is the correct identifier or echo an ownership
+binding in its documented response. The diagnostic therefore exits nonzero
+even for a valid candidate response and does not claim P0 completion. The
+existing HTTP helper does not capture Content-Type, reported as null. These
+request and response-shape safeguards were checked with source review and an
+offline fake API. Separately reported authenticated P0 diagnostics verified
+customer and exact workspace ownership, then received Metrics HTTP 400 with
+no observations. The 29 October 2026 result was classified locally as
+`unsupported_parameter` with the fixed message `API reports invalid parameter`,
+but it did not identify the rejected parameter or establish the underlying
+cause. The diagnostic reports only fixed, allowlisted validation labels and
+the error body format; raw API error text, headers, and credentials remain
+excluded. [NG-13](known-limitations.md#ng-13--scoped-platform-metrics-v2-request-returns-http-400)
+records the observed request, unresolved Engineering questions, and P0
+resolution criteria. P1a remains blocked until those criteria are met. The
+allowlist also recognizes the `errors[].property` and `errors[].reason` form
+shown in Fastly's [Origin Inspector metrics error example](https://www.fastly.com/documentation/reference/api/metrics-stats/origin-inspector/historical/);
+that related API example does not establish the Platform Metrics v2 error
+schema or explain the reported 400.
 
-- **Dependencies:** Published v2 and NGWAF contracts; synthetic fixtures; an
-  authorized, narrowly scoped future access check before claiming live support.
+### P0 — API compatibility and evidence investigation (open)
+
+- **Dependencies:** Published v2 and NGWAF contracts; synthetic fixtures;
+  clarification of [NG-13](known-limitations.md#ng-13--scoped-platform-metrics-v2-request-returns-http-400)
+  before claiming live support.
 - **Acceptance:** A field-by-field scope/units/equivalence record; verified
   entity ID and selected-customer ownership mechanism; row/meta nesting,
   pagination, grouping, sparse fields, granularity, and supported metric/entity
   combinations characterized. Explicitly identify fields with no replacement.
-- **Request scope:** Documentation/local fixtures now: **0 authenticated**.
-  A later authorized probe should be one exact workspace and one completed UTC
-  window, at most one first-page GET plus documented cursor pages, with a
+- **Request scope:** Further documentation/local fixture work: **0 new
+  authenticated requests**. A later authorized probe should be one exact
+  workspace and one completed UTC window, at most one first-page GET plus
+  documented cursor pages, with a
   separately justified exact ownership check; no aggregate/customer scan.
 - **Tests:** Fake v2 responses for sparse-present row, absent row, malformed
   metadata, unsupported entity, page continuation, duplicate cursor/key, and

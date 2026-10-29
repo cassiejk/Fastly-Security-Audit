@@ -192,6 +192,15 @@ dispatch_ngwaf_namespace() {
       dispatch_preflight agent-diagnostic
       cmd_ngwaf_agent_diagnostic
       ;;
+    platform-metrics-diagnostic)
+      platform_metrics_diagnostic_parse_args "$@"
+      if [[ "$PLATFORM_METRICS_DIAGNOSTIC_HELP" == 1 ]]; then
+        platform_metrics_diagnostic_usage
+        return
+      fi
+      dispatch_preflight platform-metrics-diagnostic
+      cmd_platform_metrics_diagnostic
+      ;;
     workspaces|link|workspace-services|workspace|posture|rule|rules|account-rules|thresholds|lists|bot-rules|count|requests|rule-audit|template-audit|signal-count|overview|timeseries|metrics|attack-profile|attack-origins)
       dispatch_flat "$subcommand" "$@"
       ;;

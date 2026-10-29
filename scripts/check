@@ -58,10 +58,12 @@ printf 'CLI smoke tests...\n'
 printf 'Behavior tests...\n'
 "$ROOT/tests/runtime.sh"
 "$ROOT/tests/setup.sh"
+"$ROOT/tests/authentication.sh"
 "$ROOT/tests/package-release.sh"
 "$ROOT/tests/install.sh"
 "$ROOT/tests/count.sh"
 "$ROOT/tests/metrics.sh"
+"$ROOT/tests/platform-metrics-diagnostic.sh"
 "$ROOT/tests/doctor.sh"
 "$ROOT/tests/rules.sh"
 "$ROOT/tests/requests.sh"

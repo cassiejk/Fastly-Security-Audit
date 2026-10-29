@@ -53,6 +53,7 @@ for _ngwaf_module in \
   lib/ngwaf_architecture.sh \
   lib/bots.sh \
   lib/metrics.sh \
+  lib/platform_metrics_diagnostic.sh \
   lib/request_search.sh \
   lib/rule_audit.sh \
   lib/template_audit.sh \

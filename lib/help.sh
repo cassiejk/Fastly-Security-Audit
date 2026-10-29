@@ -305,7 +305,9 @@ fastly-audit ngwaf — Next-Gen WAF inspection
   workspaces
     List configured NGWAF workspaces.
   agent-diagnostic <workspace-id> [--json]
-    Check workspace identity and Agents API response; not deployment classification.
+    Check workspace identity, aggregate Agents health, and public API source; not deployment classification.
+  platform-metrics-diagnostic <workspace-id> --start UTC --end UTC [--json]
+    Probe one completed UTC day of Platform Metrics v2 for an exact workspace ID.
   link '<customer-request-url>'
   workspace-services <workspace>|--all [--json] [--sigsci-corp CORP] [--with-domains]
   workspace-services --service-id <exact-CDN-service-ID> [--json] [--sigsci-corp CORP] [--with-domains]

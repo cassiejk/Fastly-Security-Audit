@@ -280,8 +280,8 @@ unavailable source is not evidence that a deployment is absent.
 
 ### NG-12 — Beta metrics are not yet interchangeable with NGWAF time series
 
-- **Status:** Planned investigation; no Platform Metrics v2 collector exists in
-  `fa` yet.
+- **Status:** A narrow P0 `ngwaf platform-metrics-diagnostic` candidate probe
+  exists; no Platform Metrics v2 collector or verified entity-ID mapping exists.
 - **Affected:** Future NGWAF metrics work. Current `overview`, `timeseries`,
   `metrics`, `attack-profile`, and `attack-origins` retain their existing APIs.
 - **Constraint:** The published Platform Metrics v2 API is beta. Its `ngwaf`
@@ -291,13 +291,59 @@ unavailable source is not evidence that a deployment is absent.
   counters. Similar names do not establish equivalence with legacy fields.
 - **Within `fa`:** Keep old collectors and missing-data safeguards intact.
   Do not infer zero traffic from a missing row or completeness from one page.
+  The diagnostic requires exact public workspace owner metadata and reports a
+  candidate Metrics entity ID. Even a 200 response remains an unverified
+  cross-API identity join and produces a nonzero P0-validation exit. The
+  existing HTTP helper does not expose response Content-Type, so JSON reports
+  that field as null.
 - **Sources:** [NGWAF-first metrics roadmap](roadmap-platform-metrics.md),
   [Fastly Platform Metrics API](https://www.fastly.com/documentation/reference/api/metrics-stats/metrics-v2/platform/),
   `lib/metrics.sh`, `lib/attack_analysis.sh`.
 - **Resolution evidence/date:** Establish entity ownership, supported
   metric/entity combinations, pagination and sparse-row behavior, then compare
   settled matching UTC windows using narrow read-only probes. Documentation
-  reviewed 22 October 2026; no authenticated v2 request was made.
+  reviewed 28 October 2026; as of that date, fake API tests only and no
+  authenticated v2 request. See NG-13 for the 29 October authenticated result.
+
+### NG-13 — Scoped Platform Metrics v2 request returns HTTP 400
+
+- **Status:** Unresolved — awaiting clarification from Platform Metrics
+  Engineering via `#observability-questions`. No defect or ticket acceptance
+  has been confirmed.
+- **Observed:** 29 October 2026 for Costco (`tHYft17nv2e3hrPd0bfuZ`), public
+  NGWAF workspace `gdx-costco-prd-ecomapi`. Customer preflight succeeded; exact
+  workspace ownership was verified by an HTTP 200 detail response.
+- **Request:** `GET /metrics/v2/platform/entities/{entity_id}/day` with
+  `entity_id=gdx-costco-prd-ecomapi`, `from=2026-10-26T00:00:00Z`,
+  `to=2026-10-27T00:00:00Z`, `metric=ngwaf_requests_total_count`, and
+  `limit=100`.
+- **Result:** HTTP 400 with a JSON object error body. The sanitized diagnostic
+  reported `status=unsupported_parameter`, `error_category=explicit_api_error`,
+  and `api_validation_message=API reports invalid parameter`; it did not
+  identify the rejected parameter or value. No Metrics observations were
+  returned, and `p0_validated=false`. The status is a local classification,
+  not proof that a parameter name or the metric is unsupported, or that the
+  workspace identifier is invalid. No observations do not mean zero requests.
+- **Independent evidence:** Legacy NGWAF timeseries returned one observed
+  daily bucket for the same workspace and UTC window, with
+  `requests_total=113019418`; overall legacy observation completeness remains
+  unknown. Legacy success establishes neither the cross-API entity mapping nor
+  metric equivalence. The public workspace `id` remains an unverified Metrics
+  `entity_id` candidate.
+- **Engineering questions:** Which identifier represents an NGWAF workspace
+  entity: public `id`, `workspace_uid`, or a separate Metrics ID? Are
+  `metric=ngwaf_requests_total_count` and `limit=100` valid on the single-entity
+  `/day` endpoint? What is the canonical HTTP 400 validation-error schema, and
+  how can the rejected parameter and reason be identified safely?
+- **Resolution criteria:** Establish the supported workspace-to-Metrics entity
+  mapping and verify request parameters against the actual endpoint contract;
+  obtain at least one scoped successful Metrics response; validate its metric,
+  entity, daily bucket, and completeness semantics. HTTP 200 alone does not
+  prove the mapping. Keep P0 blocked and do not start P1a merely because a
+  subsequent request lacks a 400.
+- **Sources:** [P0 roadmap](roadmap-platform-metrics.md),
+  `lib/platform_metrics_diagnostic.sh`, and the reported authenticated
+  diagnostic and legacy timeseries observations of 29 October 2026.
 
 ## Maintenance
 
