@@ -57,10 +57,10 @@ usage() {
 fastly-audit GitHub Release installer
 
 Usage:
-  bash fastly-audit-installer.sh [--version TAG] [--repo OWNER/REPO] [--bin-dir DIR] [--customer-id CUSTOMER_ID] [--skip-setup]
+  bash fastly-audit-installer.sh [--version TAG] [--repo OWNER/REPO] [--bin-dir DIR] [--customer-id CUSTOMER_ID] [--configure-shell] [--skip-setup]
 
 Defaults:
-  --repo cassiejk/ngwaf-helper
+  --repo cassiejk/Fastly-Security-Audit
   --version latest
   --bin-dir ~/bin
 
@@ -85,8 +85,10 @@ download_file() {
   local url="$1"
   local output="$2"
 
-  printf 'Downloading %s\n' "$url"
-  curl -fsSL "$url" -o "$output"
+  printf 'Downloading %s\n' "${output##*/}"
+  if ! curl -fsSL "$url" -o "$output"; then
+    fail 'download failed; confirm that the Release and all installer assets are published and accessible'
+  fi
 }
 
 verify_checksum() {
@@ -105,11 +107,12 @@ verify_checksum() {
   fi
 }
 
-repo="${FASTLY_AUDIT_REPO:-cassiejk/ngwaf-helper}"
+repo="${FASTLY_AUDIT_REPO:-cassiejk/Fastly-Security-Audit}"
 version="${FASTLY_AUDIT_VERSION:-latest}"
 bin_dir="${FASTLY_AUDIT_BIN_DIR:-$HOME/bin}"
 customer_id=""
 skip_setup=false
+configure_shell=false
 
 while (( $# > 0 )); do
   case "$1" in
@@ -137,6 +140,10 @@ while (( $# > 0 )); do
       skip_setup=true
       shift
       ;;
+    --configure-shell)
+      configure_shell=true
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -151,6 +158,16 @@ case "$repo" in
   */*) ;;
   *) fail 'repo must be OWNER/REPO' ;;
 esac
+
+if [[ "$configure_shell" == true ]]; then
+  [[ "$bin_dir" == "$HOME/bin" ]] ||
+    fail '--configure-shell supports the default ~/bin only; use the printed PATH command for a custom --bin-dir'
+  case "${SHELL##*/}" in
+    zsh) profile="$HOME/.zprofile" ;;
+    bash) profile="$HOME/.bash_profile" ;;
+    *) fail '--configure-shell supports zsh or bash; use the printed PATH command for this shell' ;;
+  esac
+fi
 
 require_command curl
 require_command tar
@@ -192,6 +209,22 @@ package_root="$extract_dir/fastly-audit"
 export FASTLY_AUDIT_BIN_DIR="$bin_dir"
 "$package_root/ngwaf-update" "$package_root"
 
+if [[ "$configure_shell" == true ]]; then
+  # The profile must expand HOME and PATH when a future shell starts.
+  # shellcheck disable=SC2016
+  path_line='export PATH="$HOME/bin:$PATH"'
+  if [[ -f "$profile" ]] && grep -Fqx "$path_line" "$profile"; then
+    printf 'PATH already configured in %s\n' "$profile"
+  else
+    if [[ -e "$profile" ]]; then
+      profile_backup="${profile}.backup-$(date +%Y%m%d-%H%M%S)-$$"
+      cp -p "$profile" "$profile_backup"
+      printf 'Shell profile backup: %s\n' "$profile_backup"
+    fi
+    printf '\n%s\n' "$path_line" >>"$profile"
+    printf 'Added ~/bin to PATH for future terminals in %s\n' "$profile"
+  fi
+fi
 printf '\nInstall complete.\n'
 case ":$PATH:" in
   *":$bin_dir:"*) ;;
@@ -201,14 +234,15 @@ case ":$PATH:" in
 esac
 
 if [[ "$skip_setup" == "true" ]]; then
-  printf 'Setup skipped. Run later with: %s/fastly-audit setup --customer-id CUSTOMER_ID\n' \
+  printf 'Setup skipped. Run later with: %s/fa setup --customer-id CUSTOMER_ID\n' \
     "$bin_dir"
 elif [[ -n "$customer_id" && -n "${FASTLY_API_TOKEN:-}" ]]; then
-  "$bin_dir/fastly-audit" setup --customer-id "$customer_id"
+  "$bin_dir/fa" setup --customer-id "$customer_id"
 elif [[ -n "$customer_id" ]]; then
-  printf 'Set FASTLY_API_TOKEN, then run: %s/fastly-audit setup --customer-id %s\n' \
+  printf 'Load FASTLY_API_TOKEN through your approved credential workflow, then run: %s/fa setup --customer-id %s\n' \
     "$bin_dir" "$customer_id"
 else
-  printf 'Next: set FASTLY_API_TOKEN, then run: %s/fastly-audit setup --customer-id CUSTOMER_ID\n' \
+  printf 'Next: load FASTLY_API_TOKEN through your approved credential workflow, then run: %s/fa setup --customer-id CUSTOMER_ID\n' \
     "$bin_dir"
 fi
+printf 'Once setup succeeds, map a CDN service with: %s/fa ngwaf workspace-services --service-id EXACT_CDN_SERVICE_ID --json\n' "$bin_dir"

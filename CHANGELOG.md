@@ -3,7 +3,7 @@
 All notable changes to `fastly-audit` and its `ngwaf` compatibility command are
 documented here.
 
-## Unreleased
+## [24.2] - 2026-10-29
 
 ### Added
 
@@ -12,6 +12,11 @@ documented here.
 - Added a standalone Release installer that downloads, verifies, and installs
   the CLI package from the latest or a specified GitHub Release.
 - Added release packaging and release-install regression coverage.
+- Added the `fa` command link and opt-in shell PATH setup for first-time users.
+- Made package upgrades restore the prior installation after a failed link step,
+  and refuse to replace an unrelated `fa` command.
+- Changed tag-triggered release automation to assemble assets in a draft before
+  publication, with no replacement of existing Release assets.
 - Added `fastly-audit ngwaf template-audit` to correlate templated signal
   tagging rules, thresholds, retained activity, and conservative review
   indicators.
@@ -75,6 +80,7 @@ documented here.
 - Preserved customer scope, data provenance, pagination, and output contracts
   while converting large JSON payload transport.
 
-[24.1]: https://github.com/cassiejk/ngwaf-helper/compare/v24.0...v24.1
+[24.2]: https://github.com/cassiejk/Fastly-Security-Audit/compare/v24.1...v24.2
+[24.1]: https://github.com/cassiejk/Fastly-Security-Audit/compare/v24.0...v24.1
 [24.0]: https://github.com/cassiejk/ngwaf-helper/releases/tag/v24.0
 [23.2]: https://github.com/cassiejk/ngwaf-helper/releases/tag/v23.2

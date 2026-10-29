@@ -24,6 +24,7 @@ BIN_DIR="${FASTLY_AUDIT_BIN_DIR:-$HOME/bin}"
 PRIMARY_TARGET="$BIN_DIR/fastly-audit"
 LEGACY_TARGET="$BIN_DIR/ngwaf"
 UPDATER_TARGET="$BIN_DIR/ngwaf-update"
+SHORT_TARGET="$BIN_DIR/fa"
 INSTALL_ROOT="${FASTLY_AUDIT_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/fastly-audit}"
 
 candidate="${1:-.}"
@@ -85,45 +86,86 @@ cp -R "$SOURCE_ROOT/lib/." "$stage/lib/"
 cp -R "$SOURCE_ROOT/customer/." "$stage/customer/"
 
 mkdir -p "$(dirname "$INSTALL_ROOT")" "$BIN_DIR"
-
-if [[ -d "$INSTALL_ROOT" ]]; then
-  backup="${INSTALL_ROOT}.backup-$(date +%Y%m%d-%H%M%S)"
-  mv "$INSTALL_ROOT" "$backup"
-  printf 'Backup: %s\n' "$backup"
+if [[ -e "$INSTALL_ROOT" && ! -d "$INSTALL_ROOT" ]]; then
+  printf 'ngwaf-update: installation path is not a directory: %s\n' "$INSTALL_ROOT" >&2
+  exit 1
 fi
 
-mv "$stage" "$INSTALL_ROOT"
-trap - EXIT
+# Never replace another program named fa. Existing links from this installer
+# are safe to refresh; a regular file or unrelated link needs user attention.
+if [[ -e "$SHORT_TARGET" || -L "$SHORT_TARGET" ]]; then
+  if [[ ! -L "$SHORT_TARGET" || "$(readlink "$SHORT_TARGET")" != "$INSTALL_ROOT/fastly-audit" ]]; then
+    printf 'ngwaf-update: %s already exists and is not this installation; choose another bin directory or resolve the conflict\n' \
+      "$SHORT_TARGET" >&2
+    exit 1
+  fi
+fi
 
-replace_command_link() {
-  local target="$1"
-  local source="$2"
+declare -a link_targets=("$PRIMARY_TARGET" "$LEGACY_TARGET" "$UPDATER_TARGET" "$SHORT_TARGET")
+declare -a link_sources=("$INSTALL_ROOT/fastly-audit" "$INSTALL_ROOT/ngwaf" "$INSTALL_ROOT/ngwaf-update" "$INSTALL_ROOT/fastly-audit")
+declare -a link_backups=('' '' '' '')
+declare -a link_created=(false false false false)
+package_backup=''
+transaction_active=false
 
-  if [[ -e "$target" || -L "$target" ]]; then
-    if [[ ! -L "$target" ]]; then
-      local backup_bin
-      backup_bin="${target}.backup-$(date +%Y%m%d-%H%M%S)"
-      mv "$target" "$backup_bin"
-      printf 'Backup: %s\n' "$backup_bin"
+finish_install() {
+  local status=$?
+  local i
+  if [[ "$transaction_active" == true ]]; then
+    for (( i=${#link_targets[@]}-1; i>=0; i-- )); do
+      if [[ -n "${link_backups[i]}" ]]; then
+        rm -f "${link_targets[i]}"
+        mv "${link_backups[i]}" "${link_targets[i]}" || true
+      elif [[ "${link_created[i]}" == true ]]; then
+        rm -f "${link_targets[i]}"
+      fi
+    done
+    rm -rf "$INSTALL_ROOT"
+    if [[ -n "$package_backup" ]]; then
+      mv "$package_backup" "$INSTALL_ROOT" || true
+    fi
+    if [[ -n "$package_backup" ]]; then
+      printf 'ngwaf-update: installation failed; previous installation restored\n' >&2
     else
-      rm -f "$target"
+      printf 'ngwaf-update: installation failed; incomplete installation removed\n' >&2
     fi
   fi
-
-  ln -s "$source" "$target"
+  rm -rf "$stage"
+  exit "$status"
 }
+trap finish_install EXIT
 
-replace_command_link \
-  "$PRIMARY_TARGET" \
-  "$INSTALL_ROOT/fastly-audit"
+if [[ -d "$INSTALL_ROOT" ]]; then
+  package_backup="${INSTALL_ROOT}.backup-$(date +%Y%m%d-%H%M%S)-$$"
+  mv "$INSTALL_ROOT" "$package_backup"
+  printf 'Backup: %s\n' "$package_backup"
+fi
 
-replace_command_link \
-  "$LEGACY_TARGET" \
-  "$INSTALL_ROOT/ngwaf"
+transaction_active=true
+mv "$stage" "$INSTALL_ROOT"
+for (( i=0; i<${#link_targets[@]}; i++ )); do
+  if [[ -e "${link_targets[i]}" || -L "${link_targets[i]}" ]]; then
+    prior_link="${link_targets[i]}.backup-$(date +%Y%m%d-%H%M%S)-$$"
+    mv "${link_targets[i]}" "$prior_link"
+    link_backups[i]="$prior_link"
+  fi
+  ln -s "${link_sources[i]}" "${link_targets[i]}"
+  link_created[i]=true
+done
 
-replace_command_link \
-  "$UPDATER_TARGET" \
-  "$INSTALL_ROOT/ngwaf-update"
+"$PRIMARY_TARGET" version
+"$LEGACY_TARGET" version
+"$SHORT_TARGET" version
+transaction_active=false
+for (( i=0; i<${#link_targets[@]}; i++ )); do
+  if [[ -n "${link_backups[i]}" ]]; then
+    if [[ -L "${link_backups[i]}" ]]; then
+      rm -f "${link_backups[i]}"
+    else
+      printf 'Backup: %s\n' "${link_backups[i]}"
+    fi
+  fi
+done
 
 printf 'Installed package: %s -> %s\n' \
   "$SOURCE_ROOT" "$INSTALL_ROOT"
@@ -136,6 +178,8 @@ printf 'Compatibility command: %s -> %s\n' \
 
 printf 'Updater command: %s -> %s\n' \
   "$UPDATER_TARGET" "$INSTALL_ROOT/ngwaf-update"
+printf 'Short command: %s -> %s\n' \
+  "$SHORT_TARGET" "$INSTALL_ROOT/fastly-audit"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*)
@@ -149,10 +193,7 @@ esac
 printf 'Required runtime: Bash %s or newer via /usr/bin/env bash\n' \
   "$NGWAF_MIN_BASH_VERSION"
 
-"$PRIMARY_TARGET" version
-"$LEGACY_TARGET" version
-
 printf '\nNext setup check:\n'
-printf '  export FASTLY_API_TOKEN=YOUR_FASTLY_TOKEN\n'
-printf '  fastly-audit setup --customer-id CUSTOMER_ID\n'
-printf '  fastly-audit doctor --verbose\n'
+printf '  Load FASTLY_API_TOKEN through your approved credential workflow.\n'
+printf '  fa setup --customer-id CUSTOMER_ID\n'
+printf '  fa ngwaf workspace-services --service-id EXACT_CDN_SERVICE_ID --json\n'

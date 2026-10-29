@@ -1,6 +1,7 @@
-# fastly-audit v24.1
+# fastly-audit v24.2
 
-v24.1 adds a customer-scoped security-product inventory spanning API
+v24.2 adds a short `fa` command, opt-in shell setup, and safer installation
+upgrades. The customer-scoped security-product inventory spans API
 Discovery, Bot Management, DDoS Protection, Edge WAF service attachments,
 and the complete NGWAF workspace collection. Product-list queries explicitly
 carry the selected customer ID and validate the response customer before data
@@ -101,19 +102,25 @@ Run directly from the repository:
 
 ### Colleague Quickstart
 
-For a first-time user, the preferred path is the latest GitHub Release:
+For a first-time user, use a published GitHub Release:
 
 ```bash
-curl -fsSLO https://github.com/cassiejk/ngwaf-helper/releases/latest/download/fastly-audit-installer.sh
-bash fastly-audit-installer.sh
-export FASTLY_API_TOKEN=YOUR_FASTLY_TOKEN
-fastly-audit setup --customer-id CUSTOMER_ID
+curl -fsSLO https://github.com/cassiejk/Fastly-Security-Audit/releases/latest/download/fastly-audit-installer.sh
+bash fastly-audit-installer.sh --configure-shell
+# Follow the installer PATH instruction for this terminal, then load FASTLY_API_TOKEN
+# through your approved credential workflow.
+fa setup --customer-id CUSTOMER_ID
+fa ngwaf workspace-services --service-id EXACT_CDN_SERVICE_ID --json
 ```
 
 The installer downloads `fastly-audit.tar.gz` and
 `fastly-audit.tar.gz.sha256` from the same release, verifies the checksum,
-installs `fastly-audit`, `ngwaf`, and `ngwaf-update`, and prints the setup
-command to run next. It does not edit shell startup files.
+installs `fa`, `fastly-audit`, `ngwaf`, and `ngwaf-update`, and prints the setup
+and mapping commands to run next. `--configure-shell` adds `~/bin` to future
+zsh or Bash terminals, backs up an existing profile, and never writes credentials.
+Without that explicit option, the installer does not edit shell startup files.
+It refuses to replace an unrelated `fa` command. The current terminal still
+needs the printed `export PATH=...` command if `~/bin` is not already in `PATH`.
 
 For development from a local checkout:
 
@@ -392,7 +399,7 @@ The JSON contract is `schema: "fastly-ddos-evidence"` with
   "schema": "fastly-ddos-evidence",
   "schema_version": 1,
   "collected_at": "2026-09-23T18:00:00Z",
-  "collector": {"name": "fastly-audit", "version": "24.1"},
+  "collector": {"name": "fastly-audit", "version": "24.2"},
   "scope": {
     "event_id": "example-event-id",
     "requested_customer_id": "example-customer-id",
@@ -1006,8 +1013,8 @@ bash --version
 Download and run the Release installer:
 
 ```bash
-curl -fsSLO https://github.com/cassiejk/ngwaf-helper/releases/latest/download/fastly-audit-installer.sh
-bash fastly-audit-installer.sh
+curl -fsSLO https://github.com/cassiejk/Fastly-Security-Audit/releases/latest/download/fastly-audit-installer.sh
+bash fastly-audit-installer.sh --configure-shell
 ```
 
 The Release must contain these three assets:
@@ -1021,7 +1028,7 @@ fastly-audit.tar.gz.sha256
 To install a specific release tag:
 
 ```bash
-bash fastly-audit-installer.sh --version v24.1
+bash fastly-audit-installer.sh --version v24.2
 ```
 
 To carry the first setup command into the installer output:
@@ -1036,8 +1043,10 @@ token is available.
 
 ### Publish Release Assets
 
-When you publish a GitHub Release for a tag that matches the script version
-such as `v24.1`, the Release workflow runs the full check suite and uploads:
+Pushing a tag that matches the script version, such as `v24.2`, makes the
+Release workflow run the full check suite and create a **draft** Release
+containing all three assets. Review the draft and publish it only after all
+assets are present; the latest-download URL works after publication:
 
 ```text
 fastly-audit-installer.sh
@@ -1048,7 +1057,7 @@ fastly-audit.tar.gz.sha256
 You can build the same assets locally without publishing anything:
 
 ```bash
-./scripts/package-release --dist dist --tag v24.1
+./scripts/package-release --dist dist --tag v24.2
 ```
 
 The packaging script refuses a tag that does not match `fastly-audit version`.
@@ -1058,7 +1067,7 @@ The packaging script refuses a tag that does not match `fastly-audit version`.
 The old `ngwaf-update ./ngwaf` workflow is preserved, but the updater installs
 the whole package under `~/.local/share/fastly-audit` and symlinks
 `~/bin/fastly-audit`, `~/bin/ngwaf`, and `~/bin/ngwaf-update` to its entry
-points.
+points. It also installs `~/bin/fa` as a short link to `fastly-audit`.
 
 Install the new updater once:
 

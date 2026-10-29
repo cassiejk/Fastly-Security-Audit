@@ -1,13 +1,13 @@
 name: Release
 
 on:
-  release:
-    types:
-      - published
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to package, for example v24.1
+        description: Existing release tag to package, for example v24.2
         required: true
         type: string
 
@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -31,7 +31,7 @@ jobs:
       - name: Check out release tag
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ inputs.tag || github.ref_name }}
           persist-credentials: false
 
       - name: Install ShellCheck
@@ -50,16 +50,20 @@ jobs:
 
       - name: Package release assets
         run: |
-          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          tag="${{ inputs.tag || github.ref_name }}"
           ./scripts/package-release --tag "$tag" --dist dist
 
-      - name: Upload release assets
+      - name: Create draft release with verified assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${{ github.event.release.tag_name || inputs.tag }}"
-          gh release upload "$tag" \
+          tag="${{ inputs.tag || github.ref_name }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; refusing to replace its assets" >&2
+            exit 1
+          fi
+          gh release create "$tag" \
             dist/fastly-audit.tar.gz \
             dist/fastly-audit.tar.gz.sha256 \
             dist/fastly-audit-installer.sh \
-            --clobber
+            --draft --verify-tag --title "$tag" --generate-notes
