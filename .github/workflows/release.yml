@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to package, for example v24.2
+        description: Existing release tag to package, for example v24.2.1
         required: true
         type: string
 
@@ -45,13 +45,25 @@ jobs:
           bash --version
           bash -c 'source ./lib/runtime.sh; ngwaf_require_bash_runtime github-actions'
 
-      - name: Run checks
-        run: ./scripts/check
+      - name: Validate release scripts
+        run: |
+          bash -n fastly-audit ngwaf ngwaf-update install.sh scripts/package-release \
+            tests/package-release.sh tests/install.sh tests/updater.sh
+          shellcheck -S warning fastly-audit ngwaf ngwaf-update install.sh \
+            scripts/package-release tests/package-release.sh tests/install.sh tests/updater.sh
 
-      - name: Package release assets
+      - name: Test package, installer, and updater
+        run: |
+          ./tests/package-release.sh
+          ./tests/install.sh
+          ./tests/updater.sh
+
+      - name: Package release assets and verify tag
         run: |
           tag="${{ inputs.tag || github.ref_name }}"
           ./scripts/package-release --tag "$tag" --dist dist
+          (cd dist && sha256sum -c fastly-audit.tar.gz.sha256)
+          tar -tzf dist/fastly-audit.tar.gz >/dev/null
 
       - name: Create draft release with verified assets
         env:

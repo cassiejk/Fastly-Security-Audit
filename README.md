@@ -1,6 +1,6 @@
-# fastly-audit v24.2
+# fastly-audit v24.2.1
 
-v24.2 adds a short `fa` command, opt-in shell setup, and safer installation
+v24.2.1 adds a short `fa` command, opt-in shell setup, and safer installation
 upgrades. The customer-scoped security-product inventory spans API
 Discovery, Bot Management, DDoS Protection, Edge WAF service attachments,
 and the complete NGWAF workspace collection. Product-list queries explicitly
@@ -140,11 +140,10 @@ When `--customer-id` validates successfully, the customer selection is saved to
 `~/.config/fastly-ngwaf/customer_id` with owner-only permissions. The token
 value is never printed or stored.
 
-Before committing:
-
-```bash
-./scripts/check
-```
+For development and commits, follow the focused validation budget in
+[`AGENTS.md`](AGENTS.md). Run `./scripts/check` only when full regression
+validation is explicitly requested for that task. The GitHub `Check` workflow
+also runs the full suite only when manually dispatched.
 
 API requests show an interactive spinner and elapsed time on stderr, leaving
 stdout safe for JSON pipelines. Failures include status-specific hints and
@@ -399,7 +398,7 @@ The JSON contract is `schema: "fastly-ddos-evidence"` with
   "schema": "fastly-ddos-evidence",
   "schema_version": 1,
   "collected_at": "2026-09-23T18:00:00Z",
-  "collector": {"name": "fastly-audit", "version": "24.2"},
+  "collector": {"name": "fastly-audit", "version": "24.2.1"},
   "scope": {
     "event_id": "example-event-id",
     "requested_customer_id": "example-customer-id",
@@ -1028,7 +1027,7 @@ fastly-audit.tar.gz.sha256
 To install a specific release tag:
 
 ```bash
-bash fastly-audit-installer.sh --version v24.2
+bash fastly-audit-installer.sh --version v24.2.1
 ```
 
 To carry the first setup command into the installer output:
@@ -1043,9 +1042,10 @@ token is available.
 
 ### Publish Release Assets
 
-Pushing a tag that matches the script version, such as `v24.2`, makes the
-Release workflow run the full check suite and create a **draft** Release
-containing all three assets. Review the draft and publish it only after all
+Pushing a tag that matches the script version, such as `v24.2.1`, makes the
+Release workflow run targeted Bash syntax, ShellCheck, package, installer, and
+updater checks before creating a **draft** Release containing all three assets.
+Review the draft and publish it only after all
 assets are present; the latest-download URL works after publication:
 
 ```text
@@ -1057,7 +1057,7 @@ fastly-audit.tar.gz.sha256
 You can build the same assets locally without publishing anything:
 
 ```bash
-./scripts/package-release --dist dist --tag v24.2
+./scripts/package-release --dist dist --tag v24.2.1
 ```
 
 The packaging script refuses a tag that does not match `fastly-audit version`.

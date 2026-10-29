@@ -3,7 +3,7 @@
 # shellcheck disable=SC2034
 set -euo pipefail
 
-VERSION="24.2"
+VERSION="24.2.1"
 PROGRAM_NAME="${FASTLY_AUDIT_INVOKED_AS:-fastly-audit}"
 USAGE_PROGRAM="$PROGRAM_NAME"
 API_BASE="https://api.fastly.com"

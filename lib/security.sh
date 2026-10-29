@@ -57,7 +57,7 @@ legacy_map_internal_get_to_file() {
   local url code err_tmp curl_rc=0
   local -a retry_args=(--retry "$CURL_RETRIES")
 
-  internal_ngwaf_require_credentials || return 1
+  internal_ngwaf_require_credentials 'internal NGWAF site inventory' || return 1
 
   validate_http_settings
   if (( CURL_RETRIES > 0 )); then

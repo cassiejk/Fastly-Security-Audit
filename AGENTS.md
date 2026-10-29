@@ -71,8 +71,10 @@ These budgets are automatic repository defaults for every future Codex task,
 including tasks that do not mention testing. Silence about validation never
 permits extra tests. Codex must apply this policy without requiring the user to
 request fewer tests, name a tier, or repeat the limits. "Make sure it works" does
-not authorize the full suite. Explicit user instructions or genuinely necessary
-safety checks can require more validation; identify and justify each exception.
+not authorize the full suite. Only the user's explicit authorization for this
+specific task permits Tier 3. Report external CI or release protection gates
+that require more validation; do not bypass them or treat them as local
+authorization.
 Budgets are cumulative across the entire task and do not reset after edits,
 failures, iterations, or a transition between tiers. Complexity or shared-file
 imports alone do not expand them.
@@ -106,9 +108,9 @@ per development task. This does not limit implementation time. Inspect unfamilia
 test scripts before running them; prefer quick, directly relevant checks. Do
 not start another test after the budget is exhausted. If a test substantially
 exceeds it, terminate cleanly when safe and mark it incomplete; do not restart
-it merely to obtain a pass. A necessary correctness or safety check may exceed
-the budget only with an explicit justification. Report incomplete validation
-and stop instead of progressively broadening the suite.
+it merely to obtain a pass or keep monitoring it in hope of completion. Report
+incomplete validation and stop instead of progressively broadening the suite.
+An exhausted budget is a stopping condition.
 
 Choose tests for the changed behavior, not for the number of dependents of a
 file. Do not run `tests/customer-security.sh` merely because `lib/security.sh`
@@ -130,13 +132,13 @@ authenticated customer API call merely to validate local code.
 
 ### Tier 3 — Full repository integration
 
-Preserve the existing `./scripts/check` suite. Run it only when the user
-explicitly requests full validation, an approved commit/merge/release requires
-it, a genuinely foundational or high-risk change cannot be assessed with
-focused tests, or a specific cross-module regression is identified. Name the
-trigger before running Tier 3. A shared-file edit alone is not a trigger. Never
-run Tier 3 during routine iteration or by default at feature completion, and
-do not rerun it if unchanged relevant code already passed.
+Preserve the existing `./scripts/check` suite. Codex must not run it or an
+equivalent complete regression suite without the user's explicit authorization
+for that specific task. Implementing, fixing, committing, pushing, installing,
+packaging, or releasing does not authorize Tier 3. Neither a shared-module edit,
+perceived foundational or security risk, nor cross-module dependencies grant
+an automatic exception. Report any independent CI or release protection that
+requires broader testing rather than bypassing it or claiming it passed.
 
 ### Validation freeze and stopping rule
 
@@ -144,9 +146,17 @@ Once Tier 2 begins, stop nonessential code changes, speculative edge cases,
 unrelated tests, opportunistic refactoring, unrelated documentation, and extra
 validation without a specific unresolved failure. If a required defect appears,
 make the smallest correction and rerun only the directly affected test when
-needed. Expand checks only if shared foundational behavior changed; do not
-restart the full suite automatically. Investigate relevant failures without
-making unrelated production changes to fix pre-existing failures.
+needed. Expand focused checks only for a directly relevant failure and within
+the approved budget; do not restart the full suite automatically. Investigate
+relevant failures without making unrelated production changes to fix
+pre-existing test failures.
+
+Do not rerun tests that passed against unchanged code, restart a full suite
+merely because a release version changed, or run both a broad suite and its
+component scripts without a specific reason. Do not select tests solely
+because they source a shared Bash module or use exhaustive regression testing
+to compensate for unrelated uncertainty. If a focused test fails, investigate
+and rerun only that test after the relevant correction.
 
 Stop validating and report when requested behavior is complete, applicable
 focused tests and syntax/targeted lint pass, required documentation is updated,

@@ -33,9 +33,9 @@ INSTALL_ROOT="$TEST_DATA/fastly-audit"
 [[ "$(readlink "$UPDATER")" == "$INSTALL_ROOT/ngwaf-update" ]]
 [[ "$(readlink "$SHORT")" == "$INSTALL_ROOT/fastly-audit" ]]
 
-[[ "$("$PRIMARY" version)" == "fastly-audit 24.2" ]]
-[[ "$("$LEGACY" version)" == "ngwaf 24.2" ]]
-[[ "$("$SHORT" version)" == "fastly-audit 24.2" ]]
+[[ "$("$PRIMARY" version)" == "fastly-audit 24.2.1" ]]
+[[ "$("$LEGACY" version)" == "ngwaf 24.2.1" ]]
+[[ "$("$SHORT" version)" == "fastly-audit 24.2.1" ]]
 HOME="$TEST_HOME" \
 XDG_DATA_HOME="$TEST_DATA" \
 NGWAF_PROGRESS=never \
@@ -52,8 +52,8 @@ grep -F "PATH note: add $TEST_HOME/bin to PATH" "$TEST_TMP/updater-output" >/dev
 grep -F "Required runtime: Bash 5.2 or newer via /usr/bin/env bash" "$TEST_TMP/updater-output" >/dev/null
 grep -F "Next setup check:" "$TEST_TMP/updater-output" >/dev/null
 grep -F "fa setup --customer-id CUSTOMER_ID" "$TEST_TMP/updater-output" >/dev/null
-grep -F "fastly-audit 24.2" "$TEST_TMP/updater-output" >/dev/null
-grep -F "ngwaf 24.2" "$TEST_TMP/updater-output" >/dev/null
+grep -F "fastly-audit 24.2.1" "$TEST_TMP/updater-output" >/dev/null
+grep -F "ngwaf 24.2.1" "$TEST_TMP/updater-output" >/dev/null
 
 # A pre-existing unrelated fa command must remain untouched.
 mv "$SHORT" "$TEST_TMP/our-fa"
@@ -84,6 +84,6 @@ fi
 grep -F 'previous installation restored' "$TEST_TMP/rollback-err" >/dev/null
 [[ -f "$INSTALL_ROOT/rollback-marker" ]]
 for command_path in "$PRIMARY" "$LEGACY" "$UPDATER" "$SHORT"; do [[ -L "$command_path" ]]; done
-[[ "$("$SHORT" version)" == 'fastly-audit 24.2' ]]
+[[ "$("$SHORT" version)" == 'fastly-audit 24.2.1' ]]
 
 printf 'updater: OK\n'

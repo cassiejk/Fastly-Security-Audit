@@ -3,7 +3,7 @@
 All notable changes to `fastly-audit` and its `ngwaf` compatibility command are
 documented here.
 
-## [24.2] - 2026-10-29
+## [24.2.1] - 2026-10-29
 
 ### Added
 
@@ -80,7 +80,7 @@ documented here.
 - Preserved customer scope, data provenance, pagination, and output contracts
   while converting large JSON payload transport.
 
-[24.2]: https://github.com/cassiejk/Fastly-Security-Audit/compare/v24.1...v24.2
+[24.2.1]: https://github.com/cassiejk/Fastly-Security-Audit/compare/v24.1...v24.2.1
 [24.1]: https://github.com/cassiejk/Fastly-Security-Audit/compare/v24.0...v24.1
 [24.0]: https://github.com/cassiejk/ngwaf-helper/releases/tag/v24.0
 [23.2]: https://github.com/cassiejk/ngwaf-helper/releases/tag/v23.2

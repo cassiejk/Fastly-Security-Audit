@@ -6,7 +6,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/helpers.sh"
 test_init
 
 DIST="$TEST_TMP/dist"
-"$ROOT/scripts/package-release" --dist "$DIST" --tag v24.2 >/dev/null
+"$ROOT/scripts/package-release" --dist "$DIST" --tag v24.2.1 >/dev/null
 
 mkdir -p "$TEST_TMP/bin"
 cat >"$TEST_TMP/bin/curl" <<'FAKE_CURL'
@@ -73,9 +73,9 @@ INSTALL_ROOT="$TEST_DATA/fastly-audit"
 [[ -x "$INSTALL_ROOT/ngwaf-update" ]]
 [[ "$(readlink "$SHORT")" == "$INSTALL_ROOT/fastly-audit" ]]
 
-[[ "$("$PRIMARY" version)" == "fastly-audit 24.2" ]]
-[[ "$("$LEGACY" version)" == "ngwaf 24.2" ]]
-[[ "$("$SHORT" version)" == "fastly-audit 24.2" ]]
+[[ "$("$PRIMARY" version)" == "fastly-audit 24.2.1" ]]
+[[ "$("$LEGACY" version)" == "ngwaf 24.2.1" ]]
+[[ "$("$SHORT" version)" == "fastly-audit 24.2.1" ]]
 
 grep -F 'Downloading fastly-audit.tar.gz' "$TEST_TMP/install-output" >/dev/null
 grep -F 'fastly-audit.tar.gz: OK' "$TEST_TMP/install-output" >/dev/null
