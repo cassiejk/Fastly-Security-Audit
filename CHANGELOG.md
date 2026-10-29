@@ -3,6 +3,17 @@
 All notable changes to `fastly-audit` and its `ngwaf` compatibility command are
 documented here.
 
+## [24.2.3] - 2026-10-29
+
+### Improved
+
+- Added local installation preflight checks and collision protection for
+  `fa`, `fastly-audit`, `ngwaf`, and `ngwaf-update`.
+- Made interrupted or failed upgrades report verified restoration or retain
+  backups with manual recovery guidance.
+- Added `fa doctor --local` for zero-network installation checks and isolated
+  installer tests from developer credentials and shell configuration.
+
 ## [24.2.2] - 2026-10-29
 
 ### Improved
@@ -91,6 +102,7 @@ documented here.
 - Preserved customer scope, data provenance, pagination, and output contracts
   while converting large JSON payload transport.
 
+[24.2.3]: https://github.com/cassiejk/Fastly-Security-Audit/compare/v24.2.2...v24.2.3
 [24.2.2]: https://github.com/cassiejk/Fastly-Security-Audit/compare/v24.2.1...v24.2.2
 [24.2.1]: https://github.com/cassiejk/Fastly-Security-Audit/compare/v24.1...v24.2.1
 [24.1]: https://github.com/cassiejk/Fastly-Security-Audit/compare/v24.0...v24.1

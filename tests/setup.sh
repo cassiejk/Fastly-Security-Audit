@@ -91,7 +91,7 @@ jq -e \
   --arg cid_file "$XDG_CONFIG_HOME/fastly-ngwaf/customer_id" '
   .command == "setup"
   and .program == "fastly-audit"
-  and .tool_version == "24.2.2"
+  and .tool_version == "24.2.3"
   and .status != "fail"
   and .runtime.bash.executable == $expected_bash
   and .runtime.bash.minimum_version == "5.2"

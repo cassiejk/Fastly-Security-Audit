@@ -53,7 +53,11 @@ doctor_render_human() {
   local status check detail label
 
   ui_heading "${PROGRAM_NAME:-ngwaf} doctor"
-  printf 'Version %s · read-only diagnostics\n\n' "$VERSION"
+  if [[ "$(jq -r '.mode // ""' <<<"$summary")" == local ]]; then
+    printf 'Version %s · local-only diagnostics\n\n' "$VERSION"
+  else
+    printf 'Version %s · read-only diagnostics\n\n' "$VERSION"
+  fi
 
   while IFS=$'\t' read -r status check detail; do
     ui_status "$status" "$check" "$detail"
@@ -64,6 +68,12 @@ doctor_render_human() {
     "$(jq '[.checks[] | select(.status == "pass")] | length' <<<"$summary")" \
     "$(jq '[.checks[] | select(.status == "warn")] | length' <<<"$summary")" \
     "$(jq '[.checks[] | select(.status == "fail")] | length' <<<"$summary")"
+
+  if [[ "$(jq -r '.mode // ""' <<<"$summary")" == local ]]; then
+    printf 'Local installation: %s\n' "$(jq -r '.status | ascii_upcase' <<<"$summary")"
+    printf 'Fastly API access: unverified (zero network requests).\n'
+    return 0
+  fi
 
   [[ "$(jq -r '.verbose // false' <<<"$summary")" == "true" ]] || return 0
 
@@ -99,10 +109,116 @@ doctor_render_human() {
   )
 }
 
+doctor_local() {
+  local format="$1" verbose="$2" results summary status
+  local bin_dir fa_path expected target name mode token_set=false
+  local config_ready=false customer_file_ready=false
+  results="$(mktemp)"
+  : >"$results"
+
+  if ngwaf_bash_version_at_least "${BASH_VERSINFO[0]:-0}" "${BASH_VERSINFO[1]:-0}"; then
+    doctor_record "$results" pass bash "$(ngwaf_current_bash_executable); ${BASH_VERSION:-unknown}; minimum $NGWAF_MIN_BASH_VERSION"
+  else
+    doctor_record "$results" fail bash "Bash $NGWAF_MIN_BASH_VERSION or newer is required"
+  fi
+  if [[ -x "$NGWAF_ROOT/fastly-audit" && "$("$NGWAF_ROOT/fastly-audit" version)" == "fastly-audit $VERSION" ]]; then
+    doctor_record "$results" pass version "fastly-audit $VERSION"
+  else
+    doctor_record "$results" fail version "installed launcher is missing or does not match version $VERSION"
+  fi
+  for name in curl jq tar; do
+    if command -v "$name" >/dev/null 2>&1; then
+      doctor_record "$results" pass "$name" "$(command -v "$name")"
+    else
+      doctor_record "$results" fail "$name" 'required local dependency is missing'
+    fi
+  done
+  if command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
+    doctor_record "$results" pass checksum 'SHA-256 checksum tool available'
+  else
+    doctor_record "$results" fail checksum 'install sha256sum or shasum for Release verification'
+  fi
+  if [[ -d "$NGWAF_ROOT" && -r "$NGWAF_ROOT" && -r "$NGWAF_ROOT/lib/runtime.sh" ]]; then
+    doctor_record "$results" pass 'installation directory' "$NGWAF_ROOT is readable"
+  else
+    doctor_record "$results" fail 'installation directory' "$NGWAF_ROOT is incomplete or unreadable"
+  fi
+
+  fa_path="$(command -v fa 2>/dev/null || true)"
+  bin_dir="${FASTLY_AUDIT_BIN_DIR:-$HOME/bin}"
+  if [[ -n "$fa_path" && -e "$fa_path" && "$fa_path" -ef "$NGWAF_ROOT/fastly-audit" ]]; then
+    bin_dir="$(dirname "$fa_path")"
+    doctor_record "$results" pass 'fa on PATH' "$fa_path resolves to this installation"
+  elif [[ -n "$fa_path" ]]; then
+    doctor_record "$results" fail 'fa on PATH' "$fa_path takes precedence over this installation"
+  else
+    doctor_record "$results" warn 'fa on PATH' 'fa is not discoverable; use the installed command path or update PATH'
+  fi
+  for name in fa fastly-audit ngwaf ngwaf-update; do
+    target="$bin_dir/$name"
+    case "$name" in
+      fa|fastly-audit) expected="$NGWAF_ROOT/fastly-audit" ;;
+      *) expected="$NGWAF_ROOT/$name" ;;
+    esac
+    if [[ -L "$target" && "$target" -ef "$expected" ]]; then
+      doctor_record "$results" pass "$name link" "$target resolves to this installation"
+    elif [[ -e "$target" || -L "$target" ]]; then
+      doctor_record "$results" fail "$name link" "$target does not resolve to this installation"
+    else
+      doctor_record "$results" warn "$name link" "$target is absent"
+    fi
+  done
+
+  if [[ -d "$CONFIG_DIR" && -r "$CONFIG_DIR" && -x "$CONFIG_DIR" ]]; then
+    config_ready=true
+    mode="$(doctor_file_mode "$CONFIG_DIR")"
+    if [[ "$mode" =~ ^[0-7]+$ ]] && (( (8#$mode & 077) == 0 )); then
+      doctor_record "$results" pass 'config directory' "$CONFIG_DIR is readable with owner-only mode $mode"
+    else
+      doctor_record "$results" warn 'config directory' "$CONFIG_DIR is readable but mode $mode permits other users; consider mode 700"
+    fi
+  elif [[ -e "$CONFIG_DIR" || -L "$CONFIG_DIR" ]]; then
+    doctor_record "$results" fail 'config directory' "$CONFIG_DIR is not a readable directory"
+  else
+    doctor_record "$results" warn 'config directory' "$CONFIG_DIR has not been created"
+  fi
+  if [[ -e "$CID_FILE" || -L "$CID_FILE" ]]; then
+    mode="$(doctor_file_mode "$CID_FILE")"
+    if [[ "$config_ready" == true && -f "$CID_FILE" && ! -L "$CID_FILE" && -r "$CID_FILE" && "$mode" == 600 ]]; then
+      customer_file_ready=true
+      doctor_record "$results" pass 'customer selection file' "$CID_FILE is readable with mode 600"
+    else
+      doctor_record "$results" fail 'customer selection file' "$CID_FILE must be a readable regular file with mode 600"
+    fi
+  else
+    doctor_record "$results" warn 'customer selection file' 'no saved customer selection; run fa setup when ready'
+  fi
+  if [[ -n "${FASTLY_API_TOKEN:-}" ]]; then
+    token_set=true
+    doctor_record "$results" pass 'API token presence' 'FASTLY_API_TOKEN is set (value hidden)'
+  else
+    doctor_record "$results" warn 'API token presence' 'FASTLY_API_TOKEN is not set; authorization remains unverified'
+  fi
+  if jq -e -s 'any(.[]; .status == "fail")' "$results" >/dev/null; then status=fail; else status=pass; fi
+  summary="$(jq -s \
+    --arg version "$VERSION" --arg status "$status" --arg root "$NGWAF_ROOT" \
+    --argjson verbose "$verbose" --argjson token_set "$token_set" \
+    --argjson customer_file_ready "$customer_file_ready" '
+    {command:"doctor", mode:"local", tool_version:$version, status:$status,
+     verbose:$verbose, network_requests:0,
+     local_installation:{root:$root, healthy:($status == "pass"), customer_selection_file_secure:$customer_file_ready},
+     authentication:{fastly_api_token_set:$token_set, fastly_api_access:"unverified", fastly_api_token_value_displayed:false},
+     checks:.}' "$results")"
+  rm -f "$results"
+  if [[ "$format" == json ]]; then jq . <<<"$summary"; else doctor_render_human "$summary"; fi
+  [[ "$status" == pass ]]
+}
+
 cmd_doctor() {
-  local usage='usage: ngwaf doctor [--json] [--verbose]'
+  local usage='usage: ngwaf doctor [--json] [--verbose] [--local]'
   local format="human"
   local verbose=false
+  local local_only=false
 
   while (( $# > 0 )); do
     case "$1" in
@@ -112,6 +228,10 @@ cmd_doctor() {
         ;;
       --verbose|-v)
         verbose=true
+        shift
+        ;;
+      --local)
+        local_only=true
         shift
         ;;
       *)
@@ -124,6 +244,11 @@ cmd_doctor() {
     printf '%s doctor: FAIL: jq is not installed; JSON diagnostics cannot run\n' \
       "${PROGRAM_NAME:-ngwaf}" >&2
     return 1
+  fi
+
+  if [[ "$local_only" == true ]]; then
+    doctor_local "$format" "$verbose"
+    return $?
   fi
 
   local results summary overall generated_at

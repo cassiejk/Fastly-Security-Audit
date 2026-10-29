@@ -25,6 +25,10 @@ while (( $# > 0 )); do
   esac
 done
 
+if [[ -n "${NGWAF_TEST_DOCTOR_CURL_MARKER:-}" ]]; then
+  printf 'curl invoked\n' >>"$NGWAF_TEST_DOCTOR_CURL_MARKER"
+fi
+
 case "$url" in
   */tokens/self)
     printf '%s\n' '{"name":"test token","scope":["global:read"]}' >"$outfile"
@@ -50,6 +54,8 @@ FAKE_CURL
 chmod +x "$TEST_TMP/bin/curl"
 ln -s "$ROOT/fastly-audit" "$TEST_TMP/bin/fastly-audit"
 ln -s "$ROOT/ngwaf" "$TEST_TMP/bin/ngwaf"
+ln -s "$ROOT/fastly-audit" "$TEST_TMP/bin/fa"
+ln -s "$ROOT/ngwaf-update" "$TEST_TMP/bin/ngwaf-update"
 
 export PATH="$TEST_TMP/bin:$PATH"
 export FASTLY_API_TOKEN="test-token"
@@ -62,12 +68,34 @@ export NGWAF_CURL_RETRIES=0
 expected_bash="$BASH"
 expected_bash_version="$BASH_VERSION"
 
+export NGWAF_TEST_DOCTOR_CURL_MARKER="$TEST_TMP/local-network-marker"
+mkdir -p "$XDG_CONFIG_HOME/fastly-ngwaf"
+printf '%s\n' test-customer >"$XDG_CONFIG_HOME/fastly-ngwaf/customer_id"
+chmod 600 "$XDG_CONFIG_HOME/fastly-ngwaf/customer_id"
+local_output="$($ROOT/fastly-audit doctor --local --json)"
+jq -e '
+  .command == "doctor" and .mode == "local" and .status == "pass"
+  and .network_requests == 0 and .local_installation.healthy == true
+  and .local_installation.customer_selection_file_secure == true
+  and .authentication.fastly_api_token_set == true
+  and .authentication.fastly_api_access == "unverified"
+  and .authentication.fastly_api_token_value_displayed == false
+  and any(.checks[]; .check == "fa on PATH" and .status == "pass")
+' >/dev/null <<<"$local_output"
+[[ ! -e "$NGWAF_TEST_DOCTOR_CURL_MARKER" ]]
+$ROOT/fastly-audit doctor --local >"$TEST_TMP/local-human"
+grep -F 'Local installation: PASS' "$TEST_TMP/local-human" >/dev/null
+grep -F 'Fastly API access: unverified (zero network requests)' "$TEST_TMP/local-human" >/dev/null
+[[ ! -e "$NGWAF_TEST_DOCTOR_CURL_MARKER" ]]
+unset NGWAF_TEST_DOCTOR_CURL_MARKER
+rm -f "$XDG_CONFIG_HOME/fastly-ngwaf/customer_id"
+
 output="$($ROOT/ngwaf doctor --json)"
 jq -e \
   --arg expected_bash "$expected_bash" \
   --arg expected_bash_version "$expected_bash_version" '
   .command == "doctor"
-  and .tool_version == "24.2.2"
+  and .tool_version == "24.2.3"
   and .status != "fail"
   and .runtime.bash.executable == $expected_bash
   and .runtime.bash.version == $expected_bash_version

@@ -219,12 +219,30 @@ fi
 
 require_command curl
 require_command tar
+require_command mktemp
+require_command mkdir
+require_command grep
+require_command dirname
+require_command jq
 if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
   fail 'missing dependency: sha256sum or shasum; install a SHA-256 checksum tool before downloading the Release'
 fi
-if [[ "$skip_setup" != true && -n "$customer_id" && -n "${FASTLY_API_TOKEN:-}" ]]; then
-  require_command jq
-fi
+
+install_root="${FASTLY_AUDIT_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/fastly-audit}"
+check_destination() {
+  local path="$1" parent
+  if [[ -L "$path" || ( -e "$path" && ! -d "$path" ) ]]; then
+    fail "destination is not a usable directory: $path; choose another location or resolve the existing path"
+  fi
+  parent="$path"
+  while [[ ! -e "$parent" && ! -L "$parent" ]]; do
+    parent="$(dirname "$parent")"
+  done
+  [[ -d "$parent" && -w "$parent" && -x "$parent" ]] ||
+    fail "cannot create or write destination under $parent; choose a writable location"
+}
+check_destination "$install_root"
+check_destination "$bin_dir"
 
 if [[ -n "${FASTLY_AUDIT_RELEASE_BASE_URL:-}" ]]; then
   release_base="${FASTLY_AUDIT_RELEASE_BASE_URL%/}"
@@ -253,12 +271,38 @@ download_file "$archive_url" "$archive"
 download_file "$checksum_url" "$checksum"
 verify_checksum "$archive" "$checksum"
 
+archive_list="$(tar -tzf "$archive")" || fail 'archive inspection failed; package was not installed'
+while IFS= read -r member; do
+  case "$member" in
+    fastly-audit/*) ;;
+    *) fail "archive contains an unexpected path: $member" ;;
+  esac
+  case "/$member/" in
+    */../*|*/./*) fail "archive contains an unsafe path: $member" ;;
+  esac
+done <<<"$archive_list"
+for required_member in fastly-audit/fastly-audit fastly-audit/ngwaf fastly-audit/ngwaf-update fastly-audit/lib/runtime.sh; do
+  grep -Fxq "$required_member" <<<"$archive_list" ||
+    fail "archive is missing required member: $required_member"
+done
+archive_verbose="$(tar -tvzf "$archive")" || fail 'archive inspection failed; package was not installed'
+while IFS= read -r entry; do
+  case "${entry:0:1}" in
+    d|-) ;;
+    *) fail 'archive contains a symlink or special file; package was not installed' ;;
+  esac
+done <<<"$archive_verbose"
+
 mkdir -p "$extract_dir"
 tar -xzf "$archive" -C "$extract_dir"
 
 package_root="$extract_dir/fastly-audit"
 [[ -x "$package_root/ngwaf-update" ]] ||
   fail "release archive did not contain fastly-audit/ngwaf-update"
+if [[ "$version" != latest ]]; then
+  [[ "$("$package_root/fastly-audit" version)" == "fastly-audit ${version#v}" ]] ||
+    fail "release package version does not match requested tag $version"
+fi
 
 export FASTLY_AUDIT_BIN_DIR="$bin_dir"
 if ! updater_output="$("$package_root/ngwaf-update" "$package_root" 2>&1)"; then
@@ -286,10 +330,25 @@ installed_bin_dir="$(cd "$bin_dir" && pwd -P)"
 installed_fa="$installed_bin_dir/fa"
 installed_version="$("$installed_fa" version)"
 selected_fa="$(command -v fa 2>/dev/null || true)"
-printf '\nFastly-Audit installed successfully!\n'
+local_report="$(mktemp)"
+if "$installed_fa" doctor --local --json >"$local_report"; then
+  local_verification=PASS
+else
+  local_verification=FAIL
+fi
+rm -f "$local_report"
+if [[ "$local_verification" == PASS ]]; then
+  printf '\nFastly-Audit installed successfully!\n'
+else
+  printf '\nFastly-Audit package installed, but local verification failed.\n'
+fi
 printf 'Version: %s\n' "$installed_version"
 printf 'Installed command: %s\n' "$installed_fa"
 printf 'Bash: %s (supported)\n' "$(bash_version_short)"
+printf 'Local verification: %s (Fastly API access unverified)\n' "$local_verification"
+if [[ "$local_verification" == FAIL ]]; then
+  printf 'Run %s doctor --local for local installation diagnostics.\n' "$installed_fa"
+fi
 if [[ "$selected_fa" == "$installed_fa" || "$selected_fa" == "$bin_dir/fa" ]]; then
   printf 'Shell command: fa is ready to run in this terminal.\n'
 elif [[ -n "$selected_fa" ]]; then
@@ -334,3 +393,4 @@ if [[ "$skip_setup" == true || -z "${FASTLY_API_TOKEN:-}" || -z "$customer_id" ]
   printf '\n  3. Run: %s doctor\n' "$installed_fa"
 fi
 printf 'Need help? Run: %s setup --help\n' "$installed_fa"
+[[ "$local_verification" == PASS ]]

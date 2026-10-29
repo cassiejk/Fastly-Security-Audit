@@ -8,7 +8,7 @@ Fastly NGWAF read-only helper
 Customer / auth and account inventory:
   ngwaf version
   ngwaf setup [--customer-id CUSTOMER_ID] [--json]
-  ngwaf doctor [--json] [--verbose]
+  ngwaf doctor [--json] [--verbose] [--local]
   ngwaf whoami
   ngwaf use <customer_id>
   ngwaf customer
@@ -62,6 +62,7 @@ Examples:
   ngwaf setup --customer-id CUSTOMER_ID
   ngwaf doctor --json
   ngwaf doctor --verbose
+  ngwaf doctor --local
   ngwaf use <CUSTOMER_ID>
   ngwaf overview
   ngwaf overview 30 --json
@@ -115,6 +116,9 @@ Notes:
     failures produce a non-zero exit status after the complete report is shown.
     Add --verbose for sanitized command paths, config paths, versions, and API
     probe status details.
+    Add --local to check only this installation, local dependencies, PATH,
+    config permissions, and token presence without any network requests.
+    Fastly API access remains unverified in local mode.
   - setup is a guided first-run check for colleagues. It verifies the local
     runtime, dependencies, FASTLY_API_TOKEN presence, token API access, and
     selected customer scope. With --customer-id, a validated customer selection
@@ -222,7 +226,7 @@ fastly-audit — read-only Fastly configuration and security inspection
 Core:
   fastly-audit version
   fastly-audit setup [--customer-id CUSTOMER_ID] [--json]
-  fastly-audit doctor [--json] [--verbose]
+  fastly-audit doctor [--json] [--verbose] [--local]
   fastly-audit customer [show]
   fastly-audit customer setup [--customer-id CUSTOMER_ID] [--json]
   fastly-audit customer use <customer_id>

@@ -46,7 +46,7 @@ claims each response supports, see [NGWAF API sources](ngwaf-api-sources.md).
 | --- | --- | --- | --- | --- |
 | `version` | none | no | L; no API | `lib/account.sh`; local version |
 | `setup` | `--customer-id ID` optional; `--json` | flag | E token/customer probes; may save local selected ID | `lib/setup.sh`; local/auth validation |
-| `doctor` | `--json`, `--verbose` optional | flag | E token/customer probes; workspace inventory check | `lib/doctor.sh`; diagnostics |
+| `doctor` | `--json`, `--verbose`, `--local` optional | flag | E token/customer probes and workspace inventory by default; L only with `--local` (zero network requests) | `lib/doctor.sh`; diagnostics; local mode reports token presence but leaves API access unverified |
 | `customer` | optional `show` | default | E `/customer/{customer_id}` from scope context | `lib/account.sh`; selected identity |
 | `customer setup` | same as `setup` | flag | same as `setup` | `lib/setup.sh`; compatibility route in customer namespace |
 | `customer use` | exact customer ID | no | E `/customer/{customer_id}`; saves local selection | `lib/account.sh`; identity |
