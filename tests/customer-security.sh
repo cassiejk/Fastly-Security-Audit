@@ -124,6 +124,8 @@ case "$url" in
       agent-incomplete-invalid:*/unattached/agents) printf '%s\n' '{"meta":{"total":2},"data":[{"agent_active":true}]}' >"$outfile" ;;
       agent-incomplete-foreign:*/unattached/agents) printf '%s\n' '{"meta":{"total":2},"data":[{"workspace_id":"other-workspace","module_detected":true}]}' >"$outfile" ;;
       agent-incomplete-empty:*/unattached/agents) printf '%s\n' '{"meta":{"total":2},"data":[]}' >"$outfile" ;;
+      agent-missing-total:*/unattached/agents) printf '%s\n' '{"meta":{},"data":[]}' >"$outfile" ;;
+      agent-malformed-total:*/unattached/agents) printf '%s\n' '{"meta":{"total":"2"},"data":[]}' >"$outfile" ;;
       agent-overcount:*/unattached/agents) printf '%s\n' '{"meta":{"total":0},"data":[{"agent_active":true,"module_detected":true}]}' >"$outfile" ;;
       agent-module:*/production/agents)
         printf '%s\n' '{"meta":{"total":1},"data":[{"agent_active":true,"module_detected":true,"module_type":"nginx","module_server":"nginx","module_version":"1.2","host_os":"Linux"}]}' >"$outfile" ;;
@@ -287,6 +289,7 @@ jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") |
   .deployment_visibility.agents.total_matches_returned_count == false and
   .deployment_visibility.agents.returned_agent_count == 1 and
   .deployment_visibility.agents.reported_total == 2 and
+  .deployment_visibility.agents.reported_total_status == "inflated_total_consistent_with_sds_5073" and
   any(.deployments[]; .type == "agent_based_unknown" and .evidence_type == "agent_module" and .status == "unresolved"))' "$TEST_TMP/json" >/dev/null
 export CUSTOMER_SECURITY_TEST_MODE=agent-incomplete-invalid
 run_json
@@ -304,6 +307,7 @@ jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") |
   .deployment_visibility.agents.status == "returned" and
   .deployment_visibility.agents.total_matches_returned_count == false and
   .deployment_visibility.agents.returned_agent_count == 0 and
+  .deployment_visibility.agents.reported_total_status == "inflated_total_consistent_with_sds_5073" and
   .deployments[0].type == "unknown" and
   .deployments[0].evidence == "No recognized deployment evidence")' "$TEST_TMP/json" >/dev/null
 export CUSTOMER_SECURITY_TEST_MODE=agent-overcount
@@ -311,7 +315,16 @@ run_json
 jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") |
   .deployment_visibility.agents.status == "returned" and
   .deployment_visibility.agents.total_matches_returned_count == false and
+  .deployment_visibility.agents.reported_total_status == "reported_total_below_returned_count" and
   any(.deployments[]; .type == "agent_based_unknown" and .evidence_type == "agent_module" and .status == "unresolved"))' "$TEST_TMP/json" >/dev/null
+for mode in agent-missing-total agent-malformed-total; do
+  export CUSTOMER_SECURITY_TEST_MODE="$mode"
+  run_json
+  jq -e '(.ngwaf.workspaces[] | select(.id == "unattached") |
+    .deployment_visibility.agents.status == "unavailable" and
+    .deployment_visibility.agents.reported_total_status == null and
+    all(.deployments[]; .evidence_type != "agent_module"))' "$TEST_TMP/json" >/dev/null
+done
 export CUSTOMER_SECURITY_TEST_MODE=edge-one
 run_json
 jq -e '(.ngwaf.workspaces[] | select(.id == "production") | .deployments[0].type == "edge_waf" and (.deployments[0].evidence | contains("CDN Service")))' "$TEST_TMP/json" >/dev/null

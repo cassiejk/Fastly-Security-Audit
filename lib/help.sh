@@ -248,7 +248,7 @@ Next-Gen WAF:
   fastly-audit ngwaf workspaces
     List configured NGWAF workspaces.
   fastly-audit ngwaf agent-diagnostic <workspace-id> [--json]
-    Inspect workspace identity and agent counts; does not confirm deployment type.
+    Inspect workspace identity, returned-agent health, and public API source; does not confirm deployment type.
   fastly-audit ngwaf link '<customer-request-url>'
   fastly-audit ngwaf workspace <workspace>
   fastly-audit ngwaf posture <workspace>

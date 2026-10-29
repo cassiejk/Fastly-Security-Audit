@@ -709,6 +709,17 @@ same workspace ID. A failed Agents request or response without workspace IDs
 remains unverifiable; it does not prove no agents or deployment. Agent host
 telemetry and authentication headers are omitted. The command runs only when
 invoked explicitly and does not alter `customer security` detection.
+`agents_request.agent_count` is the number of returned `data[]` records;
+`reported_total` preserves raw API metadata. An inflated `reported_total`
+receives `reported_total_status: "inflated_total_consistent_with_sds_5073"`.
+Engineering confirmed that the returned list covers agents checked in during
+the previous two days; neither count proves historical deployment inventory
+or request enforcement. `agent_health` summarizes activity, enablement, and
+sanitized installed versions for those returned records; missing values remain
+unknown. `source_context` identifies the public NGWAF API and
+`FASTLY_API_TOKEN` credential variable, with separate retrieval and evidence
+statuses. Neither object classifies deployment architecture. See
+[Agents API scope](docs/ngwaf-agent-api.md).
 
 If workspace detail fails for another reason, or returns conflicting identity
 or ownership metadata, the diagnostic exits nonzero with `status: "blocked"`.

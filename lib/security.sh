@@ -2168,7 +2168,10 @@ customer_security_agent_inventory_json() {
       '{status:"returned",source:"GET /ngwaf/v1/workspaces/{workspace_id}/agents",
         identifier_used:$identifier_used,reported_total:.meta.total,
         returned_agent_count:(.data | length),
-        total_matches_returned_count:(.meta.total == (.data | length)),agents:.data}' <<<"$body"
+        total_matches_returned_count:(.meta.total == (.data | length)),
+        reported_total_status:(if .meta.total == (.data | length) then "matches_returned_count"
+                               elif .meta.total > (.data | length) then "inflated_total_consistent_with_sds_5073"
+                               else "reported_total_below_returned_count" end),agents:.data}' <<<"$body"
   else
     jq -nc --arg reason "${reason:-request failed or incomplete data}" \
       --arg identifier_used "$identifier_used" \
@@ -2273,7 +2276,8 @@ customer_security_deployments_json() {
           agents:[$agents[] | {workspace_id,status:.result.status,source:.result.source,
             reason:.result.reason,reported_total:.result.reported_total,
             returned_agent_count:.result.returned_agent_count,
-            total_matches_returned_count:.result.total_matches_returned_count}]}
+            total_matches_returned_count:.result.total_matches_returned_count,
+            reported_total_status:.result.reported_total_status}]}
       | .ngwaf.workspaces |= map(
           . as $workspace
           | ([$payload.ngwaf.attachments[] | select(.workspace_id == $workspace.id and .configuration_status == "RETRIEVED" and .mapping_validation.status == "RESOLVED")]) as $attachments

@@ -1,6 +1,6 @@
 # NGWAF Agents API: Scope and Limitations
 
-Developer reference, updated 20 October 2026. This describes the current checkout and the published Fastly API. The count discrepancy below comes from user-run, direct authenticated requests, not a live request from this document.
+Developer reference, updated 29 October 2026. This describes the current checkout, the published Fastly API, and user-supplied Engineering findings. No authenticated request was made for this document.
 For the public API versus internal SigSci authentication and command-level
 dependencies, see [NGWAF API sources](ngwaf-api-sources.md).
 
@@ -8,20 +8,62 @@ dependencies, see [NGWAF API sources](ngwaf-api-sources.md).
 
 [`GET /ngwaf/v1/workspaces/{workspace_id}/agents`](https://www.fastly.com/documentation/reference/api/ngwaf/agents/) lists NGWAF agents deployed in a workspace. An agent is a request-decision component that uses workspace rules and communicates with Fastly's cloud engine. In a customer-managed [module-agent deployment](https://www.fastly.com/documentation/guides/next-gen-waf/deployment-types/module-agent-deployment/about-module-agent-deployment/), a web-server module sends requests to the agent and applies its decision. An agent can also run as a [reverse proxy](https://www.fastly.com/documentation/guides/next-gen-waf/deployment-types/reverse-proxy-deployment/configuring-agent-reverse-proxy-deployments/) without a module. Fastly says all deployment methods use an agent component, but customers install and manage it only for On-Prem WAF; Fastly manages [Edge and Cloud WAF agents](https://www.fastly.com/documentation/guides/next-gen-waf/setup-and-configuration/agent-management/getting-started-with-the-agent/). Therefore, absence from this query cannot rule out any deployment method, and an agent record alone does not locate an Edge CDN attachment.
 
-The [published agent schema](https://www.fastly.com/documentation/reference/api/ngwaf/agents/) includes `agent_id`, `agent_active` (seen within five minutes), `agent_enabled`, `agent_last_seen_at`, agent version/build, host OS, counters and latency metrics, and `module_detected`, `module_type`, `module_server`, and `module_version`. These are agent and host observations, not a CDN service ID, workspace-to-service relationship, request-flow proof, or enforcement test. The repository consumes `data`, `meta.total`, `module_detected`, optional `agent_active`, optional `workspace_id`, and selected module descriptors. A returned agent with validated workspace association is agent-related evidence; even a detected module does not establish whether the agent is customer-managed On-Prem or Fastly-managed Edge or Cloud WAF. In particular, `sigsci-agent-revproxy` is not evidence of a customer-managed web server module. An empty successful result means only that this query returned no agents. A failed or malformed response means agent discovery is unavailable.
+The [published agent schema](https://www.fastly.com/documentation/reference/api/ngwaf/agents/) includes `agent_id`, `agent_active` (seen within five minutes), `agent_enabled`, `agent_last_seen_at`, agent version/build, host OS, counters and latency metrics, and `module_detected`, `module_type`, `module_server`, and `module_version`. These are agent and host observations, not a CDN service ID, workspace-to-service relationship, request-flow proof, or enforcement test. The repository consumes `data`, `meta.total`, `module_detected`, optional `agent_active`, `agent_enabled`, `agent_version`, optional `workspace_id`, and selected module descriptors. A returned agent with validated workspace association is agent-related evidence; even a detected module does not establish whether the agent is customer-managed On-Prem or Fastly-managed Edge or Cloud WAF. In particular, `sigsci-agent-revproxy` is not evidence of a customer-managed web server module. An empty successful result means only that this query returned no agents. A failed or malformed response means agent discovery is unavailable.
 
 Agent inventory alone does not establish Edge, Cloud, or On-Prem architecture; CDN-to-workspace attachments; WAFD migration status; current request inspection; enforcement mode; blocking effectiveness; or security coverage. Agent observations can supplement independent attachment or association evidence, but cannot confirm those relationships on their own.
 
 ## Count metadata and completeness
 
-In `customer security`, `returned_agent_count` is the length of the response `data` array; `reported_total` is the unaltered `meta.total` value; and `total_matches_returned_count` compares those two numbers. The standalone diagnostic reports the same observed count and raw total. Neither equality nor inequality establishes response completeness. Fastly's published Agents reference does not define `meta.total` sufficiently to interpret the mismatch or document an Agents pagination contract. Do not treat it as a verified agent count, expected record count, missing-record count, or complete inventory size.
+In `customer security`, `returned_agent_count` is the length of the response `data` array; `reported_total` is the unaltered `meta.total` value; and `total_matches_returned_count` compares those two numbers. The standalone diagnostic uses `agent_count` for the returned list length. `reported_total_status` distinguishes an equal count, an inflated total consistent with SDS-5073, and a total below the returned count that this defect does not explain. None of these fields asserts deployment or historical inventory completeness. `response_complete` remains null in the standalone diagnostic for that reason.
 
-Direct authenticated requests on 20 October 2026 found four workspaces whose
-returned agent IDs were unique and nonempty. The API's `meta.total` was eight
-times the returned `data` length in a later probe and nine times that length
-in earlier probes. The cause and availability of additional records remain
-unverified. No pagination or missing-record inference follows from those
-figures. Customer-identifying details are omitted from this reference.
+Per the user-supplied Fastly Engineering investigation of 29 October 2026,
+the legacy Signal Sciences backend can count some agents more than once when
+calculating `meta.total`, and the public Agents API passes that incorrect total
+through. Engineering tracks the defect as **SDS-5073**. The returned `data[]`
+list is correct and complete for agents that checked in during the **previous
+two days**; use its length as the observed count for that window. An inflated
+`meta.total` alone does not mean pagination failed or records are missing.
+The duplication factor is not constant. This two-day API population does not
+cover every historically configured or deployed agent, including agents that
+did not check in during the window, and it does not prove request inspection
+or enforcement. The public [Agents API reference](https://www.fastly.com/documentation/reference/api/ngwaf/agents/)
+does not document the backend defect or this Engineering-confirmed count
+behavior. The date when SDS-5073 will be fixed is unknown.
+
+The standalone diagnostic adds top-level `agent_health` for a usable Agents
+response without conflicting workspace IDs. Its `returned_agents` and every
+health count use `data.length`, not the potentially inflated `meta.total`.
+`activity` counts explicit `agent_active: true` as active and explicit `false`
+as inactive; `enablement` counts `agent_enabled` the same way for enabled and
+disabled. Missing or null values count as unknown, independently for each
+field. Non-boolean values make the response unusable. The API defines active
+as seen within about five minutes; neither activity nor enablement proves
+traffic inspection, blocking, workspace mode, or deployment architecture.
+
+`versions` groups sanitized installed `agent_version` strings by exact reported
+value. A usable version has a short numeric dotted form, optionally prefixed
+by `v` or followed by a short build suffix; missing, null, malformed, or
+unrecognized values count as `unknown`. The distribution is sorted by count
+then version and capped at 20 groups; `distinct_versions`, `truncated`, and
+`other_reported_count` preserve totals when groups are omitted. No latest
+version, release age, or outdated status is inferred from
+`agent_versions_behind`. A valid empty `data[]` gives observed zero counts for
+the returned two-day population, not proof that no agents are deployed. On an
+HTTP failure, unusable response, blocked ownership check, or conflicting
+workspace ID, `agent_health` is null. The command continues to emit JSON with
+or without `--json` and does not expose individual agent or host details.
+
+The diagnostic's `source_context` names the public Fastly NGWAF API at
+`api.fastly.com`, the `FASTLY_API_TOKEN` credential variable (never its value),
+the workspace Agents resource, and the `agent_observation` evidence class.
+`retrieval_status` records whether the Agents request was `returned`,
+`unavailable`, `unusable_response`, or `skipped`; `evidence_status` is `observed`
+only for a usable response without a conflicting workspace ID, otherwise
+`unavailable`. `agent_health.observation_window` names the two-day population;
+fixed limitation codes keep deployment architecture, CDN attachment, traffic
+inspection, and enforcement boundaries visible. Source metadata describes the
+configured API even when retrieval is
+skipped or fails; it is not evidence of deployment.
 
 ## Current implementation
 
@@ -30,8 +72,8 @@ figures. Customer-identifying details are omitted from this reference.
 | Scope and workspace inventory | [`dispatch_preflight`](../lib/dispatch.sh) requires a token and verifies the selected customer; [`collect_security_summary_json`](../lib/security.sh) gets token-visible services and paginates `GET /ngwaf/v1/workspaces?customer_id=...`. It rejects conflicting or duplicate workspace ownership metadata for `customer security`. [`get_all_pages`](../lib/core.sh) normalizes the list and rejects early/incomplete pages. |
 | Agents URL and authentication | [`customer_security_agent_inventory_json`](../lib/security.sh) calls `GET $(workspace_path "$workspace_id")/agents` with the selected `customer_id` query parameter. [`workspace_path`](../lib/core.sh) URL-encodes the identifier. [`get`](../lib/core.sh) sends `Fastly-Key: $FASTLY_API_TOKEN` to `api.fastly.com`; its configured curl retries default to one via [`fastly-audit`](../fastly-audit). Non-2xx, transport failure, and invalid JSON are errors. |
 | Identifier choice | [`customer_security_deployments_json`](../lib/security.sh) starts with each inventoried `id`. Only a distinct, nonempty, unique `workspace_uid` can be a fallback after HTTP 400; it never substitutes one after another status. The response must have a nonnegative integral `meta.total` and valid agent records; agent `workspace_id`, if supplied, must match the inventoried ID or eligible UID. The API [workspace schema](https://www.fastly.com/documentation/reference/api/ngwaf/workspaces/) describes `id` and `workspace_uid`, but does not explain the observed Agents total mismatch. |
-| Classification and output | [`customer_security_deployments_json`](../lib/security.sh) combines separate Edge attachment, optional Cloud WAF, and agent evidence into `.ngwaf.workspaces[].deployments[]`. An agent with or without `module_detected` produces `agent_based_unknown / unresolved`; the raw module observation remains in `evidence_type` and sanitized evidence text. No recognized evidence produces `unknown / unresolved`. A valid Agents body has source status `returned`; `reported_total`, `returned_agent_count`, and `total_matches_returned_count` expose the discrepancy without asserting completeness. Invalid records or conflicting IDs remain `unavailable`. Agent visibility is reported in `.ngwaf.deployment_sources.agents[]` and per-workspace `.deployment_visibility.agents` with a sanitized reason. Optional probe failure does not erase a confirmed Edge deployment or fail the report. [`cmd_customer_security`](../lib/security.sh) emits the JSON. |
-| Separate diagnostic | [`cmd_ngwaf_agent_diagnostic`](../lib/agent_diagnostic.sh), routed by [`dispatch_ngwaf_namespace`](../lib/dispatch.sh), accepts one exact inventory `id` and validates the complete selected-customer workspace inventory. It probes `GET /ngwaf/v1/workspaces/{id}?customer_id=...` detail, then makes one Agents request with `customer_id`. A validated detail supplies the identifier; on HTTP 404 `Site not found`, the exact selected-customer inventory ID supplies it instead and the detail error remains visible. Conflicting detail identity/ownership or other failures block the Agents request. It disables retries, never tries `workspace_uid` or legacy identifiers, and emits sanitized HTTP/error, counts, and agent `workspace_id` match summaries. `response_complete` is null because total semantics are unverified. It omits raw agent host data. See [README diagnostic usage](../README.md#one-workspace-agents-api-diagnostic). |
+| Classification and output | [`customer_security_deployments_json`](../lib/security.sh) combines separate Edge attachment, optional Cloud WAF, and agent evidence into `.ngwaf.workspaces[].deployments[]`. An agent with or without `module_detected` produces `agent_based_unknown / unresolved`; the raw module observation remains in `evidence_type` and sanitized evidence text. No recognized evidence produces `unknown / unresolved`. A valid Agents body has source status `returned`; `reported_total`, `returned_agent_count`, `total_matches_returned_count`, and `reported_total_status` expose the discrepancy without asserting broader completeness. Invalid records or conflicting IDs remain `unavailable`. Agent visibility is reported in `.ngwaf.deployment_sources.agents[]` and per-workspace `.deployment_visibility.agents` with a sanitized reason. Optional probe failure does not erase a confirmed Edge deployment or fail the report. [`cmd_customer_security`](../lib/security.sh) emits the JSON. |
+| Separate diagnostic | [`cmd_ngwaf_agent_diagnostic`](../lib/agent_diagnostic.sh), routed by [`dispatch_ngwaf_namespace`](../lib/dispatch.sh), accepts one exact inventory `id` and validates the complete selected-customer workspace inventory. It probes `GET /ngwaf/v1/workspaces/{id}?customer_id=...` detail, then makes one Agents request with `customer_id`. A validated detail supplies the identifier; on HTTP 404 `Site not found`, the exact selected-customer inventory ID supplies it instead and the detail error remains visible. Conflicting detail identity/ownership or other failures block the Agents request. It disables retries, never tries `workspace_uid` or legacy identifiers, and emits sanitized HTTP/error, counts, agent `workspace_id` match summaries, and `agent_health` for usable returned records. Missing or malformed `meta.total` and invalid agent records make the response unusable, while a count mismatch alone does not. `response_complete` is null because broader inventory completeness is unverified. It omits raw agent host data. See [README diagnostic usage](../README.md#one-workspace-agents-api-diagnostic). |
 
 The normal `fastly-audit customer security --json` inventory probes every inventoried workspace and can use the guarded UID fallback. The classifier does not require Agents to confirm an Edge WAF attachment. It could skip Agents after a confirmed attachment, but continuing the supplemental probe preserves evidence of a possible second, agent-based method. The generated VCL and Inspection Service join runs in separate legacy mapping commands; it is not currently part of `customer security`. `fastly-audit ngwaf agent-diagnostic EXACT_WORKSPACE_ID --json` is an explicitly invoked, single-workspace identifier and response diagnostic; it does not change inventory classification. A successful empty Agents response provides no agent-to-workspace identity or deployment-absence proof.
 
@@ -95,7 +137,7 @@ Answer these independently, retaining the evidence source and unknowns for each:
 ## Open questions for Engineering
 
 - For workspaces whose list `id` is a slug and `workspace_uid` is empty, which identifier and backend path should detail and Agents endpoints accept? Why does list return 200 while detail returns 404 and Agents returns 400 `Site not found`?
-- Does the Agents list intentionally omit any Fastly-managed Edge or Cloud WAF agents, and what are its visibility, retention, and pagination guarantees across deployment types?
+- Does the two-day Agents list include every eligible Edge and Cloud WAF agent, and what are the pagination guarantees across deployment types? When will SDS-5073 be fixed?
 - Is `workspace_id` guaranteed in returned agent records? If absent, what authoritative association field should callers use?
 - Which authenticated source should be authoritative for legacy CDN-to-workspace attachment and WAFD migration compatibility, especially when enabled-product inventory is zero?
 

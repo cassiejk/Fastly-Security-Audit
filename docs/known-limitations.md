@@ -150,9 +150,11 @@ unavailable source is not evidence that a deployment is absent.
 - **Affected:** `fa customer security`, `fa ngwaf agent-diagnostic`.
 - **Observed/reproduction:** An agent or `sigsci-agent-revproxy` module record
   can be observed without a CDN attachment, Cloud WAF instance, infrastructure
-  owner, or request path. Returned Agents `data` length and `meta.total` have
-  also differed in user-supplied responses; their completeness semantics are
-  not established. See [Agents API scope](ngwaf-agent-api.md).
+  owner, or request path. Fastly Engineering confirmed that the legacy backend
+  can inflate Agents `meta.total` by counting some agents more than once; the
+  public API passes that value through (SDS-5073). Its returned `data[]` is
+  correct for agents checked in during the previous two days. See
+  [Agents API scope](ngwaf-agent-api.md).
 - **Impact:** Agent inventory cannot prove Edge, Cloud, On-Prem, WAFD migration,
   or effective enforcement. Empty/failed Agents results cannot negate other
   confirmed sources.
@@ -165,13 +167,15 @@ unavailable source is not evidence that a deployment is absent.
   for the distinct resource owners and API limits.
 - **Within `fa`:** Agent evidence is supplemental and classified
   `agent_based_unknown / unresolved`; raw returned count and reported total
-  are separate. Product and Cloud associations retain independent status.
+  are separate. `reported_total_status` labels an inflated value as consistent
+  with SDS-5073 without treating it as missing records or complete historical
+  inventory. Product and Cloud associations retain independent status.
 - **Sources:** `lib/security.sh` (`customer_security_agent_inventory_json`,
   `customer_security_deployments_json`), `lib/agent_diagnostic.sh`;
   `tests/customer-security.sh`, `tests/agent-diagnostic.sh`.
-- **Resolution evidence/date:** Documented Fastly agent visibility/total
-  semantics and independent architecture association. User-run responses:
-  20 October 2026; source reviewed 22 October 2026.
+- **Resolution evidence/date:** Confirm deployment of a SDS-5073 fix and
+  independently validate architecture association. Engineering findings
+  supplied 29 October 2026; fix deployment date unknown.
 
 ### NG-08 — VCL parameter and attachment are separate facts
 

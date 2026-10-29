@@ -63,9 +63,20 @@ case "$url" in
   */ngwaf/v1/workspaces/workspace-example/agents)
     case "${AGENT_DIAGNOSTIC_MODE:-}" in
       agents-match|detail-site-not-found) printf '%s\n' '{"meta":{"total":1},"data":[{"workspace_id":"workspace-example","agent_active":true,"module_detected":true,"host_remote_ip":"192.0.2.1"}]}' >"$outfile" ;;
+      agents-health-mixed) printf '%s\n' '{"meta":{"total":8},"data":[{"workspace_id":"workspace-example","agent_active":true,"agent_enabled":true,"agent_version":"v99.12.3"},{"workspace_id":"workspace-example","agent_active":false,"agent_enabled":true,"agent_version":"v99.12.3"},{"workspace_id":"workspace-example","agent_active":null,"agent_enabled":false,"agent_version":"v99.13.0"},{"workspace_id":"workspace-example","agent_enabled":null,"agent_version":"private value"},{"workspace_id":"workspace-example","agent_version":null}]}' >"$outfile" ;;
+      agents-many-versions) jq -nc '[range(0;21) | {workspace_id:"workspace-example", agent_version:("4.0." + tostring)}] | {meta:{total:length},data:.}' >"$outfile" ;;
+      agents-bad-state) printf '%s\n' '{"meta":{"total":1},"data":[{"workspace_id":"workspace-example","agent_active":"yes"}]}' >"$outfile" ;;
       agents-mismatch) printf '%s\n' '{"meta":{"total":1},"data":[{"workspace_id":"different-workspace","module_detected":true}]}' >"$outfile" ;;
       agents-no-id) printf '%s\n' '{"meta":{"total":1},"data":[{"module_detected":true}]}' >"$outfile" ;;
       agents-incomplete) printf '%s\n' '{"meta":{"total":2},"data":[{"workspace_id":"workspace-example"}]}' >"$outfile" ;;
+      agents-seven-two) printf '%s\n' '{"meta":{"total":7},"data":[{"workspace_id":"workspace-example"},{"workspace_id":"workspace-example"}]}' >"$outfile" ;;
+      agents-nine-three) printf '%s\n' '{"meta":{"total":9},"data":[{"workspace_id":"workspace-example"},{"workspace_id":"workspace-example"},{"workspace_id":"workspace-example"}]}' >"$outfile" ;;
+      agents-empty) printf '%s\n' '{"meta":{"total":0},"data":[]}' >"$outfile" ;;
+      agents-empty-inflated) printf '%s\n' '{"meta":{"total":5},"data":[]}' >"$outfile" ;;
+      agents-no-total) printf '%s\n' '{"meta":{},"data":[]}' >"$outfile" ;;
+      agents-bad-total) printf '%s\n' '{"meta":{"total":"5"},"data":[]}' >"$outfile" ;;
+      agents-invalid-record) printf '%s\n' '{"meta":{"total":1},"data":["bad-record"]}' >"$outfile" ;;
+      agents-failed) status=503; printf '%s\n' '{"detail":"Service unavailable"}' >"$outfile" ;;
       agents-malformed) printf 'not-json\n' >"$outfile" ;;
       agents-secret) status=400; printf '%s\n' '{"title":"Bad Request","detail":"Bearer test-secret-token"}' >"$outfile" ;;
       *) status=400; printf '%s\n' '{"status":400,"title":"Bad Request","detail":"Site not found","errors":[],"private":"do not print"}' >"$outfile" ;;
@@ -87,7 +98,8 @@ for launcher in fastly-audit ngwaf; do
   env -u FASTLY_API_TOKEN -u FASTLY_CUSTOMER_ID "$ROOT/$launcher" ngwaf agent-diagnostic --help >"$TEST_TMP/help" 2>"$TEST_TMP/err"
   grep -F 'agent-diagnostic <workspace-id>' "$TEST_TMP/help" >/dev/null
   grep -F 'Limitations:' "$TEST_TMP/help" >/dev/null
-  grep -F 'meta.total does not prove' "$TEST_TMP/help" >/dev/null
+  grep -F 'raw meta.total may be inflated' "$TEST_TMP/help" >/dev/null
+  grep -F 'previous two days' "$TEST_TMP/help" >/dev/null
   grep -F 'it omits individual agent and host data.' "$TEST_TMP/help" >/dev/null
   [[ ! -s "$TEST_TMP/err" && ! -s "$AGENT_DIAGNOSTIC_CURL_LOG" ]]
 done
@@ -113,6 +125,16 @@ run_diagnostic() {
   : >"$AGENT_DIAGNOSTIC_CURL_LOG"
   "$ROOT/fastly-audit" ngwaf agent-diagnostic "$workspace_id" --json >"$TEST_TMP/json" 2>"$TEST_TMP/err"
   jq -e -s 'length == 1 and .[0].schema_version == 1' "$TEST_TMP/json" >/dev/null
+  jq -e '.source_context.api_surface == "public_fastly_ngwaf" and
+    .source_context.api_host == "api.fastly.com" and
+    .source_context.credential_source == "FASTLY_API_TOKEN" and
+    .source_context.resource_type == "ngwaf_workspace_agents" and
+    .source_context.evidence_class == "agent_observation" and
+    .source_context.retrieval_status == .agents_request.status and
+    .source_context.evidence_status == (if .agent_health == null then "unavailable" else "observed" end) and
+    .source_context.limitations == ["not_complete_deployed_agent_inventory",
+      "deployment_architecture_unverified","cdn_attachment_unverified",
+      "traffic_inspection_unverified","enforcement_effectiveness_unverified"]' "$TEST_TMP/json" >/dev/null
   [[ "$(rg -c '/agents$' "$AGENT_DIAGNOSTIC_CURL_LOG")" == 1 ]]
   [[ "$(rg -c '/ngwaf/v1/workspaces/workspace-example$' "$AGENT_DIAGNOSTIC_CURL_LOG")" == 1 ]]
   [[ "$(rg -c '^query:customer_id=test-customer$' "$AGENT_DIAGNOSTIC_CURL_LOG")" == 3 ]]
@@ -139,15 +161,51 @@ jq -e '.requested_workspace_id == "workspace-example" and
   .agents_request.path == "/ngwaf/v1/workspaces/workspace-example/agents" and
   .agents_request.http_status == "400" and
   .agents_request.api_error == {title:"Bad Request",detail:"Site not found"} and
-  .agents_request.response_workspace_match == "unverifiable"' "$TEST_TMP/json" >/dev/null
+  .agents_request.response_workspace_match == "unverifiable" and
+  .agent_health == null' "$TEST_TMP/json" >/dev/null
 
 export AGENT_DIAGNOSTIC_MODE=agents-match
 run_diagnostic
 jq -e '.agents_request.http_status == "200" and .agents_request.agent_count == 1 and
   .agents_request.reported_total == 1 and
+  .agents_request.reported_total_status == "matches_returned_count" and
   .agents_request.response_workspace_match == "matched" and .agents_request.response_complete == null and
   .agents_request.total_matches_returned_count == true and
-  .agents_request.api_error == null' "$TEST_TMP/json" >/dev/null
+  .agents_request.api_error == null and
+  .agent_health.status == "observed" and .agent_health.returned_agents == 1 and
+  .agent_health.activity == {active:1,inactive:0,unknown:0} and
+  .agent_health.enablement == {enabled:0,disabled:0,unknown:1} and
+  .agent_health.versions.reported == 0 and .agent_health.versions.unknown == 1' "$TEST_TMP/json" >/dev/null
+
+export AGENT_DIAGNOSTIC_MODE=agents-health-mixed
+run_diagnostic
+jq -e '.agents_request.agent_count == 5 and .agents_request.reported_total == 8 and
+  .agents_request.reported_total_status == "inflated_total_consistent_with_sds_5073" and
+  .agents_request.response_complete == null and
+  .agent_health.status == "observed" and
+  .agent_health.population == "agents_returned_by_api" and
+  .agent_health.observation_window == "previous_2_days" and
+  .agent_health.returned_agents == 5 and
+  .agent_health.activity == {active:1,inactive:1,unknown:3} and
+  .agent_health.enablement == {enabled:2,disabled:1,unknown:2} and
+  .agent_health.versions.reported == 3 and .agent_health.versions.unknown == 2 and
+  .agent_health.versions.distribution == [{version:"v99.12.3",count:2},{version:"v99.13.0",count:1}] and
+  .agent_health.versions.distinct_versions == 2 and
+  .agent_health.versions.truncated == false and
+  .agent_health.versions.other_reported_count == 0' "$TEST_TMP/json" >/dev/null
+if rg -q 'private value' "$TEST_TMP/json"; then
+  printf 'agent-diagnostic: malformed version leaked\n' >&2; exit 1
+fi
+
+export AGENT_DIAGNOSTIC_MODE=agents-many-versions
+run_diagnostic
+jq -e '.agent_health.returned_agents == 21 and
+  .agent_health.versions.reported == 21 and
+  .agent_health.versions.unknown == 0 and
+  (.agent_health.versions.distribution | length) == 20 and
+  .agent_health.versions.distinct_versions == 21 and
+  .agent_health.versions.truncated == true and
+  .agent_health.versions.other_reported_count == 1' "$TEST_TMP/json" >/dev/null
 
 export AGENT_DIAGNOSTIC_MODE=detail-site-not-found
 run_diagnostic
@@ -163,7 +221,7 @@ jq -e '.workspace_detail_request.http_status == "404" and
 
 export AGENT_DIAGNOSTIC_MODE=agents-mismatch
 run_diagnostic
-jq -e '.agents_request.response_workspace_match == "mismatch"' "$TEST_TMP/json" >/dev/null
+jq -e '.agents_request.response_workspace_match == "mismatch" and .agent_health == null' "$TEST_TMP/json" >/dev/null
 
 export AGENT_DIAGNOSTIC_MODE=agents-no-id
 run_diagnostic
@@ -174,9 +232,43 @@ run_diagnostic
 jq -e '.agents_request.response_complete == null and .agents_request.total_matches_returned_count == false and .agents_request.agent_count == 1 and
   .agents_request.reported_total == 2 and .agents_request.response_workspace_match == "matched"' "$TEST_TMP/json" >/dev/null
 
+for mode_count_total in 'agents-seven-two 2 7' 'agents-nine-three 3 9' 'agents-empty-inflated 0 5'; do
+  read -r mode count total <<<"$mode_count_total"
+  export AGENT_DIAGNOSTIC_MODE="$mode"
+  run_diagnostic
+  jq -e --argjson count "$count" --argjson total "$total" '
+    .agents_request.status == "returned" and
+    .agents_request.agent_count == $count and .agents_request.reported_total == $total and
+    .agents_request.total_matches_returned_count == false and
+    .agents_request.reported_total_status == "inflated_total_consistent_with_sds_5073" and
+    .agents_request.response_complete == null' "$TEST_TMP/json" >/dev/null
+done
+
+export AGENT_DIAGNOSTIC_MODE=agents-empty
+run_diagnostic
+jq -e '.agents_request.agent_count == 0 and .agents_request.reported_total == 0 and
+  .agents_request.total_matches_returned_count == true and
+  .agents_request.reported_total_status == "matches_returned_count" and
+  .agents_request.response_complete == null and
+  .agent_health.returned_agents == 0 and
+  .agent_health.activity == {active:0,inactive:0,unknown:0} and
+  .agent_health.enablement == {enabled:0,disabled:0,unknown:0} and
+  .agent_health.versions.reported == 0 and .agent_health.versions.unknown == 0' "$TEST_TMP/json" >/dev/null
+
+for mode in agents-no-total agents-bad-total agents-invalid-record agents-bad-state; do
+  export AGENT_DIAGNOSTIC_MODE="$mode"
+  run_diagnostic
+  jq -e '.agents_request.status == "unusable_response" and .agents_request.agent_count == null and
+    .agents_request.reported_total_status == null and .agent_health == null' "$TEST_TMP/json" >/dev/null
+done
+
+export AGENT_DIAGNOSTIC_MODE=agents-failed
+run_diagnostic
+jq -e '.agents_request.status == "unavailable" and .agents_request.agent_count == null and .agent_health == null' "$TEST_TMP/json" >/dev/null
+
 export AGENT_DIAGNOSTIC_MODE=agents-malformed
 run_diagnostic
-jq -e '.agents_request.status == "unusable_response" and .agents_request.agent_count == null' "$TEST_TMP/json" >/dev/null
+jq -e '.agents_request.status == "unusable_response" and .agents_request.agent_count == null and .agent_health == null' "$TEST_TMP/json" >/dev/null
 
 export AGENT_DIAGNOSTIC_MODE=agents-secret
 run_diagnostic
@@ -200,7 +292,11 @@ for mode in inventory-foreign inventory-duplicate detail-foreign detail-other-id
   if [[ "$mode" == inventory-* ]]; then
     [[ ! -s "$TEST_TMP/out" ]]
   else
-    jq -e '.status == "blocked" and .agents_request.status == "skipped" and
+    jq -e '.status == "blocked" and .agent_health == null and
+      .source_context.api_surface == "public_fastly_ngwaf" and
+      .source_context.retrieval_status == "skipped" and
+      .source_context.evidence_status == "unavailable" and
+      .agents_request.status == "skipped" and
       .agents_request.http_status == null and .workspace_metadata.ownership_verified == false and
       .workspace_detail_request.method == "GET" and
       .workspace_detail_request.url == "https://api.fastly.com/ngwaf/v1/workspaces/workspace-example?customer_id=test-customer" and
