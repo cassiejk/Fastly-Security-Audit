@@ -67,7 +67,7 @@ jq -e \
   --arg expected_bash "$expected_bash" \
   --arg expected_bash_version "$expected_bash_version" '
   .command == "doctor"
-  and .tool_version == "24.2.1"
+  and .tool_version == "24.2.2"
   and .status != "fail"
   and .runtime.bash.executable == $expected_bash
   and .runtime.bash.version == $expected_bash_version

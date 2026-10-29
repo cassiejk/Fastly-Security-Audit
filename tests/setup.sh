@@ -36,10 +36,19 @@ done
 
 case "$url" in
   */tokens/self)
+    if [[ "${NGWAF_TEST_SETUP_MODE:-ok}" == "token-401" ]]; then
+      printf '%s\n' '{"error":"secret authentication detail"}' >"$outfile"
+      printf '401'
+      exit 0
+    fi
     printf '%s\n' '{"name":"test token","scope":["global:read"]}' >"$outfile"
     ;;
   */customer/test-customer)
-    if [[ "${NGWAF_TEST_SETUP_MODE:-ok}" == "customer-mismatch" ]]; then
+    if [[ "${NGWAF_TEST_SETUP_MODE:-ok}" == "customer-403" ]]; then
+      printf '%s\n' '{"error":"secret authorization detail"}' >"$outfile"
+      printf '403'
+      exit 0
+    elif [[ "${NGWAF_TEST_SETUP_MODE:-ok}" == "customer-mismatch" ]]; then
       printf '%s\n' '{"id":"wrong-customer","name":"Wrong Customer"}' >"$outfile"
     else
       printf '%s\n' '{"id":"test-customer","name":"Test Customer"}' >"$outfile"
@@ -70,8 +79,9 @@ if $ROOT/fastly-audit setup >"$TEST_TMP/no-token"; then
   exit 1
 fi
 grep -F 'FASTLY_API_TOKEN is not set' "$TEST_TMP/no-token" >/dev/null
-grep -F 'export FASTLY_API_TOKEN=YOUR_FASTLY_TOKEN' "$TEST_TMP/no-token" >/dev/null
+grep -F 'approved local credential workflow' "$TEST_TMP/no-token" >/dev/null
 grep -F 'fastly-audit setup --customer-id CUSTOMER_ID' "$TEST_TMP/no-token" >/dev/null
+grep -F 'Fastly Customer ID is required to verify ownership' "$TEST_TMP/no-token" >/dev/null
 
 export FASTLY_API_TOKEN="test-token"
 
@@ -81,7 +91,7 @@ jq -e \
   --arg cid_file "$XDG_CONFIG_HOME/fastly-ngwaf/customer_id" '
   .command == "setup"
   and .program == "fastly-audit"
-  and .tool_version == "24.2.1"
+  and .tool_version == "24.2.2"
   and .status != "fail"
   and .runtime.bash.executable == $expected_bash
   and .runtime.bash.minimum_version == "5.2"
@@ -109,8 +119,9 @@ jq -e \
 $ROOT/fastly-audit setup --customer-id test-customer >"$TEST_TMP/human"
 grep -F 'fastly-audit setup' "$TEST_TMP/human" >/dev/null
 grep -F '[PASS]' "$TEST_TMP/human" >/dev/null
-grep -F 'Selected customer: test-customer (Test Customer)' "$TEST_TMP/human" >/dev/null
-grep -F 'fastly-audit ngwaf workspaces' "$TEST_TMP/human" >/dev/null
+grep -F 'Verified customer: Test Customer (test-customer)' "$TEST_TMP/human" >/dev/null
+grep -F 'Customer selection: saved locally.' "$TEST_TMP/human" >/dev/null
+grep -F 'Next: fa doctor (operational verification).' "$TEST_TMP/human" >/dev/null
 
 ngwaf_output="$($ROOT/ngwaf setup --customer-id test-customer --json)"
 jq -e '
@@ -137,5 +148,19 @@ jq -e '
   .status == "fail"
   and any(.checks[]; .check == "customer scope" and .status == "fail")
 ' >/dev/null "$TEST_TMP/mismatch.json"
+
+export NGWAF_TEST_SETUP_MODE=token-401
+if $ROOT/fastly-audit setup --customer-id test-customer >"$TEST_TMP/token-401"; then
+  printf 'setup test: rejected token unexpectedly succeeded\n' >&2; exit 1
+fi
+grep -F 'HTTP 401: Fastly rejected these credentials' "$TEST_TMP/token-401" >/dev/null
+! grep -F 'secret authentication detail' "$TEST_TMP/token-401" >/dev/null
+
+export NGWAF_TEST_SETUP_MODE=customer-403
+if $ROOT/fastly-audit setup --customer-id test-customer >"$TEST_TMP/customer-403"; then
+  printf 'setup test: forbidden customer unexpectedly succeeded\n' >&2; exit 1
+fi
+grep -F 'HTTP 403: token authentication does not grant access to the selected customer' "$TEST_TMP/customer-403" >/dev/null
+! grep -F 'secret authorization detail' "$TEST_TMP/customer-403" >/dev/null
 
 printf 'setup: OK\n'

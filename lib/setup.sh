@@ -37,8 +37,8 @@ setup_prompt_customer_id() {
   local cid
 
   [[ -t 0 ]] || return 1
-  printf '%s setup: Customer ID (leave blank to skip): ' \
-    "${PROGRAM_NAME:-ngwaf}" >&2
+  printf 'A Fastly Customer ID identifies the customer whose access will be verified.\n' >&2
+  printf '%s setup: Customer ID (leave blank to skip): ' "${PROGRAM_NAME:-ngwaf}" >&2
   IFS= read -r cid || return 1
   [[ -n "$cid" ]] || return 1
   printf '%s\n' "$cid"
@@ -57,19 +57,24 @@ setup_render_human() {
 
   printf '\nOverall: %s\n' "$(jq -r '.status | ascii_upcase' <<<"$summary")"
 
-  if jq -e '.selected_customer.id != null' >/dev/null <<<"$summary"; then
-    printf 'Selected customer: %s' "$(jq -r '.selected_customer.id' <<<"$summary")"
-    if jq -e '.selected_customer.name != null' >/dev/null <<<"$summary"; then
-      printf ' (%s)' "$(jq -r '.selected_customer.name' <<<"$summary")"
+  if jq -e '.selected_customer.customer_probe_passed == true' >/dev/null <<<"$summary"; then
+    printf 'Verified customer: %s (%s)\n' \
+      "$(jq -r '.selected_customer.name' <<<"$summary")" \
+      "$(jq -r '.selected_customer.id' <<<"$summary")"
+    if jq -e '.selected_customer.saved == true or .selected_customer.source == "selected_file"' >/dev/null <<<"$summary"; then
+      printf 'Customer selection: saved locally.\n'
+    else
+      printf 'Customer selection: verified for this run; not saved locally.\n'
     fi
-    printf '\n'
   fi
 
-  printf '\nNext steps:\n'
-  jq -r '.next_steps[]' <<<"$summary" |
-    while IFS= read -r step; do
-      printf '  %s\n' "$step"
-    done
+  if jq -e '.status != "fail"' >/dev/null <<<"$summary"; then
+    printf 'Next: fa doctor (operational verification).\n'
+  else
+    printf '\nNext steps:\n'
+    jq -r '.next_steps[] | select(length > 0)' <<<"$summary" |
+      while IFS= read -r step; do printf '  %s\n' "$step"; done
+  fi
 }
 
 cmd_setup() {
@@ -120,7 +125,7 @@ cmd_setup() {
     curl_available=true
     setup_record "$results" pass "curl" "$(command -v curl)"
   else
-    setup_record "$results" fail "curl" "required dependency is missing"
+    setup_record "$results" fail "curl" "install curl, then rerun setup"
   fi
 
   setup_record "$results" pass "jq" "$(command -v jq)"
@@ -136,7 +141,8 @@ cmd_setup() {
     token_present=true
     setup_record "$results" pass "API token" "FASTLY_API_TOKEN is set (value not displayed)"
   else
-    setup_record "$results" fail "API token" "FASTLY_API_TOKEN is not set"
+    setup_record "$results" fail "API token" \
+      "FASTLY_API_TOKEN is not set; load an authorized Fastly API token through your approved local credential workflow with permission to read the selected customer"
   fi
 
   if [[ -n "$customer_id_arg" ]]; then
@@ -159,7 +165,7 @@ cmd_setup() {
     setup_record "$results" pass "customer selection" "$cid from $source"
   else
     setup_record "$results" fail "customer selection" \
-      "none; rerun ${PROGRAM_NAME:-ngwaf} setup --customer-id CUSTOMER_ID"
+      "none; a Fastly Customer ID is required to verify ownership; rerun ${PROGRAM_NAME:-ngwaf} setup --customer-id CUSTOMER_ID"
   fi
 
   if [[ "$token_present" == "true" && "$curl_available" == "true" ]]; then
@@ -168,6 +174,12 @@ cmd_setup() {
     if [[ "$token_code" == 2* ]] && jq -e 'type == "object"' >/dev/null 2>&1 <"$tmp"; then
       setup_record "$results" pass "token API access" "HTTP $token_code"
       token_ready=true
+    elif [[ "$token_code" == 401 ]]; then
+      setup_record "$results" fail "token API access" \
+        "HTTP 401: Fastly rejected these credentials; verify and reload the intended FASTLY_API_TOKEN"
+    elif [[ "$token_code" == 403 ]]; then
+      setup_record "$results" fail "token API access" \
+        "HTTP 403: token authentication does not grant this API permission; verify the token permissions and selected customer access"
     else
       setup_record "$results" fail "token API access" \
         "GET /tokens/self returned HTTP $token_code or invalid JSON"
@@ -181,11 +193,19 @@ cmd_setup() {
   if [[ "$token_ready" == "true" && -n "$cid" ]]; then
     tmp="$(mktemp)"
     customer_code="$(NGWAF_PROGRESS=never http_get_to_file "/customer/$(urlencode "$cid")" "$tmp")"
-    returned_id="$(jq -r '.id // empty' "$tmp" 2>/dev/null || true)"
-    name="$(jq -r '.name // empty' "$tmp" 2>/dev/null || true)"
+    if [[ "$customer_code" == 2* ]]; then
+      returned_id="$(jq -r '.id // empty' "$tmp" 2>/dev/null || true)"
+      name="$(jq -r '.name // empty' "$tmp" 2>/dev/null || true)"
+    fi
     if [[ "$customer_code" == 2* && "$returned_id" == "$cid" && -n "$name" ]]; then
       setup_record "$results" pass "customer scope" "$name ($cid)"
       customer_ready=true
+    elif [[ "$customer_code" == 401 ]]; then
+      setup_record "$results" fail "customer scope" \
+        "HTTP 401: Fastly rejected these credentials; verify and reload the intended FASTLY_API_TOKEN"
+    elif [[ "$customer_code" == 403 ]]; then
+      setup_record "$results" fail "customer scope" \
+        "HTTP 403: token authentication does not grant access to the selected customer; verify its permissions"
     else
       setup_record "$results" fail "customer scope" \
         "selected $cid; API returned HTTP $customer_code and id=${returned_id:-missing}"
@@ -295,10 +315,9 @@ cmd_setup() {
               ]
             else
               ([
-                (if $token_present then empty else "export FASTLY_API_TOKEN=YOUR_FASTLY_TOKEN" end),
+                (if $token_ready then empty else "load or reload an authorized FASTLY_API_TOKEN through your approved local credential workflow, then rerun " + $program + " setup --customer-id CUSTOMER_ID" end),
                 (if $curl_available then empty else "install curl and rerun " + $program + " setup" end),
-                (if $customer_ready then empty else $program + " setup --customer-id CUSTOMER_ID" end),
-                $program + " doctor --verbose"
+                (if $selected_customer_id != "" then empty else $program + " setup --customer-id CUSTOMER_ID" end)
               ])
             end
           )

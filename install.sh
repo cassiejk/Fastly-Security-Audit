@@ -31,24 +31,65 @@ bash_version_short() {
 
 runtime_error() {
   local found="$1"
-  local os_name
+  local os_name interpreter brew_command='' brew_prefix='' homebrew_bash=''
+  local major minor selected_bash
   os_name="$(uname -s 2>/dev/null || printf 'unknown\n')"
+  interpreter="${BASH:-$(command -v bash 2>/dev/null || printf 'unknown')}"
 
-  printf '%s: Bash %s or newer is required; found %s.\n' \
-    "$PROGRAM_NAME" "$MIN_BASH_VERSION" "$found" >&2
+  printf '%s: Bash %s or newer is required; found %s at %s.\n' \
+    "$PROGRAM_NAME" "$MIN_BASH_VERSION" "$found" "$interpreter" >&2
 
   if [[ "$os_name" == "Darwin" ]]; then
-    printf '%s: macOS: brew install bash\n' "$PROGRAM_NAME" >&2
-    printf '%s: Ensure Homebrew'\''s bin directory precedes /bin in PATH.\n' \
-      "$PROGRAM_NAME" >&2
+    if command -v brew >/dev/null 2>&1; then
+      brew_command="$(command -v brew)"
+    elif [[ -x /opt/homebrew/bin/brew ]]; then
+      brew_command=/opt/homebrew/bin/brew
+    elif [[ -x /usr/local/bin/brew ]]; then
+      brew_command=/usr/local/bin/brew
+    fi
+    if [[ -z "$brew_command" ]]; then
+      printf '%s: Install Homebrew and Bash %s or newer, then rerun this installer.\n' \
+        "$PROGRAM_NAME" "$MIN_BASH_VERSION" >&2
+      return
+    fi
+    brew_prefix="$("$brew_command" --prefix 2>/dev/null || true)"
+    if [[ -n "$brew_prefix" ]]; then
+      homebrew_bash="$brew_prefix/bin/bash"
+    fi
+    if [[ -n "$homebrew_bash" && -x "$homebrew_bash" ]]; then
+      major="$("$homebrew_bash" -c 'printf "%s" "${BASH_VERSINFO[0]}"' 2>/dev/null || true)"
+      minor="$("$homebrew_bash" -c 'printf "%s" "${BASH_VERSINFO[1]}"' 2>/dev/null || true)"
+      if bash_version_at_least "$major" "$minor"; then
+        selected_bash="$(command -v bash 2>/dev/null || true)"
+        if [[ "$selected_bash" != "$homebrew_bash" ]]; then
+          printf '%s: Compatible Homebrew Bash is installed at %s but is not first on PATH.\n' \
+            "$PROGRAM_NAME" "$homebrew_bash" >&2
+        else
+          printf '%s: Compatible Homebrew Bash is on PATH, but this installer was started with %s.\n' \
+            "$PROGRAM_NAME" "$interpreter" >&2
+        fi
+        printf '%s: Rerun with: ' "$PROGRAM_NAME" >&2
+        if [[ "$selected_bash" != "$homebrew_bash" ]]; then
+          printf 'PATH=%q:"$PATH" ' "${homebrew_bash%/bash}" >&2
+        fi
+        printf '%q' "$homebrew_bash" >&2
+        printf ' %q' "$0" "$@" >&2
+        printf '\n' >&2
+        return
+      fi
+    fi
+    printf '%s: Install or update Bash with: %s install bash\n' \
+      "$PROGRAM_NAME" "$brew_command" >&2
+    printf '%s: Then rerun this installer with Homebrew Bash %s or newer.\n' \
+      "$PROGRAM_NAME" "$MIN_BASH_VERSION" >&2
   else
-    printf '%s: Install Bash %s or newer and ensure it appears first in PATH.\n' \
+    printf '%s: Install Bash %s or newer with your system package manager and rerun using that interpreter.\n' \
       "$PROGRAM_NAME" "$MIN_BASH_VERSION" >&2
   fi
 }
 
 if ! bash_version_at_least "${BASH_VERSINFO[0]:-0}" "${BASH_VERSINFO[1]:-0}"; then
-  runtime_error "$(bash_version_short)"
+  runtime_error "$(bash_version_short)" "$@"
   exit 1
 fi
 
@@ -78,7 +119,14 @@ fail() {
 }
 
 require_command() {
-  command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"
+  local name="$1" action='install it with your system package manager'
+  command -v "$name" >/dev/null 2>&1 && return 0
+  case "$name" in
+    jq) action='install jq (macOS: brew install jq), then rerun the installer' ;;
+    curl) action='install curl (macOS: brew install curl), then rerun the installer' ;;
+    tar) action='install tar or restore the system tar command, then rerun the installer' ;;
+  esac
+  fail "missing dependency: $name; $action"
 }
 
 download_file() {
@@ -171,6 +219,12 @@ fi
 
 require_command curl
 require_command tar
+if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+  fail 'missing dependency: sha256sum or shasum; install a SHA-256 checksum tool before downloading the Release'
+fi
+if [[ "$skip_setup" != true && -n "$customer_id" && -n "${FASTLY_API_TOKEN:-}" ]]; then
+  require_command jq
+fi
 
 if [[ -n "${FASTLY_AUDIT_RELEASE_BASE_URL:-}" ]]; then
   release_base="${FASTLY_AUDIT_RELEASE_BASE_URL%/}"
@@ -207,7 +261,10 @@ package_root="$extract_dir/fastly-audit"
   fail "release archive did not contain fastly-audit/ngwaf-update"
 
 export FASTLY_AUDIT_BIN_DIR="$bin_dir"
-"$package_root/ngwaf-update" "$package_root"
+if ! updater_output="$("$package_root/ngwaf-update" "$package_root" 2>&1)"; then
+  printf '%s\n' "$updater_output" >&2
+  fail 'package installation failed'
+fi
 
 if [[ "$configure_shell" == true ]]; then
   # The profile must expand HOME and PATH when a future shell starts.
@@ -225,24 +282,55 @@ if [[ "$configure_shell" == true ]]; then
     printf 'Added ~/bin to PATH for future terminals in %s\n' "$profile"
   fi
 fi
-printf '\nInstall complete.\n'
-case ":$PATH:" in
-  *":$bin_dir:"*) ;;
-  *)
-    printf "For this terminal, run: export PATH=\"%s:\$PATH\"\n" "$bin_dir"
-    ;;
-esac
-
-if [[ "$skip_setup" == "true" ]]; then
-  printf 'Setup skipped. Run later with: %s/fa setup --customer-id CUSTOMER_ID\n' \
-    "$bin_dir"
-elif [[ -n "$customer_id" && -n "${FASTLY_API_TOKEN:-}" ]]; then
-  "$bin_dir/fa" setup --customer-id "$customer_id"
-elif [[ -n "$customer_id" ]]; then
-  printf 'Load FASTLY_API_TOKEN through your approved credential workflow, then run: %s/fa setup --customer-id %s\n' \
-    "$bin_dir" "$customer_id"
+installed_bin_dir="$(cd "$bin_dir" && pwd -P)"
+installed_fa="$installed_bin_dir/fa"
+installed_version="$("$installed_fa" version)"
+selected_fa="$(command -v fa 2>/dev/null || true)"
+printf '\nFastly-Audit installed successfully!\n'
+printf 'Version: %s\n' "$installed_version"
+printf 'Installed command: %s\n' "$installed_fa"
+printf 'Bash: %s (supported)\n' "$(bash_version_short)"
+if [[ "$selected_fa" == "$installed_fa" || "$selected_fa" == "$bin_dir/fa" ]]; then
+  printf 'Shell command: fa is ready to run in this terminal.\n'
+elif [[ -n "$selected_fa" ]]; then
+  printf 'Shell command: another fa takes precedence (%s).\n' "$selected_fa"
 else
-  printf 'Next: load FASTLY_API_TOKEN through your approved credential workflow, then run: %s/fa setup --customer-id CUSTOMER_ID\n' \
-    "$bin_dir"
+  printf 'Shell command: fa is not on PATH in this terminal.\n'
 fi
-printf 'Once setup succeeds, map a CDN service with: %s/fa ngwaf workspace-services --service-id EXACT_CDN_SERVICE_ID --json\n' "$bin_dir"
+if [[ "$selected_fa" != "$installed_fa" && "$selected_fa" != "$bin_dir/fa" ]]; then
+  printf 'For this terminal, run: export PATH='
+  printf '%q' "$installed_bin_dir"
+  printf ':"$PATH"\n'
+  printf 'Or run the installed command directly: %s\n' "$installed_fa"
+fi
+if [[ "$configure_shell" == true ]]; then
+  printf 'Shell profile: PATH change takes effect in new terminals only.\n'
+fi
+
+if [[ "$skip_setup" == true ]]; then
+  printf 'Customer setup: skipped; Fastly API access was not checked.\n'
+elif [[ -z "${FASTLY_API_TOKEN:-}" ]]; then
+  printf 'Credential status: FASTLY_API_TOKEN is not loaded; Fastly API access was not checked.\n'
+  printf 'Customer setup: incomplete.\n'
+elif [[ -z "$customer_id" ]]; then
+  printf 'Credential status: FASTLY_API_TOKEN is loaded; Fastly API access was not checked.\n'
+  printf 'Customer setup: incomplete; select a Fastly Customer ID with fa setup.\n'
+else
+  if "$installed_fa" setup --customer-id "$customer_id"; then
+    printf 'Customer setup: completed. Run %s doctor for operational verification.\n' "$installed_fa"
+  else
+    printf 'Customer setup: incomplete; the software is installed. Review the setup checks above.\n'
+  fi
+fi
+if [[ "$skip_setup" == true || -z "${FASTLY_API_TOKEN:-}" || -z "$customer_id" ]]; then
+  printf '\nNext steps:\n'
+  if [[ -z "${FASTLY_API_TOKEN:-}" ]]; then
+    printf '  1. Load an authorized Fastly API token into FASTLY_API_TOKEN using your approved local credential workflow.\n'
+  else
+    printf '  1. Confirm FASTLY_API_TOKEN is authorized to read your selected customer.\n'
+  fi
+  printf '  2. Run: %s setup' "$installed_fa"
+  if [[ -n "$customer_id" ]]; then printf ' --customer-id %q' "$customer_id"; fi
+  printf '\n  3. Run: %s doctor\n' "$installed_fa"
+fi
+printf 'Need help? Run: %s setup --help\n' "$installed_fa"

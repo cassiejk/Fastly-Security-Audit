@@ -6,7 +6,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/helpers.sh"
 test_init
 
 DIST="$TEST_TMP/dist"
-"$ROOT/scripts/package-release" --dist "$DIST" --tag v24.2.1 >/dev/null
+"$ROOT/scripts/package-release" --dist "$DIST" --tag v24.2.2 >/dev/null
 
 mkdir -p "$TEST_TMP/bin"
 cat >"$TEST_TMP/bin/curl" <<'FAKE_CURL'
@@ -63,6 +63,8 @@ LEGACY="$TEST_HOME/bin/ngwaf"
 UPDATER="$TEST_HOME/bin/ngwaf-update"
 SHORT="$TEST_HOME/bin/fa"
 INSTALL_ROOT="$TEST_DATA/fastly-audit"
+INSTALLED_FA="$(cd "$TEST_HOME/bin" && pwd -P)/fa"
+INSTALLED_BIN_DIR="${INSTALLED_FA%/fa}"
 
 [[ -L "$PRIMARY" ]]
 [[ -L "$LEGACY" ]]
@@ -73,19 +75,20 @@ INSTALL_ROOT="$TEST_DATA/fastly-audit"
 [[ -x "$INSTALL_ROOT/ngwaf-update" ]]
 [[ "$(readlink "$SHORT")" == "$INSTALL_ROOT/fastly-audit" ]]
 
-[[ "$("$PRIMARY" version)" == "fastly-audit 24.2.1" ]]
-[[ "$("$LEGACY" version)" == "ngwaf 24.2.1" ]]
-[[ "$("$SHORT" version)" == "fastly-audit 24.2.1" ]]
+[[ "$("$PRIMARY" version)" == "fastly-audit 24.2.2" ]]
+[[ "$("$LEGACY" version)" == "ngwaf 24.2.2" ]]
+[[ "$("$SHORT" version)" == "fastly-audit 24.2.2" ]]
 
 grep -F 'Downloading fastly-audit.tar.gz' "$TEST_TMP/install-output" >/dev/null
 grep -F 'fastly-audit.tar.gz: OK' "$TEST_TMP/install-output" >/dev/null
-grep -F 'Primary command:' "$TEST_TMP/install-output" >/dev/null
-grep -F 'Compatibility command:' "$TEST_TMP/install-output" >/dev/null
-grep -F 'Updater command:' "$TEST_TMP/install-output" >/dev/null
-grep -F 'Short command:' "$TEST_TMP/install-output" >/dev/null
-grep -F 'Install complete.' "$TEST_TMP/install-output" >/dev/null
-grep -F "For this terminal, run: export PATH=\"$TEST_HOME/bin:" "$TEST_TMP/install-output" >/dev/null
-grep -F "Load FASTLY_API_TOKEN through your approved credential workflow, then run: $TEST_HOME/bin/fa setup --customer-id test-customer" "$TEST_TMP/install-output" >/dev/null
+grep -F 'Fastly-Audit installed successfully!' "$TEST_TMP/install-output" >/dev/null
+grep -F 'Version: fastly-audit 24.2.2' "$TEST_TMP/install-output" >/dev/null
+grep -F "Installed command: $INSTALLED_FA" "$TEST_TMP/install-output" >/dev/null
+grep -F 'Shell command: fa is not on PATH in this terminal.' "$TEST_TMP/install-output" >/dev/null
+grep -F "For this terminal, run: export PATH=$INSTALLED_BIN_DIR:\"\$PATH\"" "$TEST_TMP/install-output" >/dev/null
+grep -F 'Customer setup: incomplete.' "$TEST_TMP/install-output" >/dev/null
+grep -F "Run: $INSTALLED_FA setup --customer-id test-customer" "$TEST_TMP/install-output" >/dev/null
+grep -F "Need help? Run: $INSTALLED_FA setup --help" "$TEST_TMP/install-output" >/dev/null
 
 # Opt-in shell configuration is idempotent and leaves credentials untouched.
 SHELL=/bin/zsh PATH="$TEST_TMP/bin:$PATH" HOME="$TEST_HOME" XDG_DATA_HOME="$TEST_DATA" \
@@ -93,6 +96,7 @@ FASTLY_AUDIT_TEST_DIST="$DIST" FASTLY_AUDIT_RELEASE_BASE_URL="https://example.in
 "$ROOT/install.sh" --configure-shell --skip-setup >"$TEST_TMP/configure-output"
 # shellcheck disable=SC2016
 grep -Fqx 'export PATH="$HOME/bin:$PATH"' "$TEST_HOME/.zprofile"
+grep -F 'PATH change takes effect in new terminals only' "$TEST_TMP/configure-output" >/dev/null
 SHELL=/bin/zsh PATH="$TEST_TMP/bin:$PATH" HOME="$TEST_HOME" XDG_DATA_HOME="$TEST_DATA" \
 FASTLY_AUDIT_TEST_DIST="$DIST" FASTLY_AUDIT_RELEASE_BASE_URL="https://example.invalid/releases/latest/download" \
 "$ROOT/install.sh" --configure-shell --skip-setup >"$TEST_TMP/configure-again-output"

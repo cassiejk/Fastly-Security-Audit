@@ -3,6 +3,17 @@
 All notable changes to `fastly-audit` and its `ngwaf` compatibility command are
 documented here.
 
+## [24.2.2] - 2026-10-29
+
+### Improved
+
+- Made the Release installer report its installed version, command path,
+  current-shell PATH status, and clear next steps for customer setup.
+- Added actionable macOS Bash and missing-dependency guidance without changing
+  opt-in shell configuration or installer safety checks.
+- Clarified `fa setup` guidance for missing tokens, customer selection, and
+  HTTP 401/403 responses while keeping customer verification and JSON fields.
+
 ## [24.2.1] - 2026-10-29
 
 ### Added
@@ -80,6 +91,7 @@ documented here.
 - Preserved customer scope, data provenance, pagination, and output contracts
   while converting large JSON payload transport.
 
+[24.2.2]: https://github.com/cassiejk/Fastly-Security-Audit/compare/v24.2.1...v24.2.2
 [24.2.1]: https://github.com/cassiejk/Fastly-Security-Audit/compare/v24.1...v24.2.1
 [24.1]: https://github.com/cassiejk/Fastly-Security-Audit/compare/v24.0...v24.1
 [24.0]: https://github.com/cassiejk/ngwaf-helper/releases/tag/v24.0
