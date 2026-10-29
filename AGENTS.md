@@ -65,13 +65,104 @@
   credential values in logs, progress, fixtures, documentation, or errors.
   See [NGWAF API sources](docs/ngwaf-api-sources.md).
 
-## Validation
+## Validation policy
 
-- Add or update focused fake-`curl` behavior tests for API, resolver, JSON, or
-  link changes, including failure cases.
-- Run the focused tests first, then `./scripts/check` and `git diff --check`.
-- Report tests that used mocks separately from any live authenticated API or UI
-  validation; do not claim live validation unless it actually ran.
+These budgets are automatic repository defaults for every future Codex task,
+including tasks that do not mention testing. Silence about validation never
+permits extra tests. Codex must apply this policy without requiring the user to
+request fewer tests, name a tier, or repeat the limits. "Make sure it works" does
+not authorize the full suite. Explicit user instructions or genuinely necessary
+safety checks can require more validation; identify and justify each exception.
+Budgets are cumulative across the entire task and do not reset after edits,
+failures, iterations, or a transition between tiers. Complexity or shared-file
+imports alone do not expand them.
+
+### Tier 1 — Fast development and investigation
+
+This is the default while implementing, debugging, or exploring. Make a coherent
+change, then check Bash syntax on modified scripts and run at most **one**
+directly relevant focused test script when executable behavior changes. Do not
+test after every edit. Documentation-only and comment-only changes need no
+behavior tests: review the diff and run `git diff --check` only.
+
+Do not run `./scripts/check`, broad integration or customer-security suites,
+repository-wide ShellCheck, packaging tests, broad service-inventory tests,
+unrelated behavior tests, full CLI smoke tests, or repeated documentation scans
+by default.
+
+### Tier 2 — Feature completion
+
+When implementation is ready for review, check Bash syntax on modified scripts,
+run targeted ShellCheck on changed scripts when available, and run
+`git diff --check`. Run at most **two directly relevant focused test scripts
+total across the entire task**, counting Tier 1 tests whose relevant inputs have
+not changed. For a localized message, output label, or documentation change,
+one focused test may suffice. Check CLI help/reference consistency only when
+routing, flags, or help behavior changed; check modified documentation for
+consistency. Do not automatically run `./scripts/check`.
+
+Tier 1 and Tier 2 share a cumulative **60-second validation execution budget**
+per development task. This does not limit implementation time. Inspect unfamiliar
+test scripts before running them; prefer quick, directly relevant checks. Do
+not start another test after the budget is exhausted. If a test substantially
+exceeds it, terminate cleanly when safe and mark it incomplete; do not restart
+it merely to obtain a pass. A necessary correctness or safety check may exceed
+the budget only with an explicit justification. Report incomplete validation
+and stop instead of progressively broadening the suite.
+
+Choose tests for the changed behavior, not for the number of dependents of a
+file. Do not run `tests/customer-security.sh` merely because `lib/security.sh`
+changed, every authentication test because `lib/core.sh` changed, service
+inventory suites for a localized HTTP diagnostic, or unrelated DDoS, Bot
+Management, VCL, snapshot, mapping, or deployment tests. Do not run every test
+that sources a changed module or a broad suite merely to increase confidence.
+Use one focused fake-HTTP authentication test for a 401 message, one Agents
+diagnostic test for a count label, and diff review for a Markdown-only edit.
+For shared HTTP request construction, use targeted request tests and reserve
+broader validation for an identified integration gate. If no narrow test exists,
+report the gap instead of substituting a broad suite.
+
+Keep test additions small: reuse existing fixtures and helpers, prefer one
+representative success case and one important failure case, and retain critical
+negative cases for security-sensitive behavior. Do not add speculative matrices
+or weaken, disable, or remove existing assertions to save time. Never make an
+authenticated customer API call merely to validate local code.
+
+### Tier 3 — Full repository integration
+
+Preserve the existing `./scripts/check` suite. Run it only when the user
+explicitly requests full validation, an approved commit/merge/release requires
+it, a genuinely foundational or high-risk change cannot be assessed with
+focused tests, or a specific cross-module regression is identified. Name the
+trigger before running Tier 3. A shared-file edit alone is not a trigger. Never
+run Tier 3 during routine iteration or by default at feature completion, and
+do not rerun it if unchanged relevant code already passed.
+
+### Validation freeze and stopping rule
+
+Once Tier 2 begins, stop nonessential code changes, speculative edge cases,
+unrelated tests, opportunistic refactoring, unrelated documentation, and extra
+validation without a specific unresolved failure. If a required defect appears,
+make the smallest correction and rerun only the directly affected test when
+needed. Expand checks only if shared foundational behavior changed; do not
+restart the full suite automatically. Investigate relevant failures without
+making unrelated production changes to fix pre-existing failures.
+
+Stop validating and report when requested behavior is complete, applicable
+focused tests and syntax/targeted lint pass, required documentation is updated,
+and no directly relevant failure remains. Do not keep testing because time or
+tools remain available. If validation is incomplete or the budget is exhausted,
+report the gap and stop; never claim an interrupted or unrun test passed.
+Reduced validation does not relax ownership, authentication, pagination, JSON,
+or fail-closed safeguards, and does not authorize suppressing failures.
+Task completion does not authorize staging, committing, or pushing.
+
+Every implementation summary must state the tier, exact focused test scripts
+and total script count, approximate validation execution time, syntax and lint
+results, deferred tests, remaining failures or gaps, whether full regression
+validation ran, and whether authenticated live API requests occurred. Separate
+mocked tests and static checks from actual authenticated observations; do not
+claim full regression coverage from focused checks.
 
 ## Inspection workflow and documentation
 
