@@ -280,8 +280,10 @@ unavailable source is not evidence that a deployment is absent.
 
 ### NG-12 — Beta metrics are not yet interchangeable with NGWAF time series
 
-- **Status:** A narrow P0 `ngwaf platform-metrics-diagnostic` candidate probe
-  exists; no Platform Metrics v2 collector or verified entity-ID mapping exists.
+- **Status (30 October 2026):** A narrow P0 diagnostic exists and verified the
+  public detail `workspace_uid` to Metrics entity relationship for one Costco
+  workspace. Metric semantics, per-entity eligibility, bucket completeness,
+  and historical finality remain open. No v2 collector or P1a command exists.
 - **Affected:** Future NGWAF metrics work. Current `overview`, `timeseries`,
   `metrics`, `attack-profile`, and `attack-origins` retain their existing APIs.
 - **Constraint:** The published Platform Metrics v2 API is beta. Its `ngwaf`
@@ -290,20 +292,25 @@ unavailable source is not evidence that a deployment is absent.
   NGWAF configuration metrics are interval-maximum gauges, not additive
   counters. Similar names do not establish equivalence with legacy fields.
 - **Within `fa`:** Keep old collectors and missing-data safeguards intact.
-  Do not infer zero traffic from a missing row or completeness from one page.
-  The diagnostic requires exact public workspace owner metadata and reports a
-  candidate Metrics entity ID. Even a 200 response remains an unverified
-  cross-API identity join and produces a nonzero P0-validation exit. The
-  existing HTTP helper does not expose response Content-Type, so JSON reports
-  that field as null.
+  Do not infer zero traffic from a missing row or historical finality from one
+  completed page. The diagnostic verifies exact public workspace ownership,
+  uses that detail's valid UID as the entity ID, and rejects a conflicting
+  explicit ID before Metrics. Its mapping label can be verified for the
+  inspected workspace while `p0_validated=false` and the nonzero exit remain.
+  The HTTP helper does not expose response Content-Type, so JSON reports null.
+- **Remaining uncertainty and impact:** No complete metric-by-entity matrix,
+  zero-bucket row guarantee, finalization policy, or legacy/v2 equivalence is
+  established. A native v2-only P1a may retain unknown bucket and finality
+  states, but may not replace legacy collectors or claim compatible totals.
 - **Sources:** [NGWAF-first metrics roadmap](roadmap-platform-metrics.md),
   [Fastly Platform Metrics API](https://www.fastly.com/documentation/reference/api/metrics-stats/metrics-v2/platform/),
   `lib/metrics.sh`, `lib/attack_analysis.sh`.
-- **Resolution evidence/date:** Establish entity ownership, supported
-  metric/entity combinations, pagination and sparse-row behavior, then compare
-  settled matching UTC windows using narrow read-only probes. Documentation
-  reviewed 28 October 2026; as of that date, fake API tests only and no
-  authenticated v2 request. See NG-13 for the 29 October authenticated result.
+- **Required resolution evidence:** Obtain metric/entity eligibility, sparse
+  key and zero-only row semantics, and data-finality guidance; preserve exact
+  ownership and complete cursor traversal. Legacy replacement additionally
+  requires semantic reconciliation. The 28 October documentation review used
+  fake API tests only; subsequent reported live results are recorded in NG-13
+  and the [P0 evidence matrix](roadmap-platform-metrics.md#p0-evidence-matrix-30-october-2026).
 
 ### NG-13 — Legacy SigSci workspace Metrics entity ID gap
 
@@ -384,8 +391,9 @@ unavailable source is not evidence that a deployment is absent.
   name instead. An internal site's entity ID was supplied separately, and an
   entity ID from another workspace returned Metrics data. None of these facts
   alone binds the internal site, public workspace, entity ID, and selected
-  customer. The diagnostic accepts an explicit `--entity-id` solely for a
-  narrow probe and labels it externally supplied and unverified.
+  customer. Historically, the diagnostic accepted an externally supplied
+  `--entity-id` as an unverified candidate. The **current** command requires
+  that explicit value to match the customer-owned public detail UID.
 - **Internal relationship limit:** The implemented internal console call lists
   corporation sites and may expose site ID, name, selected-customer ownership
   fields, and `serviceID` for an Inspection Service. Its response contract is
@@ -410,11 +418,17 @@ unavailable source is not evidence that a deployment is absent.
   reached the legacy workspace population? What are the metric, bucket
   completeness, supported entity/metric, and legacy-equivalence semantics?
   What is the canonical HTTP 400 validation-error schema for this API?
-- **Unblock conditions:** Revalidate the corrected UID and selected-customer
-  ownership for each exact workspace under inspection; validate supported
-  metric/entity semantics, sparse results, bucket completeness, and pagination;
-  then perform a narrow follow-up validation before P1a collection. A manually
-  supplied working entity ID or HTTP 200 alone does not satisfy these conditions.
+- **Impact:** The verified example's identity gap is resolved, but P0 stays
+  incomplete and P1a is unimplemented. A successful one-page Metrics result
+  does not establish all-bucket coverage, historical finality, or legacy
+  equivalence. See the [P0 acceptance checklist](roadmap-platform-metrics.md#p0-acceptance-checklist-and-p1a-boundary).
+- **Resolution evidence:** Revalidate UID and selected-customer ownership for
+  each exact workspace under inspection; establish supported metric/entity
+  semantics and complete cursor retrieval. For a constrained native-v2 P1a,
+  preserve absent-bucket and historical-finality uncertainty instead of
+  requiring them to be resolved first. Complete-window totals and legacy
+  replacement need stronger bucket and equivalence evidence. A manually
+  supplied working entity ID or HTTP 200 alone is insufficient.
 - **Sources:** [P0 roadmap](roadmap-platform-metrics.md),
   `lib/platform_metrics_diagnostic.sh`, and the reported authenticated
   diagnostic and legacy timeseries observations of 29 October 2026, and the
@@ -426,12 +440,13 @@ unavailable source is not evidence that a deployment is absent.
 
 #### Revalidation checklist
 
-1. Read the [original Engineering discussion](https://fastly.slack.com/archives/C037JNWHR0R/p1793290562060269) and any linked ticket; record the new status and date.
-2. Confirm the public Workspaces API's documented identifier behavior and whether the legacy workspace identifiers are corrected.
-3. Verify an authoritative workspace-to-entity relationship and selected-customer ownership for one exact workspace.
-4. Run the existing narrow P0 diagnostic for one completed UTC window; confirm it reports verified detail-UID identity while leaving P0 incomplete.
-5. Compare the observation with legacy metrics without assuming equivalence; validate sparse results, bucket coverage, and pagination.
-6. Update NG-13 with the dated evidence and outcome before reconsidering P1a.
+For the tested workspace, exact owner/UID verification and one successful
+automatic-UID daily diagnostic are already recorded above. Do not repeat that
+probe without contradictory evidence. For another workspace, verify exact
+customer-owned detail and UID before Metrics. For P0 semantics, follow the
+[roadmap's Engineering questions](roadmap-platform-metrics.md#questions-for-metricsobservability-engineering)
+and acceptance checklist; keep absent buckets unknown and do not infer legacy
+equivalence from the observed difference.
 
 ## Maintenance
 

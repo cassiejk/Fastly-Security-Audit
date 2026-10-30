@@ -1,7 +1,7 @@
 # NGWAF-first Platform Metrics v2 roadmap
 
-Status: investigation and implementation plan, updated 29 October 2026. **A
-read-only P0 candidate diagnostic now exists; no Platform Metrics collector
+Status: investigation and implementation plan, updated 30 October 2026. **A
+read-only P0 diagnostic now exists; no Platform Metrics collector
 or P1a command is implemented in `fa`.** This roadmap is
 customer-agnostic and keeps the existing NGWAF collectors available until their
 meaning and coverage can be reconciled with the beta API.
@@ -54,10 +54,17 @@ parameters include `from` (inclusive), `to` (exclusive), `metric`, `metric_set`,
 The `ngwaf` metric set contains the twelve fields below. The response metadata
 model includes `from`, `to`, `group_by`, `limit`, and `next_cursor`; rows contain
 bucket-start `timestamp` and optional `region` or `datacenter` when grouped.
-The documentation does not give a per-metric entity eligibility table. An
-NGWAF workspace is a **candidate** entity for request and workspace gauges;
-account gauge availability on that entity or on the aggregate endpoint requires
-P0 verification. No existing `fa` field is classified as exactly equivalent.
+The documentation names NGWAF workspaces as single-query entities but does not
+give a per-metric entity eligibility table. Workspace request/gauge fields are
+only **candidates** for that entity class; account gauge availability on a
+workspace or on the aggregate endpoint requires verification. No existing `fa`
+field is classified as exactly equivalent.
+The separate aggregate endpoint is described as covering all entities for a
+customer; it is not a documented account-level entity ID. No account-level
+entity identifier or complete NGWAF metric-by-entity eligibility matrix is
+established. The only reported successful combination is
+`ngwaf_requests_total_count` on one verified workspace UID. Other combinations
+are **undocumented or unobserved**, not confirmed unsupported.
 
 In the table, **Σ** means summing validated, non-overlapping counter buckets
 within a fixed entity and geographic partition. **Max/point** means retain
@@ -92,12 +99,14 @@ establish which are actually returned for each verified entity type.
 ## Response handling and request-cost risks
 
 - **Sparse fields:** The v2 data model says nonzero keys alone appear in a
-  *returned* row. A missing metric key in a validated row may represent a
-  documented zero, but a missing row, inaccessible metric, unsupported entity,
-  malformed body, or incomplete page cannot be promoted to zero. Preserve
-  present-versus-omitted provenance; define any narrow zero interpretation only
-  after P0 confirms the metric was requested and supported. Do not change old
-  collectors' missing-field policy globally.
+  *returned* row. An explicit numeric zero, if returned, is a zero observation;
+  the published sparse rule normally omits zero-valued keys. An omitted
+  requested key is consistent with zero **only after** metric/entity support
+  and the returned row's scope are established. An empty `data[]`, missing
+  expected timestamp, inaccessible or unsupported metric/entity, malformed
+  response, or incomplete retrieval is not documented as zero traffic. Preserve
+  all of these states separately. Do not change old collectors' missing-field
+  policy globally.
 - **Pagination:** Follow documented `next_cursor` with the same query and
   bounded page/row limits; reject repeated cursors, inconsistent metadata,
   duplicate entity/time/group keys, failed pages, and truncated results. Emit
@@ -109,6 +118,8 @@ establish which are actually returned for each verified entity type.
   data arrives around 02:00 UTC the next day; hourly around 15 minutes after
   the hour; minute data typically after 2 minutes and sometimes 15 minutes.
   Reconciliation needs a common settled window, not a just-ended bucket.
+  Approximate availability is not a published finalization or correction
+  guarantee; no response watermark establishing historical finality is known.
 - **Aggregation:** Counters may sum across disjoint time buckets after complete
   pagination. Gauges report each interval's maximum; summing them is invalid.
   Never add an ungrouped total to regional/POP rows or combine overlapping
@@ -187,7 +198,7 @@ fixed, allowlisted validation labels and the error body format; raw API error
 text, headers, and credentials remain excluded from that output. The optional
 raw-response file is separate and may contain customer-sensitive data.
 [NG-13](known-limitations.md#ng-13--legacy-sigsci-workspace-metrics-entity-id-gap)
-records the observed request, remaining identity questions, and P0 resolution
+records the observed request, remaining population-wide identity questions, and P0 resolution
 criteria. The allowlist also recognizes the `errors[].property` and
 `errors[].reason` form
 shown in Fastly's [Origin Inspector metrics error example](https://www.fastly.com/documentation/reference/api/metrics-stats/origin-inspector/historical/);
@@ -200,22 +211,111 @@ schema or explain the reported 400.
   exact UID and customer ownership verification for an inspected workspace;
   remaining [NG-13](known-limitations.md#ng-13--legacy-sigsci-workspace-metrics-entity-id-gap)
   semantics and completeness work before claiming P0 support.
-- **Acceptance:** A field-by-field scope/units/equivalence record; verified
-  entity ID and selected-customer ownership mechanism; row/meta nesting,
-  pagination, grouping, sparse fields, granularity, and supported metric/entity
-  combinations characterized. Explicitly identify fields with no replacement.
+- **Acceptance:** A field-by-field scope/units record with equivalence marked
+  known or unknown; verified entity ID and selected-customer ownership
+  mechanism; row/meta nesting, pagination, grouping, sparse fields, and
+  granularity characterized for the narrow first metric/entity combination.
+  Record other combinations as unverified and identify fields with no
+  documented replacement. Legacy equivalence is not required for a native
+  v2-only collector.
 - **Request scope:** Further documentation/local fixture work: **0 new
   authenticated requests**. A later authorized probe should be one exact
   workspace and one completed UTC window, at most one first-page GET plus
   documented cursor pages, with a
   separately justified exact ownership check; no aggregate/customer scan.
-- **Tests:** Fake v2 responses for sparse-present row, absent row, malformed
-  metadata, unsupported entity, page continuation, duplicate cursor/key, and
-  counter/gauge handling; no collector change in this milestone.
+- **Tests:** Existing fake v2 responses cover sparse-present and absent rows,
+  malformed metadata, unsupported entity, page continuation, and duplicate
+  cursor/key. Gauge handling is a later collector test; no collector change in
+  this milestone.
 - **Questions:** Does v2 expose authoritative selected-customer ownership for
-  `entity_id`, or must `fa` use a separate exact NGWAF detail? Which `ngwaf`
-  fields are supported per entity? What is the exact error/schema behavior for
-  an unsupported field and how does beta versioning surface?
+  `entity_id` beyond the verified exact public detail UID relationship for the
+  tested workspace? Which `ngwaf` fields are supported per entity? What is the
+  exact error/schema behavior for an unsupported field and how does beta
+  versioning surface?
+
+#### P0 evidence matrix (30 October 2026)
+
+“Observed” below means the authenticated results **reported for this
+investigation**, not requests made while preparing this document. Synthetic
+fixtures test `fa` behavior, not the service's data contract. The twelve
+published NGWAF fields, descriptions, and counter/gauge types are listed in
+the compatibility matrix above; the published reference does not assign each
+field to every entity type.
+
+| Requirement | Published contract | Reported live observation | Offline synthetic evidence | Unknown; P1a impact | Next verification |
+| --- | --- | --- | --- | --- | --- |
+| Entity and metric eligibility | Single-entity endpoint includes NGWAF workspaces; aggregate is all entities for a customer; `ngwaf` set has eight request/bot counters and four configuration gauges. No complete per-metric/per-entity matrix or account entity ID is documented. | `ngwaf_requests_total_count` returned one value for one workspace UID. No account or aggregate query was reported. | Fake response accepts that one fixed metric on a synthetic UID. | Other workspace metrics, account-level entities, and aggregate combinations are undocumented or unobserved, **not** proven unsupported. Minimal P1a can be restricted to the observed workspace total metric; expanding metrics needs eligibility evidence. | Ask Metrics/Observability Engineering for the eligibility matrix; probe only narrowly justified combinations later. |
+| Identity and ownership | Published Metrics path takes `entity_id`; its response does not document a selected-customer owner proof. | Engineering reported CONSOLE-3510 deployment and identified `workspace_uid` as the Metrics ID; exact customer-owned detail returned the working UID, and automatic-UID Metrics retrieval succeeded for the tested workspace. | Missing, malformed, empty, or conflicting UID and ownership stop before Metrics; explicit `--entity-id` must match the detail UID. | Other historical workspaces are not population-verified. P1a must repeat exact detail/ownership/UID checks per workspace. | Keep the exact checks; investigate a different workspace only if that scope is needed or conflicting evidence appears. |
+| Sparse observations and bucket presence | Only nonzero keys appear in a returned row. No published guarantee says zero-only daily buckets produce a row. | One positive daily value; no reported live explicit zero, omitted requested key, empty `data[]`, or missing day. | Fixtures distinguish explicit zero, omitted key, empty data, malformed row, and absent/incomplete result. | Explicit zero is a zero value; omitted key may mean zero only for a supported metric in a valid row. Empty data, missing timestamp, unsupported combination, and failed retrieval remain distinct unknowns. P1a may report missing buckets as unknown without claiming a complete traffic total. | Ask whether supported zero-only buckets always appear and what an omitted supported key means. |
+| UTC window, retention, and finality | `from` inclusive, `to` exclusive; daily buckets use UTC days. Daily availability is around 02:00 UTC next day; daily retention 365 days, minute/hour 35 days. No finalization or correction policy is published here. | One completed 26 October daily bucket was returned. | Argument checks require one completed UTC day, within retention and after the two-hour guard; returned timestamp and bounds are checked. | Approximate availability does not prove immutable historical totals. P1a can label observations provisional/unknown-finality; settled-total claims need a finality contract. | Ask for finalization and late-correction policy. |
+| Pagination and completeness | `meta.from`, `meta.to`, `meta.group_by`, `meta.limit`, and `meta.next_cursor` describe scope and continuation. | Returned `group_by="timestamp"`, terminal `next_cursor=""`, one page and one bucket. | Validator checks response envelope, bounds, row key, cursor shape, duplicates/repeats, and ten-page cap; incomplete traversal fails closed. | Complete cursor traversal proves retrieval of advertised pages only. It does not prove bucket coverage, ingestion finality, or metric population completeness. P1a must label these separately. | Obtain row-emission and finality contracts; exercise additional pages only when a scoped query actually advertises them. |
+| Counter/gauge aggregation | Counters sum events within intervals; NGWAF account/workspace configuration gauges are interval maxima and cannot be summed across time. | Only one request counter was observed. | Diagnostic tests one counter; no live gauge semantics were tested. | Gauge entity eligibility and meaning remain open. Minimal P1a need not collect gauges; later reporting must not sum them. | Use the published types; establish gauge eligibility before any gauge collector. |
+| Legacy comparison | V2 total is described as Edge WAF and Core WAF requests; legacy `requests_total` is named but not defined as equivalent. No v2 replacement for `requests_attack` is documented. | Same UTC day: legacy `113019418`, v2 `112963821`; difference `55597` (about `0.049%`). | No synthetic test can establish live semantic equivalence. | Cause unknown: coverage, inclusion, attribution, and settlement are possibilities, **not established explanations**. Native v2-only P1a does not require equivalence; replacing legacy fields or creating aliases does. | Ask Engineering for definitions and reconciliation guidance before compatibility claims. |
+
+The diagnostic's successful `pagination_complete=true` means **retrieval
+completeness** for the returned pages. **Bucket coverage** asks whether every
+expected timestamp is present. **Ingestion finality** asks whether later data
+can change a bucket. **Metric population completeness** asks whether the
+supported metric covers all events in its defined scope. None of the last
+three follows from cursor exhaustion or HTTP 200. The diagnostic remains a P0
+probe and always reports `p0_validated=false`.
+
+#### P0 acceptance checklist and P1a boundary
+
+Status labels describe evidence, not a new assertion that P0 has passed.
+
+| Requirement | Status | Minimal P1a requirement or later phase |
+| --- | --- | --- |
+| API path and `daily` granularity | Completed for the tested request | Use the corrected `/daily` path; retain dated `/day` failure as history. |
+| Exact workspace identity and selected-customer ownership | Completed in current diagnostic; must be repeated per inspected workspace | **Required:** exact public detail, matching owner, no inventory inference. |
+| `workspace_uid` mapping | Verified for the tested workspace; population coverage open | **Required:** use the valid UID from that exact owned detail; reject absent/conflicting values. |
+| Supported metric/entity combinations | Partially verified: one workspace total counter | **Required:** limit initial P1a to a combination with sufficient evidence; obtain eligibility evidence before adding other fields or aggregate/account scope. |
+| Response envelope and cursor pagination | Locally validated; one live terminal page observed | **Required:** preserve shape, bounds, duplicate, cursor, and partial-page failures; do not label capped traversal complete. |
+| Sparse-field handling | Published rule and local distinction; live zero/omission behavior open | **Required:** retain explicit value, omitted-key, and absent-row provenance. |
+| Bucket-presence interpretation | Open | A constrained P1a may report absent buckets as **unknown** without totals or zero-fill; a complete-window claim needs a row-emission contract. |
+| Historical data finality | Open | A constrained P1a may report observed values with unknown finality; immutable/settled totals need a correction policy. |
+| Counter/gauge semantics | Published types; gauge entity eligibility open | **Required:** do not sum gauges; initial counter-only P1a can defer gauge eligibility. |
+| Legacy compatibility assumptions | Open; observed values differ | Native v2-only P1a may proceed without legacy equivalence. **No alias or replacement of legacy collectors** until definitions and reconciliation are established. |
+
+P0's investigation status remains **incomplete**. P1a readiness means a
+narrow, native-v2 output contract that carries the unresolved coverage and
+finality states explicitly; it does not mean those states have become known.
+Broader metrics, account aggregation, and legacy reconciliation belong to
+later milestones.
+
+#### Questions for Metrics/Observability Engineering
+
+No Metrics/Observability owner, commitment, ticket, or ETA is established in
+the supplied evidence. Security APIs ownership of the historical UID issue
+and CONSOLE-3510 should not be transferred to these metric-contract questions.
+
+1. Which of the twelve NGWAF metrics are valid on individual workspace entities, account-level entities (if any), and customer aggregate queries?
+2. For a supported requested metric, what does an omitted key in an otherwise valid bucket mean?
+3. Are zero-only daily buckets guaranteed to produce timestamp rows, or can whole rows be omitted?
+4. Is there a historical finalization or correction policy beyond approximate ingestion latency?
+5. Is `ngwaf_requests_total_count` intended to be definitionally equivalent to legacy `requests_total`; if so, what are the inclusion and time-attribution rules?
+
+#### Resuming Platform Metrics Work
+
+No production v2 collector or P1a command exists. The implemented
+[`fa ngwaf platform-metrics-diagnostic` syntax](cli-reference.md#next-gen-waf)
+accepts one exact workspace ID, `--start` and `--end` for one completed UTC
+day, and optional `--entity-id`, `--save-raw-response`, and `--json`. It uses
+the exact customer-owned public detail UID, a single Metrics metric, and only
+advertised cursor pages; it exits nonzero with `p0_validated=false` even after
+a valid observation. Review the current implementation before any new probe.
+
+P0 is still open because metric eligibility, sparse bucket emission, finality,
+and legacy definitions lack sufficient contracts. The
+[NG-13 limitation](known-limitations.md#ng-13--legacy-sigsci-workspace-metrics-entity-id-gap)
+records the supplied [Engineering Slack discussion](https://fastly.slack.com/archives/C037JNWHR0R/p1793290562060269),
+reported [CONSOLE-3510 deployment](https://fastly.atlassian.net/browse/CONSOLE-3510),
+and the dated Costco example as **historical evidence only**. Do not repeat
+that workspace's successful identity probe without new contradictory evidence.
+Next obtain the five contract answers above; then decide whether one narrow,
+authorized diagnostic extension and probe is necessary. Keep any absent bucket
+unknown, preserve current legacy collectors, and do not implement P1a or claim
+P0 complete from the one successful live response.
 
 ### P1a — Single NGWAF workspace metrics
 
@@ -233,8 +333,9 @@ schema or explain the reported 400.
   zero versus omitted key, missing bucket, malformed shape, cursor failures,
   complete multi-page output, stdout/stderr separation, and request count.
 - **Questions:** Can an exact customer-scoped NGWAF detail establish ownership
-  in every supported case? Which first counter has reliably documented
-  workspace eligibility and how are absent rows represented?
+  in every supported case? Beyond the observed total counter on one workspace,
+  which metric/entity combinations are documented? Can absent rows be left
+  explicitly unknown without claiming complete-window totals?
 
 ### P1b — NGWAF traffic and outcome analysis
 
