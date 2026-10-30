@@ -308,13 +308,15 @@ unavailable source is not evidence that a deployment is absent.
 ### NG-13 — Legacy SigSci workspace Metrics entity ID gap
 
 - **Status (30 October 2026):** The `/day` granularity error and local response
-  parser incompatibility are resolved. A narrow `/daily` diagnostic retrieved
-  Metrics data using an entity ID supplied independently by Engineering.
-  Engineering identified a separate upstream feature gap: legacy Signal
-  Sciences-created workspaces do not consistently expose their Metrics entity
-  IDs through the public Workspaces API. The Security APIs team owns
-  investigation of remediation; no ETA was available as of 30 October.
-  Cross-API identity remains unverified, P0 remains open, and P1a is blocked.
+  parser incompatibility are resolved. Engineering reported deploying
+  [CONSOLE-3510](https://fastly.atlassian.net/browse/CONSOLE-3510); assigned
+  engineer Abraham Kwok confirmed that public workspace `workspace_uid` holds
+  the Metrics entity ID. A narrow `/daily` diagnostic retrieved Metrics data
+  for the affected example, and a subsequent read-only workspace inspection
+  returned the same UID. This verifies the example's identifier relationship
+  using the reported Engineering contract and exact public detail, but does not
+  establish coverage for every legacy SigSci-created workspace. P0 semantics
+  and completeness work remain open; P1a is not implemented.
 - **Observed:** 29 October 2026 for Costco (`tHYft17nv2e3hrPd0bfuZ`), public
   NGWAF workspace `gdx-costco-prd-ecomapi`. Customer preflight succeeded; exact
   workspace ownership was verified by an HTTP 200 detail response.
@@ -349,8 +351,21 @@ unavailable source is not evidence that a deployment is absent.
   identifier `gdx-costco-prd-ecomapi`; Engineering supplied Metrics entity ID
   `TKRzkOaLIwPWJtUDJjcqfN` for internal corporation
   `66bd2ee3ccdcb2a87f3be1d7` and site `69fe4cffb08e9be93be1b5f9`.
+  After the reported deployment, the public workspace detail returned
+  `workspace_uid=TKRzkOaLIwPWJtUDJjcqfN`, matching the previously queried
+  Metrics entity ID.
   These are investigation identifiers, not values for production logic or
   generic test fixtures.
+- **Automatic-UID live diagnostic (30 October 2026):** A subsequent reported
+  diagnostic selected public workspace `gdx-costco-prd-ecomapi` and derived
+  Metrics entity `TKRzkOaLIwPWJtUDJjcqfN` from its customer-owned public
+  detail `workspace_uid` (`entity_id_source=public_workspace_detail_workspace_uid`,
+  `mapping_verification=verified_public_workspace_detail_uid`). Metrics returned
+  HTTP 200, `status=success_with_data`, and one observed daily
+  `ngwaf_requests_total_count=112963821`; pagination was complete.
+  `p0_validated=false` remained in the result. This verifies automatic UID
+  identity resolution for this tested workspace, not all legacy workspaces or
+  the metric's semantics and completeness.
 - **Confirmed upstream gap:** In the supplied Engineering discussion, Lukas
   Eklund stated that `GET /ngwaf/v1/workspaces` should expose the Metrics
   entity identifier in `id`, while affected Costco records expose a
@@ -384,21 +399,22 @@ unavailable source is not evidence that a deployment is absent.
   (approximately 0.049%). The difference is unexplained; neither equivalence
   nor a cross-API identity mapping follows from these two observations.
 - **Current `fa` behavior:** The P0 diagnostic uses `/daily`, supports
-  `--entity-id` for a narrow external candidate, and can save the first raw
-  body with `--save-raw-response`. It accepts the observed timestamp grouping
-  and empty terminal cursor, but still validates exact public workspace
-  ownership separately and marks the Metrics identity join unverified.
-- **Remaining questions:** What authoritative field or contract binds the
-  public workspace, internal site, and Metrics entity to the selected customer?
-  What are the metric, bucket completeness, and legacy-equivalence semantics?
+  `--entity-id` only when it matches a valid UID from exact public workspace
+  detail, and can save the first raw body with `--save-raw-response`. It uses
+  that UID for Metrics, accepts the observed timestamp grouping and empty
+  terminal cursor, and validates exact public workspace identity and selected
+  customer ownership before the Metrics request. Missing, malformed, or
+  conflicting UIDs fail before Metrics. It reports verified detail-UID identity
+  separately from `p0_validated=false` and retains the nonzero exit policy.
+- **Remaining questions:** How broadly has the `workspace_uid` correction
+  reached the legacy workspace population? What are the metric, bucket
+  completeness, supported entity/metric, and legacy-equivalence semantics?
   What is the canonical HTTP 400 validation-error schema for this API?
-- **Unblock conditions:** Establish an authoritative public workspace-to-Metrics
-  entity relationship and verify its selected-customer ownership; confirm
-  working identifier resolution for legacy SigSci-created workspaces; validate
-  supported metric/entity semantics, sparse results, bucket completeness, and
-  pagination; then perform a narrow follow-up validation before P1a collection.
-  A manually supplied working entity ID is diagnostic evidence, not a general
-  mapping mechanism. HTTP 200 alone does not satisfy these conditions.
+- **Unblock conditions:** Revalidate the corrected UID and selected-customer
+  ownership for each exact workspace under inspection; validate supported
+  metric/entity semantics, sparse results, bucket completeness, and pagination;
+  then perform a narrow follow-up validation before P1a collection. A manually
+  supplied working entity ID or HTTP 200 alone does not satisfy these conditions.
 - **Sources:** [P0 roadmap](roadmap-platform-metrics.md),
   `lib/platform_metrics_diagnostic.sh`, and the reported authenticated
   diagnostic and legacy timeseries observations of 29 October 2026, and the
@@ -413,7 +429,7 @@ unavailable source is not evidence that a deployment is absent.
 1. Read the [original Engineering discussion](https://fastly.slack.com/archives/C037JNWHR0R/p1793290562060269) and any linked ticket; record the new status and date.
 2. Confirm the public Workspaces API's documented identifier behavior and whether the legacy workspace identifiers are corrected.
 3. Verify an authoritative workspace-to-entity relationship and selected-customer ownership for one exact workspace.
-4. Run the existing narrow P0 diagnostic for one completed UTC window; keep its identity status unverified until the authoritative join is established.
+4. Run the existing narrow P0 diagnostic for one completed UTC window; confirm it reports verified detail-UID identity while leaving P0 incomplete.
 5. Compare the observation with legacy metrics without assuming equivalence; validate sparse results, bucket coverage, and pagination.
 6. Update NG-13 with the dated evidence and outcome before reconsidering P1a.
 

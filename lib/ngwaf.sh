@@ -485,6 +485,7 @@ cmd_workspace() {
   jq --arg input "$input" --arg workspace "$w" --arg workspace_id "$ws_id" '{
       workspace: $workspace,
       workspace_id: $workspace_id,
+      workspace_uid: (.workspace_uid // null),
       workspace_input: $input,
       mode,
       immediate_blocking: (.attack_signal_thresholds.immediate // null),

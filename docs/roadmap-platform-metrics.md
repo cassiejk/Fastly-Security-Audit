@@ -140,11 +140,10 @@ historical `/metrics/v2/platform/entities/{id}/day` GET with `from`, `to`,
 `meta.next_cursor` triggers another Metrics GET, up to ten pages. It rejects
 unowned or ownerless workspace details, malformed response data, repeated
 cursors, and incomplete pages; sparse metric omissions and empty rows remain
-distinct from zero. The code uses public workspace `id` as an **unverified
-candidate** Metrics `entity_id`; the published API does not explicitly specify
-whether `id` or `workspace_uid` is the correct identifier or echo an ownership
-binding in its documented response. The diagnostic therefore exits nonzero
-even for a valid candidate response and does not claim P0 completion. The
+distinct from zero. The initial probe used public workspace `id` as an
+**unverified candidate** Metrics `entity_id`; the published API did not
+establish that join. The diagnostic exits nonzero even for a successful Metrics
+response and does not claim P0 completion. The
 existing HTTP helper does not capture Content-Type, reported as null. These
 request and response-shape safeguards were checked with source review and an
 offline fake API. Separately reported authenticated P0 diagnostics verified
@@ -153,10 +152,8 @@ no observations. The 29 October 2026 result was classified locally as
 `unsupported_parameter` with the fixed message `API reports invalid parameter`,
 but it did not identify the rejected parameter or establish the underlying
 cause at the time. Engineering later confirmed that `day` is not an accepted
-path granularity; the local diagnostic now uses `daily` and accepts optional
-diagnostic-only `--entity-id ENTITY_ID`. The public workspace still requires
-exact selected-customer ownership, and an external entity candidate is never
-treated as a verified join. A subsequent authenticated `/daily` request with
+path granularity; the local diagnostic now uses `daily`. A subsequent
+authenticated `/daily` request with
 an independently supplied Metrics entity ID returned HTTP 200 and one daily
 observation. The then-current parser rejected its `meta.group_by="timestamp"`
 and `meta.next_cursor=""`; this local compatibility defect is corrected.
@@ -169,10 +166,23 @@ unexplained and metric equivalence is unproven. In the supplied
 Lukas Eklund said the public Workspaces API `id` should expose the Metrics
 entity ID, while affected legacy SigSci-created workspaces expose a name-like
 value. Cheryl Sunley identified this as a missing integration feature owned
-for investigation by the Security APIs team; no remediation ETA was available
-as of 30 October. The observed Metrics response does not verify the
-workspace-to-entity join or selected-customer ownership of that join. P0
-remains blocked and P1a is not implemented. The diagnostic output reports only
+for investigation by the Security APIs team. Engineering then reported
+deploying [CONSOLE-3510](https://fastly.atlassian.net/browse/CONSOLE-3510)
+on 30 October; assigned engineer Abraham Kwok confirmed that `workspace_uid`
+holds the Metrics entity ID. A read-only public detail inspection for the
+affected workspace returned the same UID previously queried successfully in
+Metrics. This verifies that example's identifier relationship using the
+reported contract, without establishing coverage for all legacy workspaces.
+The reported 30 October automatic-UID diagnostic then returned HTTP 200 and
+`success_with_data` for the same daily value (112963821), with complete
+pagination, `mapping_verification=verified_public_workspace_detail_uid`, and
+`p0_validated=false`. This is one tested workspace, not a population-wide
+identity or metric-completeness result.
+The diagnostic now requires a valid UID from exact, customer-owned workspace
+detail; an explicit `--entity-id` must match it. This allows identity
+verification for an inspected workspace but does not resolve metric semantics,
+supported entity/metric combinations, or completeness. P0 remains open and
+P1a is not implemented. The diagnostic output reports only
 fixed, allowlisted validation labels and the error body format; raw API error
 text, headers, and credentials remain excluded from that output. The optional
 raw-response file is separate and may contain customer-sensitive data.
@@ -187,8 +197,9 @@ schema or explain the reported 400.
 ### P0 — API compatibility and evidence investigation (open)
 
 - **Dependencies:** Published v2 and NGWAF contracts; synthetic fixtures;
-  resolution of [NG-13](known-limitations.md#ng-13--legacy-sigsci-workspace-metrics-entity-id-gap)
-  before claiming live support.
+  exact UID and customer ownership verification for an inspected workspace;
+  remaining [NG-13](known-limitations.md#ng-13--legacy-sigsci-workspace-metrics-entity-id-gap)
+  semantics and completeness work before claiming P0 support.
 - **Acceptance:** A field-by-field scope/units/equivalence record; verified
   entity ID and selected-customer ownership mechanism; row/meta nesting,
   pagination, grouping, sparse fields, granularity, and supported metric/entity

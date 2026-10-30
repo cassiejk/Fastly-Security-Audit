@@ -37,16 +37,19 @@ case "$url" in
   */ngwaf/v1/workspaces/workspace-test)
     case "$PM_TEST_MODE" in
       owner-missing) printf '%s\n' '{"id":"workspace-test"}' >"$outfile" ;;
-      owner-mismatch) printf '%s\n' '{"id":"workspace-test","customer_id":"other-test"}' >"$outfile" ;;
-      id-mismatch) printf '%s\n' '{"id":"other-workspace","customer_id":"customer-test"}' >"$outfile" ;;
+      owner-mismatch) printf '%s\n' '{"id":"workspace-test","workspace_uid":"metrics-entity-test","customer_id":"other-test"}' >"$outfile" ;;
+      id-mismatch) printf '%s\n' '{"id":"other-workspace","workspace_uid":"metrics-entity-test","customer_id":"customer-test"}' >"$outfile" ;;
       detail-404) status=404; printf '%s\n' '{"detail":"Site not found"}' >"$outfile" ;;
-      *) printf '%s\n' '{"id":"workspace-test","customer_id":"customer-test","name":"Synthetic Workspace"}' >"$outfile" ;;
+      uid-missing) printf '%s\n' '{"id":"workspace-test","customer_id":"customer-test"}' >"$outfile" ;;
+      uid-empty) printf '%s\n' '{"id":"workspace-test","customer_id":"customer-test","workspace_uid":""}' >"$outfile" ;;
+      uid-malformed) printf '%s\n' '{"id":"workspace-test","customer_id":"customer-test","workspace_uid":"invalid/uid"}' >"$outfile" ;;
+      uid-wrong-type) printf '%s\n' '{"id":"workspace-test","customer_id":"customer-test","workspace_uid":123}' >"$outfile" ;;
+      *) printf '%s\n' '{"id":"workspace-test","workspace_uid":"metrics-entity-test","customer_id":"customer-test","name":"Synthetic Workspace"}' >"$outfile" ;;
     esac ;;
   */metrics/v2/platform/entities/*/daily)
     entity_id="${url##*/entities/}"
     entity_id="${entity_id%/daily}"
-    expected_entity=workspace-test
-    [[ "$PM_TEST_MODE" != explicit-* ]] || expected_entity=metrics-entity-test
+    expected_entity=metrics-entity-test
     [[ "$entity_id" == "$expected_entity" ]] || {
       status=400; printf '%s\n' '{"detail":"Invalid entity ID"}' >"$outfile";
       printf '%s' "$status"; exit 0;
@@ -118,9 +121,20 @@ PM_TEST_END="$(date -u -v-2d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d '2 da
 export PM_TEST_START PM_TEST_END
 
 run_mode() {
-  local mode="$1" expected="$2" count="$3" entity_id="${4:-workspace-test}"
+  local mode="$1" expected="$2" count="$3" entity_id="${4-metrics-entity-test}" reported_entity mapping source
   local -a entity_arg=()
-  [[ "$entity_id" == workspace-test ]] || entity_arg=(--entity-id "$entity_id")
+  [[ "$mode" != explicit-* ]] || entity_arg=(--entity-id "$entity_id")
+  reported_entity="$entity_id"
+  mapping=verified_public_workspace_detail_uid
+  source=public_workspace_detail_workspace_uid
+  if [[ "$expected" == ownership_unverified || "$expected" == identity_unverified || "$expected" == identity_conflict ]]; then
+    mapping=unverified_cross_api_identity
+    source=unavailable
+    [[ "$mode" == explicit-* ]] && source=explicit_cli_argument
+    [[ "$mode" == explicit-* ]] || reported_entity=''
+  elif [[ "$mode" == explicit-* ]]; then
+    source=explicit_cli_argument
+  fi
   export PM_TEST_MODE="$mode"
   : >"$PM_TEST_LOG"
   if "$ROOT/fastly-audit" ngwaf platform-metrics-diagnostic workspace-test \
@@ -128,12 +142,13 @@ run_mode() {
     printf 'platform-metrics-diagnostic: %s unexpectedly claimed P0 validation\n' "$mode" >&2
     exit 1
   fi
-  jq -e --arg status "$expected" --arg entity "$entity_id" '.status == $status and .p0_validated == false and
+  jq -e --arg status "$expected" --arg entity "$reported_entity" --arg mapping "$mapping" --arg source "$source" '
+    .status == $status and .p0_validated == false and
     .workspace.id == "workspace-test" and .public_workspace_id == "workspace-test" and
-    .entity_id == $entity and .metrics_entity_id == $entity and
-    .entity_compatibility == "unverified_cross_api_identity" and
-    .mapping_verification == "unverified_cross_api_identity" and
-    .entity_id_source == (if $entity == "workspace-test" then "public_workspace_detail_id_candidate" else "explicit_cli_argument" end) and
+    .entity_id == (if $entity == "" then null else $entity end) and
+    .metrics_entity_id == (if $entity == "" then null else $entity end) and
+    .entity_compatibility == $mapping and .mapping_verification == $mapping and
+    .entity_id_source == $source and
     .granularity == "daily" and .endpoint == "GET /metrics/v2/platform/entities/{entity_id}/daily" and
     .metric == "ngwaf_requests_total_count" and
     (.workspace.detail_http_status | test("^[0-9]{3}$"))' "$TEST_TMP/out" >/dev/null
@@ -143,7 +158,7 @@ run_mode() {
     empty|captured-empty) jq -e '.bucket_coverage == "no_observation_not_zero" and .observations == []' "$TEST_TMP/out" >/dev/null ;;
     explicit-captured) jq -e '.observations == [{"timestamp":.window.from,"present":true,"value":11}] and
       .pages_fetched == 1 and .pagination_complete == true and .response_meta.next_cursor == "" and
-      .mapping_verification == "unverified_cross_api_identity" and .p0_validated == false' "$TEST_TMP/out" >/dev/null ;;
+      .mapping_verification == "verified_public_workspace_detail_uid" and .p0_validated == false' "$TEST_TMP/out" >/dev/null ;;
     multi) jq -e '.pages_fetched == 2 and .pagination_complete == true' "$TEST_TMP/out" >/dev/null ;;
     partial|repeat) jq -e '.pagination_complete == false' "$TEST_TMP/out" >/dev/null ;;
     http-400-nested) jq -e '.api_validation_message == "API reports invalid from parameter" and .error_body_format == "json_object"' "$TEST_TMP/out" >/dev/null ;;
@@ -153,15 +168,20 @@ run_mode() {
     http-400-other) jq -e '.api_validation_message == null and .error_body_format == "json_object"' "$TEST_TMP/out" >/dev/null ;;
     http-400-non-json) jq -e '.api_validation_message == null and .error_body_format == "invalid_json"' "$TEST_TMP/out" >/dev/null ;;
   esac
-  [[ "$(wc -l <"$PM_TEST_LOG" | tr -d ' ')" == "$count" ]]
-  if [[ "$entity_id" != workspace-test ]]; then
-    rg -q '/ngwaf/v1/workspaces/workspace-test ' "$PM_TEST_LOG"
-    if rg -q '/ngwaf/v1/workspaces/metrics-entity-test ' "$PM_TEST_LOG"; then
-      printf 'platform-metrics-diagnostic: entity ID was used for workspace ownership lookup\n' >&2
-      return 1
+  if [[ "$expected" == success_with_data || "$expected" == success_empty || "$expected" == metric_omitted ]]; then
+    rg -q 'Workspace-to-Metrics entity mapping verified via public workspace_uid; P0 validation remains incomplete' "$TEST_TMP/err"
+    if rg -q 'mapping remains unverified' "$TEST_TMP/err"; then
+      printf 'platform-metrics-diagnostic: stale mapping message remained\n' >&2
+      exit 1
     fi
-    if (( count > 2 )); then rg -q "/metrics/v2/platform/entities/$entity_id/daily " "$PM_TEST_LOG"; fi
   fi
+  [[ "$(wc -l <"$PM_TEST_LOG" | tr -d ' ')" == "$count" ]]
+  rg -q '/ngwaf/v1/workspaces/workspace-test ' "$PM_TEST_LOG"
+  if rg -q '/ngwaf/v1/workspaces/metrics-entity-test ' "$PM_TEST_LOG"; then
+    printf 'platform-metrics-diagnostic: entity ID was used for workspace ownership lookup\n' >&2
+    return 1
+  fi
+  if (( count > 2 )); then rg -q '/metrics/v2/platform/entities/metrics-entity-test/daily ' "$PM_TEST_LOG"; fi
   [[ "$(wc -l <"$TEST_TMP/out" | tr -d ' ')" == 1 ]]
   ! rg -q 'test-token|private-value|Fastly-Key|Cookie:' "$TEST_TMP/out" "$TEST_TMP/err"
 }
@@ -171,6 +191,8 @@ for mode_status_count in \
   'omitted metric_omitted 3' 'multi success_with_data 4' \
   'owner-missing ownership_unverified 2' 'owner-mismatch ownership_unverified 2' \
   'id-mismatch ownership_unverified 2' 'detail-404 ownership_unverified 2' \
+  'uid-missing identity_unverified 2' 'uid-empty identity_unverified 2' \
+  'uid-malformed identity_unverified 2' 'uid-wrong-type identity_unverified 2' \
   'bad-json invalid_response 3' 'bad-meta invalid_response 3' 'bad-grouping invalid_response 3' \
   'bad-value invalid_response 3' 'bad-time invalid_response 3' \
   'bad-entity invalid_response 3' 'bad-cursor invalid_response 3' \
@@ -189,7 +211,8 @@ run_mode explicit-success success_with_data 3 metrics-entity-test
 run_mode explicit-empty success_empty 3 metrics-entity-test
 run_mode explicit-captured success_with_data 3 metrics-entity-test
 run_mode captured-empty success_empty 3
-run_mode owner-mismatch ownership_unverified 2 metrics-entity-test
+run_mode explicit-mismatch identity_conflict 2 other-entity-test
+run_mode owner-mismatch ownership_unverified 2
 if rg -q '/metrics/v2/platform/entities/' "$PM_TEST_LOG"; then
   printf 'platform-metrics-diagnostic: unverified owner reached Metrics API\n' >&2
   exit 1
@@ -243,5 +266,5 @@ done
 : >"$PM_TEST_LOG"
 env -u FASTLY_API_TOKEN "$ROOT/fastly-audit" ngwaf platform-metrics-diagnostic --help >"$TEST_TMP/out" 2>"$TEST_TMP/err"
 [[ ! -s "$PM_TEST_LOG" && ! -s "$TEST_TMP/err" ]]
-grep -F 'Without --entity-id, the workspace id is' "$TEST_TMP/out" >/dev/null
+grep -F 'The exact public workspace detail must contain a valid workspace_uid' "$TEST_TMP/out" >/dev/null
 printf 'platform-metrics-diagnostic: OK (offline fake API)\n'

@@ -13,12 +13,11 @@ Usage:
 The range must be one completed UTC day within daily retention. The selected
 customer is checked first. One exact workspace detail GET must return matching
 customer ownership metadata before the entity metrics GET is attempted.
-The public API documentation does not explicitly bind workspace id or
-workspace_uid to Metrics entity_id. Without --entity-id, the workspace id is
-the diagnostic candidate. --entity-id supplies an external Metrics candidate
-for this run only; even an HTTP 200 does not verify the cross-API join.
-The command exits nonzero until an authoritative cross-API identity binding is
-established; its JSON distinguishes response outcomes from P0 validation.
+The exact public workspace detail must contain a valid workspace_uid for the
+Metrics entity request. --entity-id must match that UID; a missing or
+conflicting UID stops before Metrics. Identity verification alone does not
+complete P0 metric semantics or completeness validation. The command exits
+nonzero while P0 remains unvalidated.
 One metrics GET is made, followed only by advertised cursor pages (at most 10).
 --save-raw-response writes only the first Metrics response body, before any
 parsing, to a new owner-only file. It may contain customer-sensitive data or
@@ -32,6 +31,7 @@ platform_metrics_diagnostic_parse_args() {
   PLATFORM_METRICS_DIAGNOSTIC_HELP=0
   PLATFORM_METRICS_DIAGNOSTIC_ID=''
   PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID=''
+  PLATFORM_METRICS_DIAGNOSTIC_VERIFIED_UID=''
   PLATFORM_METRICS_DIAGNOSTIC_RAW_FILE=''
   PLATFORM_METRICS_DIAGNOSTIC_START=''
   PLATFORM_METRICS_DIAGNOSTIC_END=''
@@ -146,14 +146,19 @@ platform_metrics_diagnostic_emit() {
 
 platform_metrics_diagnostic_payload() {
   local cid="$1" customer="$2" id="$3" ownership="$4" status="$5" http_status="$6" pages="$7" complete="$8" observations="$9" metadata="${10}" error="${11}" detail_http="${12}" error_format="${13:-}" validation_message="${14:-}"
-  local metrics_id="${PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID:-$id}"
-  local id_source=public_workspace_detail_id_candidate id_basis=public_workspace_detail_id_candidate
+  local metrics_id="${PLATFORM_METRICS_DIAGNOSTIC_VERIFIED_UID:-${PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID:-}}"
+  local id_source=unavailable id_basis=workspace_uid_unverified mapping=unverified_cross_api_identity
+  if [[ -n "$PLATFORM_METRICS_DIAGNOSTIC_VERIFIED_UID" ]]; then
+    id_source=public_workspace_detail_workspace_uid
+    id_basis=public_workspace_detail_workspace_uid
+    mapping=verified_public_workspace_detail_uid
+  fi
   if [[ -n "$PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID" ]]; then
     id_source=explicit_cli_argument
-    id_basis=externally_supplied_diagnostic_candidate
+    [[ -n "$PLATFORM_METRICS_DIAGNOSTIC_VERIFIED_UID" ]] || id_basis=externally_supplied_diagnostic_candidate
   fi
   jq -nc --arg cid "$cid" --arg customer "$customer" --arg id "$id" \
-    --arg metrics_id "$metrics_id" --arg id_source "$id_source" --arg id_basis "$id_basis" \
+    --arg metrics_id "$metrics_id" --arg id_source "$id_source" --arg id_basis "$id_basis" --arg mapping "$mapping" \
     --arg ownership "$ownership" --arg status "$status" --arg http "$http_status" \
     --argjson pages "$pages" --argjson complete "$complete" \
     --argjson observations "$observations" --argjson metadata "$metadata" \
@@ -163,10 +168,10 @@ platform_metrics_diagnostic_payload() {
     {schema_version:1, command:"ngwaf platform-metrics-diagnostic",
      customer:{id:$cid,name:$customer}, workspace:{id:$id,ownership:$ownership,
        detail_http_status:$detail_http},
-     public_workspace_id:$id,metrics_entity_id:$metrics_id,
-     entity_id:$metrics_id,entity_id_source:$id_source,entity_id_basis:$id_basis,
-     entity_compatibility:"unverified_cross_api_identity",
-     mapping_verification:"unverified_cross_api_identity",
+     public_workspace_id:$id,metrics_entity_id:(if $metrics_id == "" then null else $metrics_id end),
+     entity_id:(if $metrics_id == "" then null else $metrics_id end),
+     entity_id_source:$id_source,entity_id_basis:$id_basis,
+     entity_compatibility:$mapping,mapping_verification:$mapping,
      metric:"ngwaf_requests_total_count",unit:"requests",granularity:"daily",
      window:{from:$start,to:$end,to_exclusive:true},
      endpoint:"GET /metrics/v2/platform/entities/{entity_id}/daily",
@@ -263,14 +268,13 @@ platform_metrics_diagnostic_page_json() {
 }
 
 cmd_platform_metrics_diagnostic() {
-  local cid customer id entity_id detail_file detail_code detail_valid path file code page cursor next_cursor
+  local cid customer id entity_id workspace_uid detail_file detail_code detail_valid path file code page cursor next_cursor
   local page_json observations='[]' metadata='null' pages=0 status error='' payload
   local error_format='' validation_message=''
   local -a seen=()
   cid="$(current_cid)"
   customer="$(current_customer_name)"
   id="$PLATFORM_METRICS_DIAGNOSTIC_ID"
-  entity_id="${PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID:-$id}"
   detail_file="$(mktemp)"
   detail_code="$(CURL_RETRIES=0 http_get_to_file "$(workspace_path "$id")" "$detail_file" \
     --data-urlencode "customer_id=$cid")"
@@ -284,8 +288,8 @@ cmd_platform_metrics_diagnostic() {
       (.[0].customer.id? == null or .[0].customer.id == $cid)
     ' "$detail_file" >/dev/null 2>&1; then detail_valid=true; fi
   fi
-  rm -f "$detail_file"
   if [[ "$detail_valid" != true ]]; then
+    rm -f "$detail_file"
     printf '%s: platform-metrics-diagnostic: exact workspace ownership unverified (detail HTTP %s); Metrics request skipped\n' \
       "${PROGRAM_NAME:-fastly-audit}" "$detail_code" >&2
     payload="$(platform_metrics_diagnostic_payload "$cid" "$customer" "$id" unverified ownership_unverified '' 0 false '[]' null 'workspace_detail_unverified' "$detail_code")"
@@ -293,9 +297,24 @@ cmd_platform_metrics_diagnostic() {
     return 1
   fi
 
-  # NG-13: legacy SigSci-created workspaces may expose name-like public IDs
-  # instead of Metrics entity IDs. An explicit entity is still unverified:
+  workspace_uid="$(jq -er -s '.[0].workspace_uid |
+    select(type == "string" and test("^[A-Za-z0-9._-]{1,120}$"))' "$detail_file" 2>/dev/null)" || workspace_uid=''
+  rm -f "$detail_file"
+  if [[ -z "$workspace_uid" ]]; then
+    payload="$(platform_metrics_diagnostic_payload "$cid" "$customer" "$id" verified identity_unverified '' 0 false '[]' null 'workspace_uid_missing_or_invalid' "$detail_code")"
+    platform_metrics_diagnostic_emit "$payload"
+    return 1
+  fi
+  if [[ -n "$PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID" && "$PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID" != "$workspace_uid" ]]; then
+    payload="$(platform_metrics_diagnostic_payload "$cid" "$customer" "$id" verified identity_conflict '' 0 false '[]' null 'explicit_entity_id_conflicts_with_workspace_uid' "$detail_code")"
+    platform_metrics_diagnostic_emit "$payload"
+    return 1
+  fi
+  # NG-13: CONSOLE-3510 supplies the Metrics entity ID as workspace_uid in
+  # verified public detail; the public id still selects the workspace.
   # https://fastly.slack.com/archives/C037JNWHR0R/p1793290562060269
+  PLATFORM_METRICS_DIAGNOSTIC_VERIFIED_UID="$workspace_uid"
+  entity_id="$workspace_uid"
   path="/metrics/v2/platform/entities/$(urlencode "$entity_id")/daily"
   cursor=''
   while :; do
@@ -365,10 +384,10 @@ cmd_platform_metrics_diagnostic() {
     payload="$(platform_metrics_diagnostic_payload "$cid" "$customer" "$id" verified "$status" "$code" "$pages" false '[]' null "$error" "$detail_code" "$error_format" "$validation_message")"
   fi
   platform_metrics_diagnostic_emit "$payload"
-  # A 200 response tests this candidate path; it does not prove the cross-API
-  # entity-ID mapping because the published response has no ownership binding.
+  # Verified public workspace_uid establishes the entity mapping for this
+  # workspace; Metrics semantics and completeness still require P0 validation.
   if [[ "$status" == success_with_data || "$status" == success_empty || "$status" == metric_omitted ]]; then
-    printf '%s: platform-metrics-diagnostic: Metrics entity ID mapping remains unverified; P0 validation is incomplete\n' \
+    printf '%s: platform-metrics-diagnostic: Workspace-to-Metrics entity mapping verified via public workspace_uid; P0 validation remains incomplete\n' \
       "${PROGRAM_NAME:-fastly-audit}" >&2
   fi
   return 1
