@@ -135,7 +135,7 @@ P0 implementation evidence (28 October 2026): `fa ngwaf
 platform-metrics-diagnostic <exact-workspace-id> --start UTC --end UTC [--json]`
 uses the public Fastly token, one selected-customer preflight GET, one exact
 `/ngwaf/v1/workspaces/{id}?customer_id=...` ownership check, then one
-`/metrics/v2/platform/entities/{id}/day` GET with `from`, `to`,
+historical `/metrics/v2/platform/entities/{id}/day` GET with `from`, `to`,
 `metric=ngwaf_requests_total_count`, and `limit=100`. Only a returned
 `meta.next_cursor` triggers another Metrics GET, up to ten pages. It rejects
 unowned or ownerless workspace details, malformed response data, repeated
@@ -152,12 +152,34 @@ customer and exact workspace ownership, then received Metrics HTTP 400 with
 no observations. The 29 October 2026 result was classified locally as
 `unsupported_parameter` with the fixed message `API reports invalid parameter`,
 but it did not identify the rejected parameter or establish the underlying
-cause. The diagnostic reports only fixed, allowlisted validation labels and
-the error body format; raw API error text, headers, and credentials remain
-excluded. [NG-13](known-limitations.md#ng-13--scoped-platform-metrics-v2-request-returns-http-400)
-records the observed request, unresolved Engineering questions, and P0
-resolution criteria. P1a remains blocked until those criteria are met. The
-allowlist also recognizes the `errors[].property` and `errors[].reason` form
+cause at the time. Engineering later confirmed that `day` is not an accepted
+path granularity; the local diagnostic now uses `daily` and accepts optional
+diagnostic-only `--entity-id ENTITY_ID`. The public workspace still requires
+exact selected-customer ownership, and an external entity candidate is never
+treated as a verified join. A subsequent authenticated `/daily` request with
+an independently supplied Metrics entity ID returned HTTP 200 and one daily
+observation. The then-current parser rejected its `meta.group_by="timestamp"`
+and `meta.next_cursor=""`; this local compatibility defect is corrected.
+The 30 October 2026 diagnostic then reported `success_with_data` for one
+observed daily value of 112963821, with one page and complete pagination.
+Legacy timeseries reported 113019418 for the same workspace and window, a
+difference of 55,597 (approximately 0.049%); the difference remains
+unexplained and metric equivalence is unproven. In the supplied
+[Engineering discussion](https://fastly.slack.com/archives/C037JNWHR0R/p1793290562060269),
+Lukas Eklund said the public Workspaces API `id` should expose the Metrics
+entity ID, while affected legacy SigSci-created workspaces expose a name-like
+value. Cheryl Sunley identified this as a missing integration feature owned
+for investigation by the Security APIs team; no remediation ETA was available
+as of 30 October. The observed Metrics response does not verify the
+workspace-to-entity join or selected-customer ownership of that join. P0
+remains blocked and P1a is not implemented. The diagnostic output reports only
+fixed, allowlisted validation labels and the error body format; raw API error
+text, headers, and credentials remain excluded from that output. The optional
+raw-response file is separate and may contain customer-sensitive data.
+[NG-13](known-limitations.md#ng-13--legacy-sigsci-workspace-metrics-entity-id-gap)
+records the observed request, remaining identity questions, and P0 resolution
+criteria. The allowlist also recognizes the `errors[].property` and
+`errors[].reason` form
 shown in Fastly's [Origin Inspector metrics error example](https://www.fastly.com/documentation/reference/api/metrics-stats/origin-inspector/historical/);
 that related API example does not establish the Platform Metrics v2 error
 schema or explain the reported 400.
@@ -165,7 +187,7 @@ schema or explain the reported 400.
 ### P0 — API compatibility and evidence investigation (open)
 
 - **Dependencies:** Published v2 and NGWAF contracts; synthetic fixtures;
-  clarification of [NG-13](known-limitations.md#ng-13--scoped-platform-metrics-v2-request-returns-http-400)
+  resolution of [NG-13](known-limitations.md#ng-13--legacy-sigsci-workspace-metrics-entity-id-gap)
   before claiming live support.
 - **Acceptance:** A field-by-field scope/units/equivalence record; verified
   entity ID and selected-customer ownership mechanism; row/meta nesting,
@@ -284,7 +306,7 @@ schema or explain the reported 400.
 existing `fa ngwaf <command>` and `--json` conventions, introduce
 `fa ngwaf platform-metrics <exact-workspace-id> --from UTC --to UTC [--json]`.
 The first version should request **only** `ngwaf_requests_total_count` at
-`day` granularity for one completed, UTC-midnight-aligned range, using the
+`daily` granularity for one completed, UTC-midnight-aligned range, using the
 documented `metric` parameter. Defer `metric_set=ngwaf` and `--group-by
 region|datacenter` until field eligibility and geographic completeness are
 verified; do not advertise those options before implementation.

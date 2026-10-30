@@ -42,17 +42,29 @@ case "$url" in
       detail-404) status=404; printf '%s\n' '{"detail":"Site not found"}' >"$outfile" ;;
       *) printf '%s\n' '{"id":"workspace-test","customer_id":"customer-test","name":"Synthetic Workspace"}' >"$outfile" ;;
     esac ;;
-  */metrics/v2/platform/entities/workspace-test/day)
+  */metrics/v2/platform/entities/*/daily)
+    entity_id="${url##*/entities/}"
+    entity_id="${entity_id%/daily}"
+    expected_entity=workspace-test
+    [[ "$PM_TEST_MODE" != explicit-* ]] || expected_entity=metrics-entity-test
+    [[ "$entity_id" == "$expected_entity" ]] || {
+      status=400; printf '%s\n' '{"detail":"Invalid entity ID"}' >"$outfile";
+      printf '%s' "$status"; exit 0;
+    }
     [[ "$query_start" == "$PM_TEST_START" && "$query_end" == "$PM_TEST_END" &&
        "$metric" == ngwaf_requests_total_count && "$limit" == 100 ]] || {
       status=400; printf '%s\n' '{"detail":"Invalid parameter"}' >"$outfile";
       printf '%s' "$status"; exit 0;
     }
     case "$PM_TEST_MODE" in
-      success|zero)
+      success|zero|explicit-success)
         value=7; [[ "$PM_TEST_MODE" != zero ]] || value=0
         printf '{"meta":{"from":"%s","to":"%s","limit":100,"next_cursor":null},"data":[{"timestamp":"%s","ngwaf_requests_total_count":%s}]}\n' "$PM_TEST_START" "$PM_TEST_END" "$PM_TEST_START" "$value" >"$outfile" ;;
-      empty) printf '{"meta":{"from":"%s","to":"%s","limit":100,"next_cursor":null},"data":[]}\n' "$PM_TEST_START" "$PM_TEST_END" >"$outfile" ;;
+      empty|explicit-empty) printf '{"meta":{"from":"%s","to":"%s","limit":100,"next_cursor":null},"data":[]}\n' "$PM_TEST_START" "$PM_TEST_END" >"$outfile" ;;
+      explicit-captured)
+        printf '{"data":[{"ngwaf_requests_total_count":11,"timestamp":"%s"}],"meta":{"next_cursor":"","limit":100,"group_by":"timestamp","from":"%s","to":"%s"}}\n' "$PM_TEST_START" "$PM_TEST_START" "$PM_TEST_END" >"$outfile" ;;
+      captured-empty)
+        printf '{"data":[],"meta":{"next_cursor":"","limit":100,"group_by":"timestamp","from":"%s","to":"%s"}}\n' "$PM_TEST_START" "$PM_TEST_END" >"$outfile" ;;
       omitted) printf '{"meta":{"from":"%s","to":"%s","limit":100,"next_cursor":null},"data":[{"timestamp":"%s"}]}\n' "$PM_TEST_START" "$PM_TEST_END" "$PM_TEST_START" >"$outfile" ;;
       multi|partial|repeat)
         if [[ -z "$cursor" ]]; then
@@ -69,7 +81,9 @@ case "$url" in
         [[ -z "$cursor" ]] || sequence=$(( ${cursor#cursor-} + 1 ))
         printf '{"meta":{"from":"%s","to":"%s","limit":100,"next_cursor":"cursor-%s"},"data":[]}\n' "$PM_TEST_START" "$PM_TEST_END" "$sequence" >"$outfile" ;;
       bad-json) printf 'not json\n' >"$outfile" ;;
+      explicit-raw-invalid) printf 'raw-response-marker\r\n{"not":"metrics-schema"}\n' >"$outfile" ;;
       bad-meta) printf '%s\n' '{"meta":{},"data":[]}' >"$outfile" ;;
+      bad-grouping) printf '{"meta":{"from":"%s","to":"%s","limit":100,"group_by":"region","next_cursor":""},"data":[]}\n' "$PM_TEST_START" "$PM_TEST_END" >"$outfile" ;;
       bad-value) printf '{"meta":{"from":"%s","to":"%s","limit":100},"data":[{"timestamp":"%s","ngwaf_requests_total_count":"7"}]}\n' "$PM_TEST_START" "$PM_TEST_END" "$PM_TEST_START" >"$outfile" ;;
       bad-time) printf '{"meta":{"from":"%s","to":"%s","limit":100},"data":[{"timestamp":"%s","ngwaf_requests_total_count":7}]}\n' "$PM_TEST_START" "$PM_TEST_END" "$PM_TEST_END" >"$outfile" ;;
       bad-entity) printf '{"entity_id":"other-workspace","meta":{"from":"%s","to":"%s","limit":100},"data":[]}\n' "$PM_TEST_START" "$PM_TEST_END" >"$outfile" ;;
@@ -104,21 +118,32 @@ PM_TEST_END="$(date -u -v-2d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d '2 da
 export PM_TEST_START PM_TEST_END
 
 run_mode() {
-  local mode="$1" expected="$2" count="$3"
+  local mode="$1" expected="$2" count="$3" entity_id="${4:-workspace-test}"
+  local -a entity_arg=()
+  [[ "$entity_id" == workspace-test ]] || entity_arg=(--entity-id "$entity_id")
   export PM_TEST_MODE="$mode"
   : >"$PM_TEST_LOG"
   if "$ROOT/fastly-audit" ngwaf platform-metrics-diagnostic workspace-test \
-    --start "$PM_TEST_START" --end "$PM_TEST_END" --json >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then
+    --start "$PM_TEST_START" --end "$PM_TEST_END" "${entity_arg[@]}" --json >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then
     printf 'platform-metrics-diagnostic: %s unexpectedly claimed P0 validation\n' "$mode" >&2
     exit 1
   fi
-  jq -e --arg status "$expected" '.status == $status and .p0_validated == false and
-    .entity_id == "workspace-test" and .metric == "ngwaf_requests_total_count" and
+  jq -e --arg status "$expected" --arg entity "$entity_id" '.status == $status and .p0_validated == false and
+    .workspace.id == "workspace-test" and .public_workspace_id == "workspace-test" and
+    .entity_id == $entity and .metrics_entity_id == $entity and
+    .entity_compatibility == "unverified_cross_api_identity" and
+    .mapping_verification == "unverified_cross_api_identity" and
+    .entity_id_source == (if $entity == "workspace-test" then "public_workspace_detail_id_candidate" else "explicit_cli_argument" end) and
+    .granularity == "daily" and .endpoint == "GET /metrics/v2/platform/entities/{entity_id}/daily" and
+    .metric == "ngwaf_requests_total_count" and
     (.workspace.detail_http_status | test("^[0-9]{3}$"))' "$TEST_TMP/out" >/dev/null
   case "$mode" in
     zero) jq -e '.observations == [{"timestamp":.window.from,"present":true,"value":0}]' "$TEST_TMP/out" >/dev/null ;;
     omitted) jq -e '.observations[0].present == false and .observations[0].value == null' "$TEST_TMP/out" >/dev/null ;;
-    empty) jq -e '.bucket_coverage == "no_observation_not_zero" and .observations == []' "$TEST_TMP/out" >/dev/null ;;
+    empty|captured-empty) jq -e '.bucket_coverage == "no_observation_not_zero" and .observations == []' "$TEST_TMP/out" >/dev/null ;;
+    explicit-captured) jq -e '.observations == [{"timestamp":.window.from,"present":true,"value":11}] and
+      .pages_fetched == 1 and .pagination_complete == true and .response_meta.next_cursor == "" and
+      .mapping_verification == "unverified_cross_api_identity" and .p0_validated == false' "$TEST_TMP/out" >/dev/null ;;
     multi) jq -e '.pages_fetched == 2 and .pagination_complete == true' "$TEST_TMP/out" >/dev/null ;;
     partial|repeat) jq -e '.pagination_complete == false' "$TEST_TMP/out" >/dev/null ;;
     http-400-nested) jq -e '.api_validation_message == "API reports invalid from parameter" and .error_body_format == "json_object"' "$TEST_TMP/out" >/dev/null ;;
@@ -129,6 +154,14 @@ run_mode() {
     http-400-non-json) jq -e '.api_validation_message == null and .error_body_format == "invalid_json"' "$TEST_TMP/out" >/dev/null ;;
   esac
   [[ "$(wc -l <"$PM_TEST_LOG" | tr -d ' ')" == "$count" ]]
+  if [[ "$entity_id" != workspace-test ]]; then
+    rg -q '/ngwaf/v1/workspaces/workspace-test ' "$PM_TEST_LOG"
+    if rg -q '/ngwaf/v1/workspaces/metrics-entity-test ' "$PM_TEST_LOG"; then
+      printf 'platform-metrics-diagnostic: entity ID was used for workspace ownership lookup\n' >&2
+      return 1
+    fi
+    if (( count > 2 )); then rg -q "/metrics/v2/platform/entities/$entity_id/daily " "$PM_TEST_LOG"; fi
+  fi
   [[ "$(wc -l <"$TEST_TMP/out" | tr -d ' ')" == 1 ]]
   ! rg -q 'test-token|private-value|Fastly-Key|Cookie:' "$TEST_TMP/out" "$TEST_TMP/err"
 }
@@ -138,7 +171,7 @@ for mode_status_count in \
   'omitted metric_omitted 3' 'multi success_with_data 4' \
   'owner-missing ownership_unverified 2' 'owner-mismatch ownership_unverified 2' \
   'id-mismatch ownership_unverified 2' 'detail-404 ownership_unverified 2' \
-  'bad-json invalid_response 3' 'bad-meta invalid_response 3' \
+  'bad-json invalid_response 3' 'bad-meta invalid_response 3' 'bad-grouping invalid_response 3' \
   'bad-value invalid_response 3' 'bad-time invalid_response 3' \
   'bad-entity invalid_response 3' 'bad-cursor invalid_response 3' \
   'duplicate invalid_response 3' 'repeat incomplete 4' 'partial incomplete 4' 'endless incomplete 12' \
@@ -152,7 +185,49 @@ for mode_status_count in \
   run_mode "$mode" "$status" "$count"
 done
 
+run_mode explicit-success success_with_data 3 metrics-entity-test
+run_mode explicit-empty success_empty 3 metrics-entity-test
+run_mode explicit-captured success_with_data 3 metrics-entity-test
+run_mode captured-empty success_empty 3
+run_mode owner-mismatch ownership_unverified 2 metrics-entity-test
+if rg -q '/metrics/v2/platform/entities/' "$PM_TEST_LOG"; then
+  printf 'platform-metrics-diagnostic: unverified owner reached Metrics API\n' >&2
+  exit 1
+fi
+
+raw_file="$TEST_TMP/raw-response"
+export PM_TEST_MODE=explicit-raw-invalid
+: >"$PM_TEST_LOG"
+if "$ROOT/fastly-audit" ngwaf platform-metrics-diagnostic workspace-test \
+  --start "$PM_TEST_START" --end "$PM_TEST_END" --entity-id metrics-entity-test \
+  --save-raw-response "$raw_file" --json >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then
+  printf 'platform-metrics-diagnostic: malformed raw response claimed P0 validation\n' >&2
+  exit 1
+fi
+printf 'raw-response-marker\r\n{"not":"metrics-schema"}\n' >"$TEST_TMP/expected-raw"
+cmp "$TEST_TMP/expected-raw" "$raw_file" >/dev/null
+[[ "$(test_file_mode "$raw_file")" == 600 ]]
+jq -e '.status == "invalid_response" and .p0_validated == false and .pages_fetched == 0' "$TEST_TMP/out" >/dev/null
+[[ "$(wc -l <"$PM_TEST_LOG" | tr -d ' ')" == 3 ]]
+if rg -q 'raw-response-marker' "$TEST_TMP/out" "$TEST_TMP/err"; then
+  printf 'platform-metrics-diagnostic: raw response leaked to output\n' >&2
+  exit 1
+fi
+
+: >"$PM_TEST_LOG"
+if "$ROOT/fastly-audit" ngwaf platform-metrics-diagnostic workspace-test \
+  --start "$PM_TEST_START" --end "$PM_TEST_END" --entity-id metrics-entity-test \
+  --save-raw-response "$raw_file" --json >"$TEST_TMP/out" 2>"$TEST_TMP/err"; then
+  printf 'platform-metrics-diagnostic: existing raw file was accepted\n' >&2
+  exit 1
+fi
+[[ ! -s "$PM_TEST_LOG" && ! -s "$TEST_TMP/out" ]]
+rg -q 'refusing to overwrite existing raw response file' "$TEST_TMP/err"
+cmp "$TEST_TMP/expected-raw" "$raw_file" >/dev/null
+
 for invalid in '--bad' 'workspace-test --start nope --end nope' \
+  "workspace-test --start $PM_TEST_START --end $PM_TEST_END --entity-id invalid/segment" \
+  "workspace-test --start $PM_TEST_START --end $PM_TEST_END --entity-id metrics-entity-test --entity-id metrics-entity-test" \
   "workspace-test --start $PM_TEST_START --end $PM_TEST_START" \
   "workspace-test --start $PM_TEST_END --end $PM_TEST_START" \
   "workspace-test --start $(date -u -v-400d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d '400 days ago' +%Y-%m-%dT00:00:00Z) --end $(date -u -v-399d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d '399 days ago' +%Y-%m-%dT00:00:00Z)" \
@@ -168,5 +243,5 @@ done
 : >"$PM_TEST_LOG"
 env -u FASTLY_API_TOKEN "$ROOT/fastly-audit" ngwaf platform-metrics-diagnostic --help >"$TEST_TMP/out" 2>"$TEST_TMP/err"
 [[ ! -s "$PM_TEST_LOG" && ! -s "$TEST_TMP/err" ]]
-grep -F 'workspace id is a diagnostic candidate' "$TEST_TMP/out" >/dev/null
+grep -F 'Without --entity-id, the workspace id is' "$TEST_TMP/out" >/dev/null
 printf 'platform-metrics-diagnostic: OK (offline fake API)\n'

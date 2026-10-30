@@ -8,17 +8,21 @@ platform_metrics_diagnostic_usage() {
 Probe one exact NGWAF workspace ID against Platform Metrics v2 (read-only P0).
 
 Usage:
-  fastly-audit ngwaf platform-metrics-diagnostic <workspace-id> --start YYYY-MM-DDT00:00:00Z --end YYYY-MM-DDT00:00:00Z [--json]
+  fastly-audit ngwaf platform-metrics-diagnostic <workspace-id> --start YYYY-MM-DDT00:00:00Z --end YYYY-MM-DDT00:00:00Z [--entity-id ENTITY_ID] [--save-raw-response FILE] [--json]
 
 The range must be one completed UTC day within daily retention. The selected
 customer is checked first. One exact workspace detail GET must return matching
 customer ownership metadata before the entity metrics GET is attempted.
 The public API documentation does not explicitly bind workspace id or
-workspace_uid to Metrics entity_id. The workspace id is a diagnostic candidate;
-even an HTTP 200 is reported as candidate compatibility, not a verified join.
+workspace_uid to Metrics entity_id. Without --entity-id, the workspace id is
+the diagnostic candidate. --entity-id supplies an external Metrics candidate
+for this run only; even an HTTP 200 does not verify the cross-API join.
 The command exits nonzero until an authoritative cross-API identity binding is
 established; its JSON distinguishes response outcomes from P0 validation.
 One metrics GET is made, followed only by advertised cursor pages (at most 10).
+--save-raw-response writes only the first Metrics response body, before any
+parsing, to a new owner-only file. It may contain customer-sensitive data or
+values reflected by the API. Existing files are never overwritten.
 No aggregate endpoint, service inventory, legacy API, or Salt API is called.
 Help and invalid arguments make no API requests. Errors are sanitized.
 HELP
@@ -27,6 +31,8 @@ HELP
 platform_metrics_diagnostic_parse_args() {
   PLATFORM_METRICS_DIAGNOSTIC_HELP=0
   PLATFORM_METRICS_DIAGNOSTIC_ID=''
+  PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID=''
+  PLATFORM_METRICS_DIAGNOSTIC_RAW_FILE=''
   PLATFORM_METRICS_DIAGNOSTIC_START=''
   PLATFORM_METRICS_DIAGNOSTIC_END=''
   PLATFORM_METRICS_DIAGNOSTIC_JSON=0
@@ -54,6 +60,18 @@ platform_metrics_diagnostic_parse_args() {
         (( PLATFORM_METRICS_DIAGNOSTIC_JSON == 0 )) || die 'duplicate --json'
         PLATFORM_METRICS_DIAGNOSTIC_JSON=1
         shift ;;
+      --entity-id)
+        (( $# >= 2 )) || die '--entity-id requires an exact Metrics entity ID'
+        [[ -z "$PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID" ]] || die 'duplicate --entity-id'
+        [[ "$2" =~ ^[A-Za-z0-9._-]{1,120}$ ]] || die '--entity-id requires an exact Metrics entity ID'
+        PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID="$2"
+        shift 2 ;;
+      --save-raw-response)
+        (( $# >= 2 )) || die '--save-raw-response requires a file path'
+        [[ -z "$PLATFORM_METRICS_DIAGNOSTIC_RAW_FILE" ]] || die 'duplicate --save-raw-response'
+        [[ -n "$2" && "$2" != -* ]] || die '--save-raw-response requires a file path'
+        PLATFORM_METRICS_DIAGNOSTIC_RAW_FILE="$2"
+        shift 2 ;;
       *) die "unsupported platform-metrics-diagnostic argument: $1" ;;
     esac
   done
@@ -74,6 +92,37 @@ platform_metrics_diagnostic_parse_args() {
   now="$(date -u +%s)"
   (( end_epoch + 7200 <= now )) || die 'UTC day is unfinished or not yet settled'
   (( start_epoch >= now - 365 * 86400 )) || die 'UTC day exceeds Platform Metrics daily retention'
+  if [[ -n "$PLATFORM_METRICS_DIAGNOSTIC_RAW_FILE" ]]; then
+    [[ -d "$(dirname "$PLATFORM_METRICS_DIAGNOSTIC_RAW_FILE")" ]] || die 'raw response output directory does not exist'
+    [[ ! -e "$PLATFORM_METRICS_DIAGNOSTIC_RAW_FILE" && ! -L "$PLATFORM_METRICS_DIAGNOSTIC_RAW_FILE" ]] ||
+      die 'refusing to overwrite existing raw response file'
+  fi
+}
+
+platform_metrics_diagnostic_save_raw_response() {
+  local source_file="$1" output="$2" parent temp_file old_umask
+  parent="$(dirname "$output")"
+  [[ -d "$parent" ]] || { printf '%s: raw response output directory does not exist\n' "${PROGRAM_NAME:-fastly-audit}" >&2; return 1; }
+  [[ ! -e "$output" && ! -L "$output" ]] || { printf '%s: refusing to overwrite existing raw response file\n' "${PROGRAM_NAME:-fastly-audit}" >&2; return 1; }
+  old_umask="$(umask)"
+  umask 077
+  if ! temp_file="$(mktemp "$parent/.fastly-audit-metrics-raw.XXXXXX")"; then
+    umask "$old_umask"
+    printf '%s: could not create raw response file\n' "${PROGRAM_NAME:-fastly-audit}" >&2
+    return 1
+  fi
+  umask "$old_umask"
+  if ! cat "$source_file" >"$temp_file" || ! chmod 600 "$temp_file"; then
+    rm -f "$temp_file"
+    printf '%s: could not write raw response file\n' "${PROGRAM_NAME:-fastly-audit}" >&2
+    return 1
+  fi
+  if ! ln "$temp_file" "$output"; then
+    rm -f "$temp_file"
+    printf '%s: refusing to overwrite or unable to create raw response file\n' "${PROGRAM_NAME:-fastly-audit}" >&2
+    return 1
+  fi
+  rm -f "$temp_file"
 }
 
 platform_metrics_diagnostic_emit() {
@@ -84,7 +133,7 @@ platform_metrics_diagnostic_emit() {
     jq -r '
       "Customer: \(.customer.name) (\(.customer.id))",
       "Workspace: \(.workspace.id) [\(.workspace.ownership)]",
-      "Entity candidate: \(.entity_id)",
+      "Metrics entity candidate: \(.entity_id) [\(.entity_id_source)]",
       "Metric: \(.metric) (\(.unit)); \(.window.from) to \(.window.to)",
       "HTTP: \(.http_status // "not requested"); status: \(.status)",
       "Pages: \(.pages_fetched); pagination: \(.pagination_complete)",
@@ -97,7 +146,14 @@ platform_metrics_diagnostic_emit() {
 
 platform_metrics_diagnostic_payload() {
   local cid="$1" customer="$2" id="$3" ownership="$4" status="$5" http_status="$6" pages="$7" complete="$8" observations="$9" metadata="${10}" error="${11}" detail_http="${12}" error_format="${13:-}" validation_message="${14:-}"
+  local metrics_id="${PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID:-$id}"
+  local id_source=public_workspace_detail_id_candidate id_basis=public_workspace_detail_id_candidate
+  if [[ -n "$PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID" ]]; then
+    id_source=explicit_cli_argument
+    id_basis=externally_supplied_diagnostic_candidate
+  fi
   jq -nc --arg cid "$cid" --arg customer "$customer" --arg id "$id" \
+    --arg metrics_id "$metrics_id" --arg id_source "$id_source" --arg id_basis "$id_basis" \
     --arg ownership "$ownership" --arg status "$status" --arg http "$http_status" \
     --argjson pages "$pages" --argjson complete "$complete" \
     --argjson observations "$observations" --argjson metadata "$metadata" \
@@ -107,11 +163,13 @@ platform_metrics_diagnostic_payload() {
     {schema_version:1, command:"ngwaf platform-metrics-diagnostic",
      customer:{id:$cid,name:$customer}, workspace:{id:$id,ownership:$ownership,
        detail_http_status:$detail_http},
-     entity_id:$id, entity_id_basis:"public_workspace_detail_id_candidate",
+     public_workspace_id:$id,metrics_entity_id:$metrics_id,
+     entity_id:$metrics_id,entity_id_source:$id_source,entity_id_basis:$id_basis,
      entity_compatibility:"unverified_cross_api_identity",
-     metric:"ngwaf_requests_total_count",unit:"requests",granularity:"day",
+     mapping_verification:"unverified_cross_api_identity",
+     metric:"ngwaf_requests_total_count",unit:"requests",granularity:"daily",
      window:{from:$start,to:$end,to_exclusive:true},
-     endpoint:"GET /metrics/v2/platform/entities/{entity_id}/day",
+     endpoint:"GET /metrics/v2/platform/entities/{entity_id}/daily",
      http_status:(if $http == "" then null else $http end),content_type:null,
      status:$status,error_category:(if $error == "" then null else $error end),
      error_body_format:(if $error_format == "" then null else $error_format end),
@@ -180,12 +238,13 @@ platform_metrics_diagnostic_page_json() {
     | if .meta.from != $start or .meta.to != $end or
          (.meta.limit | type) != "number" or .meta.limit < 1 or .meta.limit > 10000 or
          .meta.limit != (.meta.limit | floor) or (.data | length) > .meta.limit or
-         ((.meta.group_by // "") != "") or
+         ((.meta.group_by // "") != "" and .meta.group_by != "timestamp") or
          (has("entity_id") and .entity_id != $id) or
          ((.meta | has("next_cursor")) and ((.meta.next_cursor | type) != "null" and
-           ((.meta.next_cursor | type) != "string" or (.meta.next_cursor | length) == 0 or
+           ((.meta.next_cursor | type) != "string" or
              (.meta.next_cursor | length) > 512 or
-             ((.meta.next_cursor | test("^[[:print:]]+$")) | not))))
+             ((.meta.next_cursor | length) > 0 and
+               ((.meta.next_cursor | test("^[[:print:]]+$")) | not)))))
       then error("metadata") else . end
     | if all(.data[];
         type == "object" and .timestamp == $start and
@@ -204,13 +263,14 @@ platform_metrics_diagnostic_page_json() {
 }
 
 cmd_platform_metrics_diagnostic() {
-  local cid customer id detail_file detail_code detail_valid path file code page cursor next_cursor
+  local cid customer id entity_id detail_file detail_code detail_valid path file code page cursor next_cursor
   local page_json observations='[]' metadata='null' pages=0 status error='' payload
   local error_format='' validation_message=''
   local -a seen=()
   cid="$(current_cid)"
   customer="$(current_customer_name)"
   id="$PLATFORM_METRICS_DIAGNOSTIC_ID"
+  entity_id="${PLATFORM_METRICS_DIAGNOSTIC_ENTITY_ID:-$id}"
   detail_file="$(mktemp)"
   detail_code="$(CURL_RETRIES=0 http_get_to_file "$(workspace_path "$id")" "$detail_file" \
     --data-urlencode "customer_id=$cid")"
@@ -233,10 +293,10 @@ cmd_platform_metrics_diagnostic() {
     return 1
   fi
 
-  # P0 blocker: scoped Metrics requests returned HTTP 400 (invalid parameter;
-  # cause unknown). Workspace id -> entity_id is unverified; see NG-13 in
-  # docs/known-limitations.md and docs/roadmap-platform-metrics.md.
-  path="/metrics/v2/platform/entities/$(urlencode "$id")/day"
+  # NG-13: legacy SigSci-created workspaces may expose name-like public IDs
+  # instead of Metrics entity IDs. An explicit entity is still unverified:
+  # https://fastly.slack.com/archives/C037JNWHR0R/p1793290562060269
+  path="/metrics/v2/platform/entities/$(urlencode "$entity_id")/daily"
   cursor=''
   while :; do
     file="$(mktemp)"
@@ -246,6 +306,9 @@ cmd_platform_metrics_diagnostic() {
                     --data-urlencode 'limit=100')
     [[ -z "$cursor" ]] || query+=(--data-urlencode "cursor=$cursor")
     code="$(CURL_RETRIES=0 http_get_to_file "$path" "$file" "${query[@]}")"
+    if [[ -n "$PLATFORM_METRICS_DIAGNOSTIC_RAW_FILE" && -z "$cursor" ]]; then
+      platform_metrics_diagnostic_save_raw_response "$file" "$PLATFORM_METRICS_DIAGNOSTIC_RAW_FILE" || :
+    fi
     if [[ "$code" != 2* ]]; then
       case "$code" in
         401|403) status=authorization_failure; error=authentication_or_permission ;;
@@ -270,7 +333,7 @@ cmd_platform_metrics_diagnostic() {
       rm -f "$file"
       break
     fi
-    page_json="$(platform_metrics_diagnostic_page_json "$file" "$PLATFORM_METRICS_DIAGNOSTIC_START" "$PLATFORM_METRICS_DIAGNOSTIC_END" "$id")" || page_json=''
+    page_json="$(platform_metrics_diagnostic_page_json "$file" "$PLATFORM_METRICS_DIAGNOSTIC_START" "$PLATFORM_METRICS_DIAGNOSTIC_END" "$entity_id")" || page_json=''
     rm -f "$file"
     if [[ -z "$page_json" ]]; then status=invalid_response; error=malformed_metrics_response; break; fi
     observations="$(jq -nc --argjson old "$observations" --argjson new "$(jq -c '.observations' <<<"$page_json")" '$old + $new')"

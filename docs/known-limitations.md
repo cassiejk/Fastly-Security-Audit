@@ -305,15 +305,20 @@ unavailable source is not evidence that a deployment is absent.
   reviewed 28 October 2026; as of that date, fake API tests only and no
   authenticated v2 request. See NG-13 for the 29 October authenticated result.
 
-### NG-13 — Scoped Platform Metrics v2 request returns HTTP 400
+### NG-13 — Legacy SigSci workspace Metrics entity ID gap
 
-- **Status:** Unresolved — awaiting clarification from Platform Metrics
-  Engineering via `#observability-questions`. No defect or ticket acceptance
-  has been confirmed.
+- **Status (30 October 2026):** The `/day` granularity error and local response
+  parser incompatibility are resolved. A narrow `/daily` diagnostic retrieved
+  Metrics data using an entity ID supplied independently by Engineering.
+  Engineering identified a separate upstream feature gap: legacy Signal
+  Sciences-created workspaces do not consistently expose their Metrics entity
+  IDs through the public Workspaces API. The Security APIs team owns
+  investigation of remediation; no ETA was available as of 30 October.
+  Cross-API identity remains unverified, P0 remains open, and P1a is blocked.
 - **Observed:** 29 October 2026 for Costco (`tHYft17nv2e3hrPd0bfuZ`), public
   NGWAF workspace `gdx-costco-prd-ecomapi`. Customer preflight succeeded; exact
   workspace ownership was verified by an HTTP 200 detail response.
-- **Request:** `GET /metrics/v2/platform/entities/{entity_id}/day` with
+- **Historical request:** `GET /metrics/v2/platform/entities/{entity_id}/day` with
   `entity_id=gdx-costco-prd-ecomapi`, `from=2026-10-26T00:00:00Z`,
   `to=2026-10-27T00:00:00Z`, `metric=ngwaf_requests_total_count`, and
   `limit=100`.
@@ -323,27 +328,94 @@ unavailable source is not evidence that a deployment is absent.
   identify the rejected parameter or value. No Metrics observations were
   returned, and `p0_validated=false`. The status is a local classification,
   not proof that a parameter name or the metric is unsupported, or that the
-  workspace identifier is invalid. No observations do not mean zero requests.
+  workspace identifier is invalid. Engineering subsequently identified `day`
+  as an invalid path granularity and the rejected `granularity` parameter from
+  the API's structured error response. This request returned no observations;
+  absence of observations does not mean zero requests.
+- **Confirmed live Metrics result (30 October 2026):** The read-only diagnostic
+  used the Engineering-supplied Metrics entity ID
+  `TKRzkOaLIwPWJtUDJjcqfN` with `/daily` for the same metric and UTC window.
+  It returned HTTP 200 with `ngwaf_requests_total_count=112963821` for the
+  26 October 2026 bucket. The response had
+  `meta.group_by="timestamp"` and `meta.next_cursor=""`. The previous local
+  validator classified this as `invalid_response`, with zero parsed pages;
+  neither metadata value was accepted. After the parser correction, the
+  diagnostic reported `success_with_data`, `pages_fetched=1`,
+  `pagination_complete=true`, and `bucket_coverage=requested_bucket_observed`.
+  It still reported `mapping_verification=unverified_cross_api_identity` and
+  `p0_validated=false`, and exited nonzero. The observed HTTP 200 does not
+  establish a public workspace-to-entity join.
+- **Affected example:** Costco (`tHYft17nv2e3hrPd0bfuZ`) has public workspace
+  identifier `gdx-costco-prd-ecomapi`; Engineering supplied Metrics entity ID
+  `TKRzkOaLIwPWJtUDJjcqfN` for internal corporation
+  `66bd2ee3ccdcb2a87f3be1d7` and site `69fe4cffb08e9be93be1b5f9`.
+  These are investigation identifiers, not values for production logic or
+  generic test fixtures.
+- **Confirmed upstream gap:** In the supplied Engineering discussion, Lukas
+  Eklund stated that `GET /ngwaf/v1/workspaces` should expose the Metrics
+  entity identifier in `id`, while affected Costco records expose a
+  workspace-name-like identifier. Cheryl Sunley identified a missing
+  integration feature for SigSci-created workspaces and assigned investigation
+  to the Security APIs team. Engineering indicated the historical workspace
+  population is broadly affected; the exact count is unknown.
+- **Dashboard symptom:** Lukas demonstrated an Observability account summary
+  link to [this workspace dashboard](https://manage.fastly.com/security/ngwaf/workspaces/TKRzkOaLIwPWJtUDJjcqfN/dashboards/000000000000000000000001).
+  It displayed an empty dashboard and “site not found” errors. This is an
+  observed symptom associated with the identifier mismatch, not a finding
+  about every affected dashboard.
+- **Engineering identity evidence:** The endpoint expects an entity ID, not a
+  CDN service ID. Engineering expects public workspace `id` to correspond to
+  that entity ID, but observed this workspace's public response carrying its
+  name instead. An internal site's entity ID was supplied separately, and an
+  entity ID from another workspace returned Metrics data. None of these facts
+  alone binds the internal site, public workspace, entity ID, and selected
+  customer. The diagnostic accepts an explicit `--entity-id` solely for a
+  narrow probe and labels it externally supplied and unverified.
+- **Internal relationship limit:** The implemented internal console call lists
+  corporation sites and may expose site ID, name, selected-customer ownership
+  fields, and `serviceID` for an Inspection Service. Its response contract is
+  undocumented; the repository has no verified site-to-public-workspace field
+  and no verified site-to-Metrics-entity field. Name resemblance, site ID, and
+  Inspection Service references cannot supply either missing join.
 - **Independent evidence:** Legacy NGWAF timeseries returned one observed
   daily bucket for the same workspace and UTC window, with
   `requests_total=113019418`; overall legacy observation completeness remains
-  unknown. Legacy success establishes neither the cross-API entity mapping nor
-  metric equivalence. The public workspace `id` remains an unverified Metrics
-  `entity_id` candidate.
-- **Engineering questions:** Which identifier represents an NGWAF workspace
-  entity: public `id`, `workspace_uid`, or a separate Metrics ID? Are
-  `metric=ngwaf_requests_total_count` and `limit=100` valid on the single-entity
-  `/day` endpoint? What is the canonical HTTP 400 validation-error schema, and
-  how can the rejected parameter and reason be identified safely?
-- **Resolution criteria:** Establish the supported workspace-to-Metrics entity
-  mapping and verify request parameters against the actual endpoint contract;
-  obtain at least one scoped successful Metrics response; validate its metric,
-  entity, daily bucket, and completeness semantics. HTTP 200 alone does not
-  prove the mapping. Keep P0 blocked and do not start P1a merely because a
-  subsequent request lacks a 400.
+  unknown. Its value differs from the Metrics result by 55,597 requests
+  (approximately 0.049%). The difference is unexplained; neither equivalence
+  nor a cross-API identity mapping follows from these two observations.
+- **Current `fa` behavior:** The P0 diagnostic uses `/daily`, supports
+  `--entity-id` for a narrow external candidate, and can save the first raw
+  body with `--save-raw-response`. It accepts the observed timestamp grouping
+  and empty terminal cursor, but still validates exact public workspace
+  ownership separately and marks the Metrics identity join unverified.
+- **Remaining questions:** What authoritative field or contract binds the
+  public workspace, internal site, and Metrics entity to the selected customer?
+  What are the metric, bucket completeness, and legacy-equivalence semantics?
+  What is the canonical HTTP 400 validation-error schema for this API?
+- **Unblock conditions:** Establish an authoritative public workspace-to-Metrics
+  entity relationship and verify its selected-customer ownership; confirm
+  working identifier resolution for legacy SigSci-created workspaces; validate
+  supported metric/entity semantics, sparse results, bucket completeness, and
+  pagination; then perform a narrow follow-up validation before P1a collection.
+  A manually supplied working entity ID is diagnostic evidence, not a general
+  mapping mechanism. HTTP 200 alone does not satisfy these conditions.
 - **Sources:** [P0 roadmap](roadmap-platform-metrics.md),
   `lib/platform_metrics_diagnostic.sh`, and the reported authenticated
-  diagnostic and legacy timeseries observations of 29 October 2026.
+  diagnostic and legacy timeseries observations of 29 October 2026, and the
+  subsequent authenticated `/daily` result supplied for this investigation.
+  **Engineering discussion (October 29–30, 2026):** [original Slack thread](https://fastly.slack.com/archives/C037JNWHR0R/p1793290562060269).
+  The thread is cited from supplied conversation excerpts; it was not
+  independently retrieved for this documentation update. Edward Muller
+  supplied the internal site's Metrics entity ID in that discussion.
+
+#### Revalidation checklist
+
+1. Read the [original Engineering discussion](https://fastly.slack.com/archives/C037JNWHR0R/p1793290562060269) and any linked ticket; record the new status and date.
+2. Confirm the public Workspaces API's documented identifier behavior and whether the legacy workspace identifiers are corrected.
+3. Verify an authoritative workspace-to-entity relationship and selected-customer ownership for one exact workspace.
+4. Run the existing narrow P0 diagnostic for one completed UTC window; keep its identity status unverified until the authoritative join is established.
+5. Compare the observation with legacy metrics without assuming equivalence; validate sparse results, bucket coverage, and pagination.
+6. Update NG-13 with the dated evidence and outcome before reconsidering P1a.
 
 ## Maintenance
 
