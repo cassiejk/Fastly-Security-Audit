@@ -66,7 +66,7 @@ claims each response supports, see [NGWAF API sources](ngwaf-api-sources.md).
 | `service ngwaf-architecture` | service ID or exact name; `--version N`, `--show-vcl`, `--json` | flag | E `/service/{id}`; one `/version` fallback if active version missing; generated VCL; per-service NGWAF product probe; C only for name fallback | `lib/ngwaf_architecture.sh`, `lib/ngwaf_architecture_vcl.pl`; raw VCL observation separate from attachment |
 | `service domains` | CDN service ID or exact name; `--version N`, `--json` | flag | C service resolution, then E `/service/{id}/version/{v}/domain` | `lib/services.sh`; configured domains |
 | `security summary` | `--json`, `--detailed` | flag | C selected services, security-product enablement, paginated workspaces; detail mode adds product configuration | `lib/security.sh`; configuration/association with completeness status |
-| `security legacy-map` | optional service name or ID; `--sigsci-corp CORP`, `--format human\|json\|csv`, `--output FILE` | format | C service discovery and VCL; internal NGWAF site inventory; E Inspection Service lookup per site `serviceID` | `lib/security.sh`; conditional in-band association |
+| `security legacy-map` | optional service name or ID; `--sigsci-corp CORP`, `--format human\|json\|csv`, `--output FILE`, `--yes` | format | C service discovery and VCL; internal NGWAF site inventory; E Inspection Service lookup per site `serviceID` | `lib/security.sh`; conditional in-band association |
 
 ### Next-Gen WAF
 
@@ -76,7 +76,7 @@ claims each response supports, see [NGWAF API sources](ngwaf-api-sources.md).
 | `ngwaf agent-diagnostic` | exact inventoried workspace ID; `--json` | JSON in both modes | C workspace inventory, then E detail and Agents GET with `customer_id` | `lib/agent_diagnostic.sh`; `agent_health` counts returned `data[]` for the two-day population, while `source_context` identifies the public API and retrieval/evidence status; raw `reported_total` and SDS-5073 status remain separate; no broader inventory completeness claim |
 | `ngwaf platform-metrics-diagnostic` | exact workspace ID; `--start YYYY-MM-DDT00:00:00Z --end YYYY-MM-DDT00:00:00Z`; `--json` | flag | E customer scope, E workspace detail with `customer_id`, then one Platform Metrics entity GET plus advertised cursor pages (maximum 10); no service or workspace inventory | `lib/platform_metrics_diagnostic.sh`; P0 candidate probe; exits nonzero while the cross-API entity ID mapping is unverified |
 | `ngwaf link` | exact customer request URL | no | W workspace identity; emits translated URL without opening browser | `lib/links.sh`; verified URL association |
-| `ngwaf workspace-services` | workspace ID/exact name or `--all`, **or** `--service-id` exact CDN ID; `--json`, `--sigsci-corp CORP`, `--with-domains` | flag | W/C for workspace or all; exact CDN detail for `--service-id`, but internal site lookup can fan out; product and optional domain APIs | `lib/ngwaf.sh`, `lib/security.sh`; configured/derived mapping |
+| `ngwaf workspace-services` | workspace ID/exact name or `--all`, **or** `--service-id` exact CDN ID; `--json`, `--sigsci-corp CORP`, `--with-domains`; `--yes` with `--service-id` only | flag | W/C for workspace or all; exact CDN detail for `--service-id`, but internal site lookup can fan out; product and optional domain APIs | `lib/ngwaf.sh`, `lib/security.sh`; configured/derived mapping |
 | `ngwaf workspace` | workspace ID/exact name | default | W plus E `/ngwaf/v1/workspaces/{id}` | `lib/ngwaf.sh`; configuration |
 | `ngwaf posture` | workspace ID/exact name | default | W plus workspace detail, paginated workspace/account rules and lists, thresholds | `lib/ngwaf.sh`; configuration summary |
 | `ngwaf rule` | workspace ID/exact name, exact rule ID | default | W plus E workspace rule GET | `lib/ngwaf.sh`; rule configuration |
@@ -137,6 +137,16 @@ token-visible rather than proven account-wide service coverage. Expensive
 inventory commands expose phases and idle heartbeats on stderr. See
 [known limitations](known-limitations.md) for request fan-out and evidence
 boundaries.
+
+`security legacy-map` warns before broad service discovery. Exact-service
+`ngwaf workspace-services --service-id` warns only when its legacy site lookup
+branch is reached; customer, exact service, and generated VCL requests may
+already have completed. Warnings describe possible fan-out, not measured
+requests or runtime. With terminal stdin and an available `/dev/tty`, answer
+`y` or `yes` to continue; any other answer or EOF cancels with exit status 1,
+and Ctrl-C exits 130. `--yes` skips the prompt. With redirected stdin or no
+available terminal, the warning appears on stderr and execution continues
+without prompting. Structured stdout remains available for pipelines.
 
 For the evidence model and historical integrations, see
 [deployment architecture](ngwaf-deployment-architecture.md) and

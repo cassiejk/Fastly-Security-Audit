@@ -28,7 +28,7 @@ collect_security_products_json() {
 }
 
 legacy_map_usage() {
-  die 'usage: fastly-audit security legacy-map [service-name-or-id] [--sigsci-corp CORP] [--format human|json|csv] [--output FILE]'
+  die 'usage: fastly-audit security legacy-map [service-name-or-id] [--sigsci-corp CORP] [--format human|json|csv] [--output FILE] [--yes]'
 }
 
 # TODO(legacy-sigsci-auth): Internal Fastly-only SigSci/Salt API; browser-session
@@ -1057,7 +1057,7 @@ legacy_map_emit_output() {
 }
 
 cmd_security_legacy_map() {
-  local format="human" output="" selector="" format_explicit=false
+  local format="human" output="" selector="" format_explicit=false yes=false
   local arg cid customer services_body services selected_services resolved service
   local corp="" corp_source="" sites_result inspection_services rows_tmp rows row vcl_result payload rendered rows_returned
   local started_at elapsed command_started_at
@@ -1092,6 +1092,7 @@ cmd_security_legacy_map() {
         format_explicit=true
         shift
         ;;
+      --yes) yes=true; shift ;;
       --*)
         die "unknown legacy-map option: $1"
         ;;
@@ -1122,6 +1123,10 @@ cmd_security_legacy_map() {
     [[ -n "$corp" ]] && corp_source="env"
   fi
   [[ -n "$corp" ]] || die 'SIGSCI_CORP is required for internal NGWAF site inventory; use --sigsci-corp <corp> for this run'
+
+  confirm_expensive_inspection \
+    'This command may inspect many CDN services, retrieve generated VCL, and resolve legacy Inspection Services individually. API requests may scale with customer inventory.' \
+    "$yes" || return $?
 
   cid="$(current_cid)"
   legacy_map_trace "selected Fastly customer ID: $cid"

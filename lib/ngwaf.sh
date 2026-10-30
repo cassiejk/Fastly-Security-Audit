@@ -258,7 +258,7 @@ workspace_services_scoped_payload_json() {
 }
 
 cmd_workspace_services_service_id() {
-  local sid="$1" corp="$2" json="$3" with_domains="$4" cid customer corp_source=cli
+  local sid="$1" corp="$2" json="$3" with_domains="$4" yes="$5" cid customer corp_source=cli
   local service_file code service inventory normalized vcl sites inspection_services='[]'
   local rows legacy product workspaces payload workspaces_requested
   if [[ -z "$corp" ]]; then
@@ -285,6 +285,9 @@ cmd_workspace_services_service_id() {
   vcl="$(legacy_map_extract_ess_host_json "$normalized")" || return 1
 
   if [[ "$(jq -r .status <<<"$vcl")" == COMPLETE && -n "$corp" && -n "${FASTLY_DSTOKEN:-}" && -n "${FASTLY_VOUCH_COOKIE:-}" ]]; then
+    confirm_expensive_inspection \
+      'Legacy site discovery may resolve every distinct eligible Inspection Service referenced by this corporation, even for one selected CDN service.' \
+      "$yes" || return $?
     sites="$(legacy_map_fetch_sites_json "$corp")" || return 1
     sites="$(legacy_map_validate_sites_customer_json "$sites" "$cid" "$(jq -r .name <<<"$customer")" "$corp" "$corp_source")" || return 1
     if [[ "$(jq -r .status <<<"$sites")" == COMPLETE || "$(jq -r .status <<<"$sites")" == PARTIAL ]]; then
@@ -355,13 +358,14 @@ cmd_workspace_services_service_id() {
 
 cmd_workspace_services() {
   local selector='' service_id='' all=false json=false corp='' cid resolved selected_id=''
-  local workspaces in_band_evidence inventory product payload with_domains=false
+  local workspaces in_band_evidence inventory product payload with_domains=false yes=false
   local -a in_band_args=(--json)
   while (( $# > 0 )); do
     case "$1" in
       --all) all=true; shift ;;
       --json) json=true; shift ;;
       --with-domains) with_domains=true; shift ;;
+      --yes) yes=true; shift ;;
       --service-id)
         (( $# >= 2 )) || die '--service-id requires an exact CDN service ID'
         [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]] || die '--service-id requires an exact CDN service ID'
@@ -376,9 +380,10 @@ cmd_workspace_services() {
   done
   if [[ -n "$service_id" ]]; then
     [[ "$all" == false && -z "$selector" ]] || die 'specify --service-id, one workspace, or --all'
-    cmd_workspace_services_service_id "$service_id" "$corp" "$json" "$with_domains"
+    cmd_workspace_services_service_id "$service_id" "$corp" "$json" "$with_domains" "$yes"
     return
   fi
+  [[ "$yes" == false ]] || die '--yes requires --service-id for workspace-services'
   if [[ "$all" == true ]]; then
     [[ -z "$selector" ]] || die 'specify one workspace or --all'
   else

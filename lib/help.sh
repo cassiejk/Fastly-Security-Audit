@@ -246,7 +246,7 @@ Service inventory:
 
 Security products:
   fastly-audit security summary [--json] [--detailed]
-  fastly-audit security legacy-map [service-name-or-id] [--sigsci-corp CORP] [--format human|json|csv] [--output FILE]
+  fastly-audit security legacy-map [service-name-or-id] [--sigsci-corp CORP] [--format human|json|csv] [--output FILE] [--yes]
 
 Next-Gen WAF:
   fastly-audit ngwaf workspaces
@@ -314,7 +314,7 @@ fastly-audit ngwaf — Next-Gen WAF inspection
     Probe one completed UTC day of Platform Metrics v2 for an exact workspace ID.
   link '<customer-request-url>'
   workspace-services <workspace>|--all [--json] [--sigsci-corp CORP] [--with-domains]
-  workspace-services --service-id <exact-CDN-service-ID> [--json] [--sigsci-corp CORP] [--with-domains]
+  workspace-services --service-id <exact-CDN-service-ID> [--json] [--sigsci-corp CORP] [--with-domains] [--yes]
     Reconcile enabled-product and legacy CDN-to-workspace mapping evidence.
   workspace <workspace>
   posture <workspace>
@@ -465,7 +465,7 @@ fastly-audit security — selected-customer security-product inspection
   summary [--json] [--detailed]
                      API Discovery, Bot Management, DDoS Protection,
                      Edge WAF service attachments, and NGWAF workspace coverage
-  legacy-map [service-name-or-id] [--sigsci-corp CORP] [--format human|json|csv] [--output FILE]
+  legacy-map [service-name-or-id] [--sigsci-corp CORP] [--format human|json|csv] [--output FILE] [--yes]
                      Read-only CDN service to in-band Inspection Service to NGWAF workspace evidence
 
 Enablement is configuration inventory; it does not prove traffic,

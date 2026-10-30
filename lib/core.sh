@@ -19,6 +19,27 @@ require() {
   command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"
 }
 
+confirm_expensive_inspection() {
+  local warning="$1" skip_prompt="${2:-false}" answer='' status
+  printf '⚠ Expensive inspection: %s\n' "$warning" >&2
+  [[ "$skip_prompt" == true ]] && return 0
+  [[ -t 0 ]] || return 0
+  if ! { : </dev/tty; } 2>/dev/null; then
+    return 0
+  fi
+  printf 'Continue? [y/N] ' >&2
+  if IFS= read -r answer </dev/tty; then
+    case "${answer,,}" in
+      y|yes) return 0 ;;
+    esac
+  else
+    status=$?
+    (( status < 128 )) || return 130
+  fi
+  printf 'Inspection cancelled.\n' >&2
+  return 1
+}
+
 # Stream structured JSON to jq through stdin. Large JSON values passed through
 # --argjson contribute to the operating system's process-argument limit.
 json_stream() {
